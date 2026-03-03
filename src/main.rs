@@ -20,15 +20,47 @@ fn main() -> Result<()> {
     let rt = tokio::runtime::Runtime::new()?;
     let _guard = rt.enter();
 
-    // TODO: spawn poller task (Task 10)
+    // Spawn poller task
+    let poll_app = app.clone();
+    let config_clone = config.clone();
+    let token_clone = token.clone();
+    rt.spawn(async move {
+        let aws_config = aws_config::defaults(aws_config::BehaviorVersion::latest())
+            .profile_name(&config_clone.aws_profile)
+            .region(aws_config::Region::new(config_clone.region.clone()))
+            .load()
+            .await;
+
+        let pipe_client =
+            poller::aws::AwsPipelineClient::new(aws_sdk_codepipeline::Client::new(&aws_config));
+
+        let (owner, repo) = config_clone
+            .github_repo
+            .split_once('/')
+            .expect("validated in config");
+        let actions_client = poller::github::GitHubActionsClient::new(
+            &token_clone,
+            owner.to_string(),
+            repo.to_string(),
+        )
+        .expect("failed to create GitHub client");
+
+        loop {
+            poller::poll_once(&poll_app, &pipe_client, &actions_client, 60).await;
+            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+        }
+    });
 
     // Init TUI and run event loop on main thread
     let terminal = ratatui::init();
-    let result = ui::run_ui(app.clone(), terminal);
+    let result = ui::run_ui(
+        app.clone(),
+        terminal,
+        &config.aws_profile,
+        &config.region,
+        &config.github_repo,
+    );
     ratatui::restore();
-
-    // Suppress unused warnings until pollers wired
-    let _ = (config, token);
 
     result
 }
