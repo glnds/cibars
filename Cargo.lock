@@ -616,6 +616,7 @@ dependencies = [
  "crossterm",
  "octocrab",
  "ratatui",
+ "serde_json",
  "tokio",
  "tracing",
  "tracing-subscriber",
