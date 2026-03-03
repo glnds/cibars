@@ -6,13 +6,30 @@ mod ui;
 
 use std::sync::{Arc, Mutex};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 
 use app::App;
 use config::Config;
 
+fn setup_tracing() -> Result<()> {
+    use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
+
+    let log_dir = dirs::home_dir().context("no home dir")?.join(".cibars");
+    std::fs::create_dir_all(&log_dir)?;
+    let log_file = std::fs::File::create(log_dir.join("cibars.log"))?;
+
+    tracing_subscriber::registry()
+        .with(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")))
+        .with(fmt::layer().with_writer(log_file).with_ansi(false))
+        .init();
+    Ok(())
+}
+
 fn main() -> Result<()> {
+    setup_tracing()?;
+
     let (config, token) = Config::load()?;
+    tracing::info!("starting cibars");
 
     let app = Arc::new(Mutex::new(App::new()));
 
@@ -62,5 +79,6 @@ fn main() -> Result<()> {
     );
     ratatui::restore();
 
+    tracing::info!("shutting down");
     result
 }

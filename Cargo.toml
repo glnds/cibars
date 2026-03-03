@@ -11,6 +11,7 @@ aws-sdk-codepipeline = "1"
 chrono = "0.4"
 clap = { version = "4", features = ["derive"] }
 crossterm = "0.28"
+dirs = "6"
 octocrab = "0.44"
 ratatui = "0.29"
 serde_json = "1.0.149"
