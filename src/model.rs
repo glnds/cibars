@@ -15,6 +15,8 @@ pub enum BarSource {
 #[derive(Debug, Clone)]
 pub struct Bar {
     pub name: String,
+    /// Retained for data-model completeness; bars are separated by source in App.
+    #[allow(dead_code)]
     pub source: BarSource,
     pub status: BuildStatus,
     /// Number of '|' chars filled in current lap

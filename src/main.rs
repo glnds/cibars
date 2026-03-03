@@ -4,6 +4,7 @@ mod model;
 mod poller;
 mod ui;
 
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
@@ -25,6 +26,41 @@ fn setup_tracing() -> Result<()> {
     Ok(())
 }
 
+async fn run_poller(
+    app: Arc<Mutex<App>>,
+    config: Config,
+    token: String,
+    mut refresh_rx: tokio::sync::watch::Receiver<()>,
+) -> Result<()> {
+    let aws_config = aws_config::defaults(aws_config::BehaviorVersion::latest())
+        .profile_name(&config.aws_profile)
+        .region(aws_config::Region::new(config.region.clone()))
+        .load()
+        .await;
+
+    let pipe_client =
+        poller::aws::AwsPipelineClient::new(aws_sdk_codepipeline::Client::new(&aws_config));
+
+    let (owner, repo) = config
+        .github_repo
+        .split_once('/')
+        .context("github-repo missing '/'; should have been validated in config")?;
+    let actions_client =
+        poller::github::GitHubActionsClient::new(&token, owner.to_string(), repo.to_string())?;
+
+    loop {
+        let tick_area_width = {
+            let a = app.lock().expect("app mutex poisoned");
+            a.terminal_width as usize
+        };
+        poller::poll_once(&app, &pipe_client, &actions_client, tick_area_width).await;
+        tokio::select! {
+            _ = tokio::time::sleep(std::time::Duration::from_secs(30)) => {}
+            _ = refresh_rx.changed() => {}
+        }
+    }
+}
+
 fn main() -> Result<()> {
     setup_tracing()?;
 
@@ -38,39 +74,20 @@ fn main() -> Result<()> {
     let _guard = rt.enter();
 
     // Watch channel for manual refresh
-    let (refresh_tx, mut refresh_rx) = tokio::sync::watch::channel(());
+    let (refresh_tx, refresh_rx) = tokio::sync::watch::channel(());
+
+    // SIGTERM handling: set flag checked by UI loop
+    let term_flag = Arc::new(AtomicBool::new(false));
+    signal_hook::flag::register(signal_hook::consts::SIGTERM, Arc::clone(&term_flag))
+        .context("failed to register SIGTERM handler")?;
 
     // Spawn poller task
     let poll_app = app.clone();
     let config_clone = config.clone();
     let token_clone = token.clone();
     rt.spawn(async move {
-        let aws_config = aws_config::defaults(aws_config::BehaviorVersion::latest())
-            .profile_name(&config_clone.aws_profile)
-            .region(aws_config::Region::new(config_clone.region.clone()))
-            .load()
-            .await;
-
-        let pipe_client =
-            poller::aws::AwsPipelineClient::new(aws_sdk_codepipeline::Client::new(&aws_config));
-
-        let (owner, repo) = config_clone
-            .github_repo
-            .split_once('/')
-            .expect("validated in config");
-        let actions_client = poller::github::GitHubActionsClient::new(
-            &token_clone,
-            owner.to_string(),
-            repo.to_string(),
-        )
-        .expect("failed to create GitHub client");
-
-        loop {
-            poller::poll_once(&poll_app, &pipe_client, &actions_client, 60).await;
-            tokio::select! {
-                _ = tokio::time::sleep(std::time::Duration::from_secs(30)) => {}
-                _ = refresh_rx.changed() => {}
-            }
+        if let Err(e) = run_poller(poll_app, config_clone, token_clone, refresh_rx).await {
+            tracing::error!("poller failed: {e:#}");
         }
     });
 
@@ -83,6 +100,7 @@ fn main() -> Result<()> {
         &config.region,
         &config.github_repo,
         refresh_tx,
+        &term_flag,
     );
     ratatui::restore();
 

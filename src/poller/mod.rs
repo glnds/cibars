@@ -3,6 +3,7 @@ pub mod github;
 
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use async_trait::async_trait;
@@ -10,6 +11,9 @@ use chrono::Utc;
 
 use crate::app::App;
 use crate::model::{Bar, BarSource, BuildStatus};
+
+/// How long to back off when GitHub rate limit is hit.
+const RATE_LIMIT_BACKOFF_SECS: u64 = 60;
 
 /// Simplified pipeline state from AWS API
 pub struct PipelineState {
@@ -40,10 +44,20 @@ pub async fn poll_once(
     actions_client: &dyn ActionsClient,
     tick_area_width: usize,
 ) {
-    let (pipe_result, actions_result) = tokio::join!(
-        poll_pipelines(pipeline_client),
-        poll_actions(actions_client),
-    );
+    // Check if GitHub is rate-limited
+    let skip_github = {
+        let a = app.lock().expect("app mutex poisoned");
+        a.rate_limited_until
+            .map(|until| Instant::now() < until)
+            .unwrap_or(false)
+    };
+
+    let pipe_result = poll_pipelines(pipeline_client).await;
+    let actions_result = if skip_github {
+        Err(anyhow::anyhow!("rate-limited, backing off"))
+    } else {
+        poll_actions(actions_client).await
+    };
 
     let mut app = app.lock().expect("app mutex poisoned");
     app.warnings.clear();
@@ -60,9 +74,24 @@ pub async fn poll_once(
     match actions_result {
         Ok(runs) => {
             update_action_bars(&mut app, runs, tick_area_width);
+            // Clear rate limit on success
+            app.rate_limited_until = None;
         }
         Err(e) => {
-            app.warnings.push(format!("GitHub: {e:#}"));
+            let msg = format!("{e:#}");
+            // Set backoff if error looks like a rate limit
+            if msg.to_lowercase().contains("rate limit") {
+                app.rate_limited_until =
+                    Some(Instant::now() + Duration::from_secs(RATE_LIMIT_BACKOFF_SECS));
+                app.warnings.push(format!(
+                    "GitHub: rate limited, backing off {RATE_LIMIT_BACKOFF_SECS}s"
+                ));
+            } else if !skip_github {
+                app.warnings.push(format!("GitHub: {msg}"));
+            } else {
+                app.warnings
+                    .push("GitHub: rate-limited, backing off".to_string());
+            }
         }
     }
 
@@ -234,5 +263,30 @@ mod tests {
         let app = app.lock().unwrap();
         assert_eq!(app.bars_pipelines.len(), 1);
         assert_eq!(app.bars_pipelines[0].fill, 2);
+    }
+
+    struct FailingPipelineClient;
+
+    #[async_trait]
+    impl PipelineClient for FailingPipelineClient {
+        async fn list_pipeline_names(&self) -> Result<Vec<String>> {
+            anyhow::bail!("connection refused")
+        }
+        async fn get_pipeline_state(&self, _name: &str) -> Result<PipelineState> {
+            anyhow::bail!("connection refused")
+        }
+    }
+
+    #[tokio::test]
+    async fn poll_error_adds_warning() {
+        let app = Arc::new(Mutex::new(App::new()));
+        let pipes = FailingPipelineClient;
+        let actions = MockActionsClient { runs: vec![] };
+        poll_once(&app, &pipes, &actions, 20).await;
+
+        let app = app.lock().unwrap();
+        assert_eq!(app.warnings.len(), 1);
+        assert!(app.warnings[0].contains("AWS"));
+        assert!(app.last_poll.is_some());
     }
 }

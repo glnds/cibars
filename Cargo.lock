@@ -618,6 +618,7 @@ dependencies = [
  "octocrab",
  "ratatui",
  "serde_json",
+ "signal-hook",
  "tokio",
  "tracing",
  "tracing-subscriber",

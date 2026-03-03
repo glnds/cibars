@@ -2,6 +2,7 @@ pub mod bar;
 pub mod header;
 pub mod statusbar;
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -40,10 +41,21 @@ pub fn run_ui(
     region: &str,
     repo: &str,
     refresh_tx: tokio::sync::watch::Sender<()>,
+    term_flag: &AtomicBool,
 ) -> Result<()> {
     loop {
+        // Check SIGTERM flag
+        if term_flag.load(Ordering::Relaxed) {
+            return Ok(());
+        }
+
         terminal.draw(|frame| {
             let size = frame.area();
+
+            // Update terminal width for poller to read
+            if let Ok(mut a) = app.lock() {
+                a.terminal_width = size.width;
+            }
 
             if size.width < MIN_WIDTH || size.height < MIN_HEIGHT {
                 let msg =
@@ -163,5 +175,37 @@ pub fn run_ui(
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::{Bar, BarSource, BuildStatus};
+
+    fn make_test_bar(name: &str, status: BuildStatus) -> Bar {
+        Bar {
+            name: name.to_string(),
+            source: BarSource::CodePipeline,
+            status,
+            fill: 0,
+            write_pos: 0,
+            gone: false,
+        }
+    }
+
+    #[test]
+    fn sorted_bars_running_first_then_alphabetical() {
+        let bars = vec![
+            make_test_bar("zebra", BuildStatus::Idle),
+            make_test_bar("alpha", BuildStatus::Running),
+            make_test_bar("beta", BuildStatus::Succeeded),
+            make_test_bar("gamma", BuildStatus::Running),
+        ];
+        let sorted = sorted_bars(&bars);
+        assert_eq!(sorted[0].name, "alpha");
+        assert_eq!(sorted[1].name, "gamma");
+        assert_eq!(sorted[2].name, "beta");
+        assert_eq!(sorted[3].name, "zebra");
     }
 }

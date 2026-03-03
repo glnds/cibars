@@ -28,17 +28,16 @@ pub fn map_pipeline_status(status: Option<&str>) -> BuildStatus {
 #[async_trait]
 impl PipelineClient for AwsPipelineClient {
     async fn list_pipeline_names(&self) -> Result<Vec<String>> {
-        let resp = self
-            .client
-            .list_pipelines()
-            .send()
-            .await
-            .context("failed to list pipelines")?;
-        let names = resp
-            .pipelines()
-            .iter()
-            .filter_map(|p| p.name().map(String::from))
-            .collect();
+        let mut names = Vec::new();
+        let mut paginator = self.client.list_pipelines().into_paginator().send();
+        while let Some(resp) = paginator.next().await {
+            let resp = resp.context("failed to list pipelines")?;
+            names.extend(
+                resp.pipelines()
+                    .iter()
+                    .filter_map(|p| p.name().map(String::from)),
+            );
+        }
         Ok(names)
     }
 

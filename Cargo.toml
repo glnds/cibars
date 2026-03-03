@@ -15,6 +15,7 @@ dirs = "6"
 octocrab = "0.44"
 ratatui = "0.29"
 serde_json = "1.0.149"
+signal-hook = "0.3"
 tokio = { version = "1", features = ["full"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
