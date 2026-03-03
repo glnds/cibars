@@ -37,6 +37,9 @@ fn main() -> Result<()> {
     let rt = tokio::runtime::Runtime::new()?;
     let _guard = rt.enter();
 
+    // Watch channel for manual refresh
+    let (refresh_tx, mut refresh_rx) = tokio::sync::watch::channel(());
+
     // Spawn poller task
     let poll_app = app.clone();
     let config_clone = config.clone();
@@ -64,7 +67,10 @@ fn main() -> Result<()> {
 
         loop {
             poller::poll_once(&poll_app, &pipe_client, &actions_client, 60).await;
-            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+            tokio::select! {
+                _ = tokio::time::sleep(std::time::Duration::from_secs(30)) => {}
+                _ = refresh_rx.changed() => {}
+            }
         }
     });
 
@@ -76,6 +82,7 @@ fn main() -> Result<()> {
         &config.aws_profile,
         &config.region,
         &config.github_repo,
+        refresh_tx,
     );
     ratatui::restore();
 

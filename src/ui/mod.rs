@@ -39,6 +39,7 @@ pub fn run_ui(
     profile: &str,
     region: &str,
     repo: &str,
+    refresh_tx: tokio::sync::watch::Sender<()>,
 ) -> Result<()> {
     loop {
         terminal.draw(|frame| {
@@ -156,7 +157,7 @@ pub fn run_ui(
                         return Ok(());
                     }
                     KeyCode::Char('r') => {
-                        // TODO: trigger immediate poll
+                        let _ = refresh_tx.send(());
                     }
                     _ => {}
                 }
