@@ -2,12 +2,15 @@
 
 A lightweight terminal UI for monitoring CI/CD pipelines, built in Rust.
 
-`cibars` runs as a daemon inside a tmux pane and gives you a live, consolidated view of your AWS CodePipelines and GitHub Actions in a single screen — no browser required.
+`cibars` runs as a daemon inside a tmux pane and gives you a live,
+consolidated view of your AWS CodePipelines and GitHub Actions in a
+single screen — no browser required.
 
 ## Features
 
-- Live polling of all AWS CodePipelines in a given account/region (every 30 seconds)
-- Live polling of all GitHub Actions runs for a given repository (every 30 seconds)
+- Live polling of AWS CodePipelines and GitHub Actions
+- Intelligent polling: slow when idle, fast when builds are running
+- Manual boost (`b`) for immediate refresh
 - htop-inspired terminal UI: compact, color-coded, always up-to-date
 - Visual indicators for running, succeeded, and failed builds
 - Auto-discovery of new pipelines and workflow runs — no restart needed
@@ -41,7 +44,9 @@ cibars --aws-profile <profile> --region <region> --github-repo <owner/repo>
 
 ## UI Layout
 
-Each monitored pipeline or workflow gets its own labeled bar. Every poll cycle appends one `|` to the bar while the build is running. The bar color encodes the build state:
+Each monitored pipeline or workflow gets its own labeled bar. Every
+poll cycle appends one `|` to the bar while the build is running.
+The bar color encodes the build state:
 
 | Color | Meaning |
 |---|---|
@@ -50,9 +55,12 @@ Each monitored pipeline or workflow gets its own labeled bar. Every poll cycle a
 | Red | Build finished: failed |
 | Grey | No active or recent build |
 
-When a running bar reaches the terminal edge before the build completes, it resets to the left and starts filling again from position 0. On completion, the entire bar (all filled `|` characters) switches instantly to green or red.
+When a running bar reaches the terminal edge before the build
+completes, it resets to the left and starts filling again from
+position 0. On completion, the entire bar switches instantly to
+green or red.
 
-```
+```text
 ┌─ cibars ── eu-west-1 / acme/backend ──────────────────────── 14:32:05 ─┐
 │                                                                           │
 │  CodePipelines                                                            │
@@ -64,11 +72,51 @@ When a running bar reaches the terminal edge before the build completes, it rese
 │  CI / test        [||||||||||||||||||||||||||||||||||||||||||||||||||||  ] │
 │  Release/publish  [||||||||||||||||||||||||||||||||                      ] │
 │                                                                           │
-│  [r] refresh  [q] quit                          last poll: 14:32:00      │
+│  [e] expand  [b] boost  [q] quit                last poll: 14:32:00      │
 └───────────────────────────────────────────────────────────────────────────┘
 ```
 
 Yellow bar = running.  Green bar = succeeded.  Red bar = failed.
+
+## Polling State Machine
+
+cibars uses an intelligent polling strategy to minimize API calls
+while staying responsive. AWS CodePipeline depends on GitHub
+Actions, so AWS is only polled when GitHub detects running builds.
+
+**Startup:** The first poll cycle always polls both GitHub and AWS
+to give immediate visibility into current status.
+
+```text
+              boost (b key)
+    ┌──────────────────────────┐
+    │                          ▼
+  Idle ──────────────────► Watching
+  30s GH, no AWS           5s GH, no AWS
+    ▲                          │
+    │                          │ GH finds running
+    │                          ▼
+  Cooldown ◄──────────── Active
+  5s GH+AWS               5s GH+AWS
+  60s timer                    │
+    │                          │ nothing running
+    └──────────────────────────┘
+```
+
+| State | GH interval | Poll AWS? | Entry |
+|---|---|---|---|
+| Idle | 30s | No | Startup (after initial poll), or cooldown expired |
+| Watching | 5s | No | User pressed `b` from Idle |
+| Active | 5s | Yes | GitHub detects running builds |
+| Cooldown | 5s | Yes | Nothing running (from Active), 60s timer |
+
+**Key transitions:**
+
+- Press `b` in Idle → Watching (fast GH-only polling)
+- GitHub finds running builds → Active (adds AWS polling)
+- All builds finish → Cooldown (keeps fast polling for 60s)
+- 60s of inactivity → back to Idle
+- Pressing `b` in Active/Cooldown is a no-op (already fast)
 
 ## Installation
 

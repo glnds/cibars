@@ -45,52 +45,13 @@ src/
 
 ## Polling State Machine
 
-`PollScheduler` in `src/poll_scheduler.rs` controls what gets polled
-and how often. AWS CodePipeline depends on GitHub Actions — AWS is
-only polled when GitHub detects running builds.
+See `README.md` for the full state machine diagram and transitions.
 
-**Startup:** The very first poll cycle always polls both GH and AWS
-(`needs_initial_poll` flag), regardless of state. This gives
-immediate visibility into current pipeline status. After the first
-`transition()` call the flag clears and normal state rules apply.
-
-```text
-              boost (b key)
-    ┌──────────────────────────┐
-    │                          ▼
-  Idle ──────────────────► Watching
-  30s GH, no AWS           5s GH, no AWS
-    ▲                          │
-    │                          │ GH finds running
-    │                          ▼
-  Cooldown ◄──────────── Active
-  5s GH+AWS               5s GH+AWS
-  60s timer                    │
-    │                          │ nothing running
-    └──────────────────────────┘
-```
-
-| State | GH interval | Poll AWS? | Entry |
-|---|---|---|---|
-| Idle | 30s | No | Startup, or cooldown expired |
-| Watching | 5s | No | User pressed `b` from Idle |
-| Active | 5s | Yes | GH detects running builds |
-| Cooldown | 5s | Yes | Nothing running (from Active) |
-
-**Transitions:**
-
-- Idle + boost → Watching
-- Idle + GH running → Active
-- Watching + GH running → Active
-- Watching + 60s timeout → Idle
-- Active + nothing running → Cooldown
-- Cooldown + running → Active
-- Cooldown + 60s → Idle
-- Boost is no-op in Active/Cooldown
-
-**Boost signal:** `Arc<AtomicBool>` shared between UI thread and
-poll orchestrator. UI sets flag on `b` press; orchestrator swaps it
-and calls `scheduler.boost()`.
+Dev details: `PollScheduler` lives in `src/poll_scheduler.rs`.
+Boost signal uses `Arc<AtomicBool>` shared between UI thread and
+poll orchestrator — UI sets flag on `b` press, orchestrator swaps
+it and calls `scheduler.boost()`. Initial poll uses
+`needs_initial_poll` flag to poll both GH+AWS on startup.
 
 ## Testing
 
