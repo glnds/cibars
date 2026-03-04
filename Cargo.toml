@@ -20,3 +20,6 @@ signal-hook = "0.3"
 tokio = { version = "1", features = ["full"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[build-dependencies]
+vergen-gitcl = { version = "1", features = ["build"] }
