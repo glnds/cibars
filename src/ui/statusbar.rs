@@ -21,7 +21,7 @@ pub struct StatusBar<'a> {
 fn filled_ticks(elapsed: Duration, state: &PollState) -> usize {
     let tick_duration_ms = match state {
         PollState::Idle => 30_000 / NUM_TICKS, // 6s per tick
-        PollState::Active | PollState::Cooldown => 5_000 / NUM_TICKS, // 1s per tick
+        PollState::Watching | PollState::Active | PollState::Cooldown => 5_000 / NUM_TICKS, // 1s per tick
     };
     let filled = elapsed.as_millis() as u64 / tick_duration_ms;
     filled.min(NUM_TICKS) as usize
@@ -37,7 +37,7 @@ impl Widget for StatusBar<'_> {
     fn render(self, area: Rect, buf: &mut Buffer) {
         let label = match self.poll_state {
             PollState::Idle => "Slow",
-            PollState::Active | PollState::Cooldown => "Fast",
+            PollState::Watching | PollState::Active | PollState::Cooldown => "Fast",
         };
 
         let filled = filled_ticks(self.elapsed_since_poll, self.poll_state);
