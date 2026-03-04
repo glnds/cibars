@@ -49,7 +49,7 @@ impl Widget for StatusBar<'_> {
             spans.push(Span::raw(format!(" | Cooldown: {}s", cd.as_secs())));
         }
 
-        spans.push(Span::raw(" | e=expand r=boost q=quit"));
+        spans.push(Span::raw(" | e=expand b=boost q=quit"));
 
         if !self.warnings.is_empty() {
             let warn_text = format!(" | {}", self.warnings.join("; "));
@@ -133,8 +133,14 @@ mod tests {
     #[test]
     fn shows_boost_not_refresh() {
         let content = render_bar(&PollState::Idle, Duration::ZERO, None);
-        assert!(content.contains("r=boost"), "got: {content}");
-        assert!(!content.contains("r=refresh"), "got: {content}");
+        assert!(content.contains("b=boost"), "got: {content}");
+        assert!(!content.contains("r=boost"), "got: {content}");
+    }
+
+    #[test]
+    fn watching_shows_fast_polling() {
+        let content = render_bar(&PollState::Watching, Duration::ZERO, None);
+        assert!(content.contains("Fast Polling:"), "got: {content}");
     }
 
     #[test]
