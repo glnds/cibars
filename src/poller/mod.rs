@@ -10,7 +10,7 @@ use async_trait::async_trait;
 use chrono::Utc;
 
 use crate::app::App;
-use crate::model::{Bar, BarSource, BuildStatus};
+use crate::model::{Bar, BarSource, BuildStatus, WorkflowGroup};
 
 /// How long to back off when GitHub rate limit is hit.
 const RATE_LIMIT_BACKOFF_SECS: u64 = 60;
@@ -21,10 +21,22 @@ pub struct PipelineState {
     pub status: BuildStatus,
 }
 
+/// A single job within a workflow run
+pub struct JobInfo {
+    pub name: String,
+    pub status: BuildStatus,
+}
+
 /// Simplified workflow run from GitHub API
 pub struct WorkflowRunInfo {
     pub workflow_name: String,
+    /// Used by GitHubActionsClient to fetch jobs; not read elsewhere.
+    #[allow(dead_code)]
+    pub run_id: u64,
+    /// Overall run status; kept for data-model completeness.
+    #[allow(dead_code)]
     pub status: BuildStatus,
+    pub jobs: Vec<JobInfo>,
 }
 
 #[async_trait]
@@ -73,7 +85,7 @@ pub async fn poll_once(
 
     match actions_result {
         Ok(runs) => {
-            update_action_bars(&mut app, runs, tick_area_width);
+            update_workflows(&mut app, runs, tick_area_width);
             // Clear rate limit on success
             app.rate_limited_until = None;
         }
@@ -132,27 +144,52 @@ fn update_pipeline_bars(app: &mut App, states: Vec<PipelineState>, tick_area_wid
     }
 }
 
-fn update_action_bars(app: &mut App, runs: Vec<WorkflowRunInfo>, tick_area_width: usize) {
+fn update_workflows(app: &mut App, runs: Vec<WorkflowRunInfo>, tick_area_width: usize) {
     let seen: HashSet<String> = runs.iter().map(|r| r.workflow_name.clone()).collect();
 
-    for bar in &mut app.bars_actions {
-        if !seen.contains(&bar.name) {
-            bar.gone = true;
+    // Mark gone groups
+    for group in &mut app.workflow_groups {
+        if !seen.contains(&group.name) {
+            group.gone = true;
         }
     }
 
     for run in runs {
-        if let Some(bar) = app
-            .bars_actions
+        let group = if let Some(g) = app
+            .workflow_groups
             .iter_mut()
-            .find(|b| b.name == run.workflow_name)
+            .find(|g| g.name == run.workflow_name)
         {
-            bar.gone = false;
-            bar.update(run.status, tick_area_width);
+            g.gone = false;
+            g
         } else {
-            let mut bar = Bar::new(run.workflow_name, BarSource::GitHubAction);
-            bar.update(run.status, tick_area_width);
-            app.bars_actions.push(bar);
+            app.workflow_groups.push(WorkflowGroup {
+                name: run.workflow_name,
+                jobs: Vec::new(),
+                gone: false,
+            });
+            app.workflow_groups.last_mut().expect("just pushed")
+        };
+
+        let seen_jobs: HashSet<String> = run.jobs.iter().map(|j| j.name.clone()).collect();
+
+        // Mark gone jobs
+        for job in &mut group.jobs {
+            if !seen_jobs.contains(&job.name) {
+                job.gone = true;
+            }
+        }
+
+        // Create/update jobs
+        for job_info in run.jobs {
+            if let Some(bar) = group.jobs.iter_mut().find(|b| b.name == job_info.name) {
+                bar.gone = false;
+                bar.update(job_info.status, tick_area_width);
+            } else {
+                let mut bar = Bar::new(job_info.name, BarSource::GitHubAction);
+                bar.update(job_info.status, tick_area_width);
+                group.jobs.push(bar);
+            }
         }
     }
 }
@@ -195,7 +232,16 @@ mod tests {
                 .iter()
                 .map(|r| WorkflowRunInfo {
                     workflow_name: r.workflow_name.clone(),
+                    run_id: r.run_id,
                     status: r.status.clone(),
+                    jobs: r
+                        .jobs
+                        .iter()
+                        .map(|j| JobInfo {
+                            name: j.name.clone(),
+                            status: j.status.clone(),
+                        })
+                        .collect(),
                 })
                 .collect())
         }
@@ -213,7 +259,12 @@ mod tests {
         let actions = MockActionsClient {
             runs: vec![WorkflowRunInfo {
                 workflow_name: "ci".to_string(),
+                run_id: 1,
                 status: BuildStatus::Succeeded,
+                jobs: vec![JobInfo {
+                    name: "build".to_string(),
+                    status: BuildStatus::Succeeded,
+                }],
             }],
         };
 
@@ -222,8 +273,10 @@ mod tests {
         let app = app.lock().unwrap();
         assert_eq!(app.bars_pipelines.len(), 1);
         assert_eq!(app.bars_pipelines[0].name, "deploy");
-        assert_eq!(app.bars_actions.len(), 1);
-        assert_eq!(app.bars_actions[0].name, "ci");
+        assert_eq!(app.workflow_groups.len(), 1);
+        assert_eq!(app.workflow_groups[0].name, "ci");
+        assert_eq!(app.workflow_groups[0].jobs.len(), 1);
+        assert_eq!(app.workflow_groups[0].jobs[0].name, "build");
         assert!(app.last_poll.is_some());
     }
 
@@ -288,5 +341,111 @@ mod tests {
         assert_eq!(app.warnings.len(), 1);
         assert!(app.warnings[0].contains("AWS"));
         assert!(app.last_poll.is_some());
+    }
+
+    #[tokio::test]
+    async fn update_workflows_creates_groups_with_jobs() {
+        let app = Arc::new(Mutex::new(App::new()));
+        let pipes = MockPipelineClient { pipelines: vec![] };
+        let actions = MockActionsClient {
+            runs: vec![WorkflowRunInfo {
+                workflow_name: "CI".to_string(),
+                run_id: 100,
+                status: BuildStatus::Running,
+                jobs: vec![
+                    JobInfo {
+                        name: "build".to_string(),
+                        status: BuildStatus::Succeeded,
+                    },
+                    JobInfo {
+                        name: "test".to_string(),
+                        status: BuildStatus::Running,
+                    },
+                ],
+            }],
+        };
+        poll_once(&app, &pipes, &actions, 20).await;
+
+        let app = app.lock().unwrap();
+        assert_eq!(app.workflow_groups.len(), 1);
+        assert_eq!(app.workflow_groups[0].name, "CI");
+        assert_eq!(app.workflow_groups[0].jobs.len(), 2);
+        assert_eq!(app.workflow_groups[0].jobs[0].name, "build");
+        assert_eq!(
+            app.workflow_groups[0].jobs[0].status,
+            BuildStatus::Succeeded
+        );
+        assert_eq!(app.workflow_groups[0].jobs[1].name, "test");
+        assert_eq!(app.workflow_groups[0].jobs[1].status, BuildStatus::Running);
+    }
+
+    #[tokio::test]
+    async fn update_workflows_marks_gone_groups() {
+        let app = Arc::new(Mutex::new(App::new()));
+        let pipes = MockPipelineClient { pipelines: vec![] };
+
+        let actions = MockActionsClient {
+            runs: vec![WorkflowRunInfo {
+                workflow_name: "CI".to_string(),
+                run_id: 100,
+                status: BuildStatus::Succeeded,
+                jobs: vec![],
+            }],
+        };
+        poll_once(&app, &pipes, &actions, 20).await;
+
+        let actions = MockActionsClient { runs: vec![] };
+        poll_once(&app, &pipes, &actions, 20).await;
+
+        let app = app.lock().unwrap();
+        assert_eq!(app.workflow_groups.len(), 1);
+        assert!(app.workflow_groups[0].gone);
+    }
+
+    #[tokio::test]
+    async fn update_workflows_marks_gone_jobs() {
+        let app = Arc::new(Mutex::new(App::new()));
+        let pipes = MockPipelineClient { pipelines: vec![] };
+
+        let actions = MockActionsClient {
+            runs: vec![WorkflowRunInfo {
+                workflow_name: "CI".to_string(),
+                run_id: 100,
+                status: BuildStatus::Running,
+                jobs: vec![
+                    JobInfo {
+                        name: "build".to_string(),
+                        status: BuildStatus::Running,
+                    },
+                    JobInfo {
+                        name: "test".to_string(),
+                        status: BuildStatus::Running,
+                    },
+                ],
+            }],
+        };
+        poll_once(&app, &pipes, &actions, 20).await;
+
+        // Second poll: "test" job disappears
+        let actions = MockActionsClient {
+            runs: vec![WorkflowRunInfo {
+                workflow_name: "CI".to_string(),
+                run_id: 101,
+                status: BuildStatus::Running,
+                jobs: vec![JobInfo {
+                    name: "build".to_string(),
+                    status: BuildStatus::Succeeded,
+                }],
+            }],
+        };
+        poll_once(&app, &pipes, &actions, 20).await;
+
+        let app = app.lock().unwrap();
+        let group = &app.workflow_groups[0];
+        assert_eq!(group.jobs.len(), 2);
+        let build = group.jobs.iter().find(|j| j.name == "build").unwrap();
+        assert!(!build.gone);
+        let test = group.jobs.iter().find(|j| j.name == "test").unwrap();
+        assert!(test.gone);
     }
 }

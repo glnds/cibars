@@ -14,11 +14,34 @@ use ratatui::widgets::Paragraph;
 use ratatui::DefaultTerminal;
 
 use crate::app::App;
-use crate::model::{Bar, BuildStatus};
+use crate::model::{Bar, BuildStatus, WorkflowGroup};
 
-use bar::{compute_name_width, BarWidget};
+use bar::{compute_name_width, BarWidget, WorkflowHeaderWidget};
 use header::Header;
 use statusbar::StatusBar;
+
+/// Compute name width across all jobs in all groups (+ 2 for indent)
+fn all_jobs_name_width(groups: &[WorkflowGroup]) -> usize {
+    let max_job = groups
+        .iter()
+        .flat_map(|g| g.jobs.iter())
+        .map(|b| b.name.len())
+        .max()
+        .unwrap_or(10);
+    // +2 for indent
+    (max_job + 2).min(bar::MAX_NAME_WIDTH)
+}
+
+/// Sort workflow groups: those with running jobs first, then alphabetical
+fn sorted_workflow_groups(groups: &[WorkflowGroup]) -> Vec<&WorkflowGroup> {
+    let mut sorted: Vec<&WorkflowGroup> = groups.iter().collect();
+    sorted.sort_by(|a, b| {
+        let a_running = a.jobs.iter().any(|j| j.status == BuildStatus::Running);
+        let b_running = b.jobs.iter().any(|j| j.status == BuildStatus::Running);
+        b_running.cmp(&a_running).then(a.name.cmp(&b.name))
+    });
+    sorted
+}
 
 const MIN_WIDTH: u16 = 80;
 const MIN_HEIGHT: u16 = 10;
@@ -67,10 +90,22 @@ pub fn run_ui(
             let app = app.lock().expect("app mutex poisoned");
 
             let pipes_sorted = sorted_bars(&app.bars_pipelines);
-            let actions_sorted = sorted_bars(&app.bars_actions);
+            let sorted_groups = sorted_workflow_groups(&app.workflow_groups);
 
             let pipe_count = pipes_sorted.len();
-            let action_count = actions_sorted.len();
+
+            // Count action rows: 1 header per group, + jobs if expanded
+            let action_rows: usize = sorted_groups
+                .iter()
+                .map(|g| {
+                    1 + if app.actions_expanded {
+                        g.jobs.len()
+                    } else {
+                        0
+                    }
+                })
+                .sum();
+            let has_actions = !sorted_groups.is_empty();
 
             // Build dynamic layout constraints
             let mut constraints = vec![Constraint::Length(1)]; // header
@@ -79,7 +114,7 @@ pub fn run_ui(
                 constraints.push(Constraint::Length(1));
             }
             constraints.push(Constraint::Length(1)); // actions title
-            for _ in 0..action_count {
+            for _ in 0..action_rows {
                 constraints.push(Constraint::Length(1));
             }
             constraints.push(Constraint::Fill(1)); // remaining space
@@ -122,7 +157,7 @@ pub fn run_ui(
             }
 
             // Actions title
-            if action_count == 0 {
+            if !has_actions {
                 frame.render_widget(
                     Paragraph::new("No recent workflow runs found")
                         .style(Style::default().fg(Color::DarkGray)),
@@ -136,11 +171,19 @@ pub fn run_ui(
             }
             idx += 1;
 
-            // Action bars
-            let action_name_width = compute_name_width(&app.bars_actions);
-            for bar in &actions_sorted {
-                frame.render_widget(BarWidget::new(bar, action_name_width), areas[idx]);
+            // Workflow groups
+            let job_name_width = all_jobs_name_width(&app.workflow_groups);
+            for group in &sorted_groups {
+                frame.render_widget(WorkflowHeaderWidget::new(group), areas[idx]);
                 idx += 1;
+
+                if app.actions_expanded {
+                    let jobs_sorted = sorted_bars(&group.jobs);
+                    for bar in &jobs_sorted {
+                        frame.render_widget(BarWidget::new(bar, job_name_width), areas[idx]);
+                        idx += 1;
+                    }
+                }
             }
 
             // Skip fill area
@@ -167,6 +210,11 @@ pub fn run_ui(
                     KeyCode::Char('q') => return Ok(()),
                     KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                         return Ok(());
+                    }
+                    KeyCode::Char('e') => {
+                        if let Ok(mut a) = app.lock() {
+                            a.actions_expanded = !a.actions_expanded;
+                        }
                     }
                     KeyCode::Char('r') => {
                         let _ = refresh_tx.send(());

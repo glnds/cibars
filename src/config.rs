@@ -1,3 +1,5 @@
+use std::process::Command;
+
 use anyhow::{ensure, Context, Result};
 use clap::Parser;
 
@@ -20,8 +22,7 @@ pub struct Config {
 impl Config {
     pub fn load() -> Result<(Self, String)> {
         let config = Self::parse();
-        let token = std::env::var("GITHUB_TOKEN")
-            .context("GITHUB_TOKEN environment variable is required")?;
+        let token = resolve_github_token()?;
         ensure!(
             config.github_repo.contains('/'),
             "github-repo must be in owner/repo format"
@@ -29,7 +30,6 @@ impl Config {
         Ok((config, token))
     }
 
-    /// For testing: parse from args without env var
     #[cfg(test)]
     pub fn try_from_args(args: &[&str]) -> Result<Self> {
         let config = Self::try_parse_from(args)?;
@@ -39,6 +39,34 @@ impl Config {
         );
         Ok(config)
     }
+}
+
+/// Resolve GitHub token: GITHUB_TOKEN env var, then `gh auth token`.
+fn resolve_github_token() -> Result<String> {
+    if let Ok(token) = std::env::var("GITHUB_TOKEN") {
+        return Ok(token);
+    }
+
+    let output = Command::new("gh")
+        .args(["auth", "token"])
+        .output()
+        .context("GITHUB_TOKEN not set and `gh` CLI not found")?;
+
+    if !output.status.success() {
+        anyhow::bail!("GITHUB_TOKEN not set and `gh auth token` failed (not logged in?)");
+    }
+
+    let token = String::from_utf8(output.stdout)
+        .context("invalid UTF-8 from gh auth token")?
+        .trim()
+        .to_string();
+
+    ensure!(
+        !token.is_empty(),
+        "GITHUB_TOKEN not set and `gh auth token` returned empty"
+    );
+
+    Ok(token)
 }
 
 #[cfg(test)]

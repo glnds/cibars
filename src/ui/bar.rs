@@ -4,7 +4,7 @@ use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Widget;
 
-use crate::model::{Bar, BuildStatus};
+use crate::model::{Bar, BuildStatus, WorkflowGroup};
 
 /// Max chars for the name column
 pub const MAX_NAME_WIDTH: usize = 30;
@@ -74,6 +74,50 @@ pub fn compute_name_width(bars: &[Bar]) -> usize {
         .max()
         .unwrap_or(10)
         .min(MAX_NAME_WIDTH)
+}
+
+pub struct WorkflowHeaderWidget<'a> {
+    group: &'a WorkflowGroup,
+}
+
+impl<'a> WorkflowHeaderWidget<'a> {
+    pub fn new(group: &'a WorkflowGroup) -> Self {
+        Self { group }
+    }
+
+    fn dot_color(status: &BuildStatus) -> Color {
+        match status {
+            BuildStatus::Succeeded => Color::Green,
+            BuildStatus::Running => Color::Yellow,
+            BuildStatus::Failed => Color::Red,
+            BuildStatus::Idle => Color::DarkGray,
+        }
+    }
+}
+
+impl Widget for WorkflowHeaderWidget<'_> {
+    fn render(self, area: Rect, buf: &mut Buffer) {
+        if area.width < 10 || area.height < 1 {
+            return;
+        }
+
+        let name = if self.group.gone {
+            format!(" {}* ", self.group.name)
+        } else {
+            format!(" {} ", self.group.name)
+        };
+
+        let mut spans = vec![Span::styled(name, Style::default().fg(Color::White))];
+
+        for job in &self.group.jobs {
+            spans.push(Span::styled(
+                "\u{25CF}",
+                Style::default().fg(Self::dot_color(&job.status)),
+            ));
+        }
+
+        Line::from(spans).render(area, buf);
+    }
 }
 
 #[cfg(test)]
@@ -186,5 +230,92 @@ mod tests {
             make_bar("long-name", BuildStatus::Idle, 0),
         ];
         assert_eq!(compute_name_width(&bars), 9);
+    }
+
+    fn make_group(name: &str, job_statuses: &[BuildStatus]) -> WorkflowGroup {
+        WorkflowGroup {
+            name: name.to_string(),
+            jobs: job_statuses
+                .iter()
+                .enumerate()
+                .map(|(i, s)| {
+                    let mut bar = Bar::new(format!("job-{i}"), BarSource::GitHubAction);
+                    bar.status = s.clone();
+                    bar
+                })
+                .collect(),
+            gone: false,
+        }
+    }
+
+    #[test]
+    fn workflow_header_renders_name_and_dots() {
+        let group = make_group("CI", &[BuildStatus::Succeeded, BuildStatus::Running]);
+        let widget = WorkflowHeaderWidget::new(&group);
+        let area = Rect::new(0, 0, 40, 1);
+        let mut buf = Buffer::empty(area);
+        widget.render(area, &mut buf);
+
+        let content: String = buf
+            .content()
+            .iter()
+            .map(|c| c.symbol().chars().next().unwrap_or(' '))
+            .collect();
+        assert!(content.contains("CI"));
+
+        // Find the dot positions and check colors
+        let dots: Vec<_> = buf
+            .content()
+            .iter()
+            .filter(|c| c.symbol() == "\u{25CF}")
+            .collect();
+        assert_eq!(dots.len(), 2);
+        assert_eq!(dots[0].fg, Color::Green);
+        assert_eq!(dots[1].fg, Color::Yellow);
+    }
+
+    #[test]
+    fn workflow_header_gone_shows_asterisk() {
+        let mut group = make_group("CI", &[]);
+        group.gone = true;
+        let widget = WorkflowHeaderWidget::new(&group);
+        let area = Rect::new(0, 0, 40, 1);
+        let mut buf = Buffer::empty(area);
+        widget.render(area, &mut buf);
+
+        let content: String = buf
+            .content()
+            .iter()
+            .map(|c| c.symbol().chars().next().unwrap_or(' '))
+            .collect();
+        assert!(content.contains('*'));
+    }
+
+    #[test]
+    fn workflow_header_dot_colors() {
+        let group = make_group(
+            "Deploy",
+            &[
+                BuildStatus::Failed,
+                BuildStatus::Idle,
+                BuildStatus::Succeeded,
+                BuildStatus::Running,
+            ],
+        );
+        let widget = WorkflowHeaderWidget::new(&group);
+        let area = Rect::new(0, 0, 40, 1);
+        let mut buf = Buffer::empty(area);
+        widget.render(area, &mut buf);
+
+        let dots: Vec<_> = buf
+            .content()
+            .iter()
+            .filter(|c| c.symbol() == "\u{25CF}")
+            .collect();
+        assert_eq!(dots.len(), 4);
+        assert_eq!(dots[0].fg, Color::Red);
+        assert_eq!(dots[1].fg, Color::DarkGray);
+        assert_eq!(dots[2].fg, Color::Green);
+        assert_eq!(dots[3].fg, Color::Yellow);
     }
 }

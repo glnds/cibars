@@ -60,6 +60,13 @@ impl Bar {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct WorkflowGroup {
+    pub name: String,
+    pub jobs: Vec<Bar>,
+    pub gone: bool,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -133,6 +140,44 @@ mod tests {
         assert_eq!(bar.status, BuildStatus::Failed);
         assert_eq!(bar.fill, 1);
         assert_eq!(bar.write_pos, 1);
+    }
+
+    #[test]
+    fn workflow_group_new() {
+        let group = WorkflowGroup {
+            name: "CI".to_string(),
+            jobs: vec![],
+            gone: false,
+        };
+        assert_eq!(group.name, "CI");
+        assert!(group.jobs.is_empty());
+        assert!(!group.gone);
+    }
+
+    #[test]
+    fn workflow_group_with_jobs() {
+        let group = WorkflowGroup {
+            name: "CI".to_string(),
+            jobs: vec![
+                Bar::new("build".to_string(), BarSource::GitHubAction),
+                Bar::new("test".to_string(), BarSource::GitHubAction),
+            ],
+            gone: false,
+        };
+        assert_eq!(group.jobs.len(), 2);
+        assert_eq!(group.jobs[0].name, "build");
+        assert_eq!(group.jobs[1].name, "test");
+    }
+
+    #[test]
+    fn workflow_group_gone_marking() {
+        let mut group = WorkflowGroup {
+            name: "CI".to_string(),
+            jobs: vec![],
+            gone: false,
+        };
+        group.gone = true;
+        assert!(group.gone);
     }
 
     #[test]

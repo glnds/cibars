@@ -62,6 +62,10 @@ async fn run_poller(
 }
 
 fn main() -> Result<()> {
+    rustls::crypto::aws_lc_rs::default_provider()
+        .install_default()
+        .expect("failed to install rustls crypto provider");
+
     setup_tracing()?;
 
     let (config, token) = Config::load()?;

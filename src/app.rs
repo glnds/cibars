@@ -2,11 +2,12 @@ use std::time::Instant;
 
 use chrono::{DateTime, Utc};
 
-use crate::model::Bar;
+use crate::model::{Bar, WorkflowGroup};
 
 pub struct App {
     pub bars_pipelines: Vec<Bar>,
-    pub bars_actions: Vec<Bar>,
+    pub workflow_groups: Vec<WorkflowGroup>,
+    pub actions_expanded: bool,
     pub last_poll: Option<DateTime<Utc>>,
     pub warnings: Vec<String>,
     /// Terminal width (updated each UI render), used by poller for tick_area_width.
@@ -19,7 +20,8 @@ impl App {
     pub fn new() -> Self {
         Self {
             bars_pipelines: Vec::new(),
-            bars_actions: Vec::new(),
+            workflow_groups: Vec::new(),
+            actions_expanded: true,
             last_poll: None,
             warnings: Vec::new(),
             terminal_width: 80,

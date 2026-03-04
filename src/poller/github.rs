@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 
-use super::{ActionsClient, WorkflowRunInfo};
+use super::{ActionsClient, JobInfo, WorkflowRunInfo};
 use crate::model::BuildStatus;
 
 pub struct GitHubActionsClient {
@@ -50,24 +50,64 @@ impl ActionsClient for GitHubActionsClient {
             .await
             .context("failed to list workflow runs")?;
 
-        let mut latest_per_workflow = std::collections::HashMap::new();
+        // Deduplicate to latest run per workflow
+        let mut latest_per_workflow: std::collections::HashMap<String, (u64, BuildStatus)> =
+            std::collections::HashMap::new();
 
         if let Some(runs) = resp["workflow_runs"].as_array() {
             for run in runs {
                 let name = run["name"].as_str().unwrap_or("unknown").to_string();
+                let run_id = run["id"].as_u64().unwrap_or(0);
                 let status = run["status"].as_str().unwrap_or("unknown");
                 let conclusion = run["conclusion"].as_str();
 
                 latest_per_workflow
-                    .entry(name.clone())
-                    .or_insert_with(|| WorkflowRunInfo {
-                        workflow_name: name,
-                        status: map_run_status(status, conclusion),
-                    });
+                    .entry(name)
+                    .or_insert((run_id, map_run_status(status, conclusion)));
             }
         }
 
-        Ok(latest_per_workflow.into_values().collect())
+        // Fetch jobs for each workflow's latest run
+        let mut results = Vec::new();
+        for (workflow_name, (run_id, status)) in latest_per_workflow {
+            let jobs = self.fetch_jobs(run_id).await.unwrap_or_default();
+            results.push(WorkflowRunInfo {
+                workflow_name,
+                run_id,
+                status,
+                jobs,
+            });
+        }
+
+        Ok(results)
+    }
+}
+
+impl GitHubActionsClient {
+    async fn fetch_jobs(&self, run_id: u64) -> Result<Vec<JobInfo>> {
+        let route = format!(
+            "/repos/{}/{}/actions/runs/{run_id}/jobs",
+            self.owner, self.repo,
+        );
+        let resp: serde_json::Value = self
+            .octocrab
+            .get(&route, None::<&()>)
+            .await
+            .context("failed to list jobs")?;
+
+        let mut jobs = Vec::new();
+        if let Some(job_array) = resp["jobs"].as_array() {
+            for job in job_array {
+                let name = job["name"].as_str().unwrap_or("unknown").to_string();
+                let status = job["status"].as_str().unwrap_or("unknown");
+                let conclusion = job["conclusion"].as_str();
+                jobs.push(JobInfo {
+                    name,
+                    status: map_run_status(status, conclusion),
+                });
+            }
+        }
+        Ok(jobs)
     }
 }
 
