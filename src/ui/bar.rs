@@ -76,13 +76,14 @@ pub fn compute_name_width(bars: &[Bar]) -> usize {
         .min(MAX_NAME_WIDTH)
 }
 
-pub struct WorkflowHeaderWidget<'a> {
-    group: &'a WorkflowGroup,
+/// "GitHub Actions" title with inline status dots for all jobs across groups.
+pub struct ActionsTitle<'a> {
+    groups: &'a [&'a WorkflowGroup],
 }
 
-impl<'a> WorkflowHeaderWidget<'a> {
-    pub fn new(group: &'a WorkflowGroup) -> Self {
-        Self { group }
+impl<'a> ActionsTitle<'a> {
+    pub fn new(groups: &'a [&'a WorkflowGroup]) -> Self {
+        Self { groups }
     }
 
     fn dot_color(status: &BuildStatus) -> Color {
@@ -95,25 +96,24 @@ impl<'a> WorkflowHeaderWidget<'a> {
     }
 }
 
-impl Widget for WorkflowHeaderWidget<'_> {
+impl Widget for ActionsTitle<'_> {
     fn render(self, area: Rect, buf: &mut Buffer) {
         if area.width < 10 || area.height < 1 {
             return;
         }
 
-        let name = if self.group.gone {
-            format!(" {}* ", self.group.name)
-        } else {
-            format!(" {} ", self.group.name)
-        };
+        let mut spans = vec![Span::styled(
+            "GitHub Actions ",
+            Style::default().fg(Color::Cyan),
+        )];
 
-        let mut spans = vec![Span::styled(name, Style::default().fg(Color::White))];
-
-        for job in &self.group.jobs {
-            spans.push(Span::styled(
-                "\u{25CF} ",
-                Style::default().fg(Self::dot_color(&job.status)),
-            ));
+        for group in self.groups {
+            for job in group.jobs.iter().filter(|j| !j.gone) {
+                spans.push(Span::styled(
+                    "\u{25CF} ",
+                    Style::default().fg(Self::dot_color(&job.status)),
+                ));
+            }
         }
 
         Line::from(spans).render(area, buf);
@@ -249,9 +249,10 @@ mod tests {
     }
 
     #[test]
-    fn workflow_header_renders_name_and_dots() {
+    fn actions_title_renders_label_and_dots() {
         let group = make_group("CI", &[BuildStatus::Succeeded, BuildStatus::Running]);
-        let widget = WorkflowHeaderWidget::new(&group);
+        let groups = vec![&group];
+        let widget = ActionsTitle::new(&groups);
         let area = Rect::new(0, 0, 40, 1);
         let mut buf = Buffer::empty(area);
         widget.render(area, &mut buf);
@@ -261,9 +262,8 @@ mod tests {
             .iter()
             .map(|c| c.symbol().chars().next().unwrap_or(' '))
             .collect();
-        assert!(content.contains("CI"));
+        assert!(content.contains("GitHub Actions"));
 
-        // Find the dot positions and check colors
         let dots: Vec<_> = buf
             .content()
             .iter()
@@ -275,24 +275,7 @@ mod tests {
     }
 
     #[test]
-    fn workflow_header_gone_shows_asterisk() {
-        let mut group = make_group("CI", &[]);
-        group.gone = true;
-        let widget = WorkflowHeaderWidget::new(&group);
-        let area = Rect::new(0, 0, 40, 1);
-        let mut buf = Buffer::empty(area);
-        widget.render(area, &mut buf);
-
-        let content: String = buf
-            .content()
-            .iter()
-            .map(|c| c.symbol().chars().next().unwrap_or(' '))
-            .collect();
-        assert!(content.contains('*'));
-    }
-
-    #[test]
-    fn workflow_header_dot_colors() {
+    fn actions_title_dot_colors() {
         let group = make_group(
             "Deploy",
             &[
@@ -302,7 +285,8 @@ mod tests {
                 BuildStatus::Running,
             ],
         );
-        let widget = WorkflowHeaderWidget::new(&group);
+        let groups = vec![&group];
+        let widget = ActionsTitle::new(&groups);
         let area = Rect::new(0, 0, 40, 1);
         let mut buf = Buffer::empty(area);
         widget.render(area, &mut buf);
@@ -317,5 +301,23 @@ mod tests {
         assert_eq!(dots[1].fg, Color::DarkGray);
         assert_eq!(dots[2].fg, Color::Green);
         assert_eq!(dots[3].fg, Color::Yellow);
+    }
+
+    #[test]
+    fn actions_title_multiple_groups() {
+        let g1 = make_group("CI", &[BuildStatus::Succeeded]);
+        let g2 = make_group("Deploy", &[BuildStatus::Failed, BuildStatus::Running]);
+        let groups = vec![&g1, &g2];
+        let widget = ActionsTitle::new(&groups);
+        let area = Rect::new(0, 0, 40, 1);
+        let mut buf = Buffer::empty(area);
+        widget.render(area, &mut buf);
+
+        let dots: Vec<_> = buf
+            .content()
+            .iter()
+            .filter(|c| c.symbol() == "\u{25CF}")
+            .collect();
+        assert_eq!(dots.len(), 3);
     }
 }

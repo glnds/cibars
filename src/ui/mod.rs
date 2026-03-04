@@ -16,15 +16,16 @@ use ratatui::DefaultTerminal;
 use crate::app::App;
 use crate::model::{Bar, BuildStatus, WorkflowGroup};
 
-use bar::{compute_name_width, BarWidget, WorkflowHeaderWidget};
+use bar::{compute_name_width, ActionsTitle, BarWidget};
 use header::Header;
 use statusbar::StatusBar;
 
-/// Compute name width across all jobs in all groups (+ 2 for indent)
+/// Compute name width across all non-gone jobs in all groups (+ 2 for indent)
 fn all_jobs_name_width(groups: &[WorkflowGroup]) -> usize {
     let max_job = groups
         .iter()
         .flat_map(|g| g.jobs.iter())
+        .filter(|b| !b.gone)
         .map(|b| b.name.len())
         .max()
         .unwrap_or(10);
@@ -90,31 +91,33 @@ pub fn run_ui(
             let app = app.lock().expect("app mutex poisoned");
 
             let pipes_sorted = sorted_bars(&app.bars_pipelines);
-            let sorted_groups = sorted_workflow_groups(&app.workflow_groups);
+            let sorted_groups: Vec<&WorkflowGroup> = sorted_workflow_groups(&app.workflow_groups)
+                .into_iter()
+                .filter(|g| !g.gone)
+                .collect();
 
             let pipe_count = pipes_sorted.len();
-
-            // Count action rows: 1 header per group, + jobs if expanded
-            let action_rows: usize = sorted_groups
-                .iter()
-                .map(|g| {
-                    1 + if app.actions_expanded {
-                        g.jobs.len()
-                    } else {
-                        0
-                    }
-                })
-                .sum();
             let has_actions = !sorted_groups.is_empty();
+
+            // Count action rows: just non-gone jobs (no per-workflow headers)
+            let action_rows: usize = if app.actions_expanded {
+                sorted_groups
+                    .iter()
+                    .flat_map(|g| g.jobs.iter())
+                    .filter(|j| !j.gone)
+                    .count()
+            } else {
+                0
+            };
 
             // Build dynamic layout constraints
             let mut constraints = vec![Constraint::Length(1)]; // header
-            constraints.push(Constraint::Length(1)); // pipelines title
-            for _ in 0..pipe_count {
-                constraints.push(Constraint::Length(1));
-            }
             constraints.push(Constraint::Length(1)); // actions title
             for _ in 0..action_rows {
+                constraints.push(Constraint::Length(1));
+            }
+            constraints.push(Constraint::Length(1)); // pipelines title
+            for _ in 0..pipe_count {
                 constraints.push(Constraint::Length(1));
             }
             constraints.push(Constraint::Fill(1)); // remaining space
@@ -133,6 +136,32 @@ pub fn run_ui(
                 areas[idx],
             );
             idx += 1;
+
+            // Actions title (with inline dots)
+            if !has_actions {
+                frame.render_widget(
+                    Paragraph::new("No recent workflow runs found")
+                        .style(Style::default().fg(Color::DarkGray)),
+                    areas[idx],
+                );
+            } else {
+                frame.render_widget(
+                    ActionsTitle::new(&sorted_groups),
+                    areas[idx],
+                );
+            }
+            idx += 1;
+
+            // Action job bars (when expanded, skip gone)
+            if app.actions_expanded {
+                let job_name_width = all_jobs_name_width(&app.workflow_groups);
+                for group in &sorted_groups {
+                    for bar in group.jobs.iter().filter(|j| !j.gone) {
+                        frame.render_widget(BarWidget::new(bar, job_name_width), areas[idx]);
+                        idx += 1;
+                    }
+                }
+            }
 
             // Pipelines title
             if pipe_count == 0 {
@@ -154,36 +183,6 @@ pub fn run_ui(
             for bar in &pipes_sorted {
                 frame.render_widget(BarWidget::new(bar, pipe_name_width), areas[idx]);
                 idx += 1;
-            }
-
-            // Actions title
-            if !has_actions {
-                frame.render_widget(
-                    Paragraph::new("No recent workflow runs found")
-                        .style(Style::default().fg(Color::DarkGray)),
-                    areas[idx],
-                );
-            } else {
-                frame.render_widget(
-                    Paragraph::new("GitHub Actions").style(Style::default().fg(Color::Cyan)),
-                    areas[idx],
-                );
-            }
-            idx += 1;
-
-            // Workflow groups
-            let job_name_width = all_jobs_name_width(&app.workflow_groups);
-            for group in &sorted_groups {
-                frame.render_widget(WorkflowHeaderWidget::new(group), areas[idx]);
-                idx += 1;
-
-                if app.actions_expanded {
-                    let jobs_sorted = sorted_bars(&group.jobs);
-                    for bar in &jobs_sorted {
-                        frame.render_widget(BarWidget::new(bar, job_name_width), areas[idx]);
-                        idx += 1;
-                    }
-                }
             }
 
             // Skip fill area
