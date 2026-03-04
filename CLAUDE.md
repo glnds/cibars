@@ -49,6 +49,11 @@ src/
 and how often. AWS CodePipeline depends on GitHub Actions — AWS is
 only polled when GitHub detects running builds.
 
+**Startup:** The very first poll cycle always polls both GH and AWS
+(`needs_initial_poll` flag), regardless of state. This gives
+immediate visibility into current pipeline status. After the first
+`transition()` call the flag clears and normal state rules apply.
+
 ```text
               boost (b key)
     ┌──────────────────────────┐
