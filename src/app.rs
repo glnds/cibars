@@ -2,7 +2,8 @@ use std::time::Instant;
 
 use chrono::{DateTime, Utc};
 
-use crate::model::{Bar, WorkflowGroup};
+use crate::model::{Bar, BuildStatus, WorkflowGroup};
+use crate::poll_scheduler::PollState;
 
 pub struct App {
     pub bars_pipelines: Vec<Bar>,
@@ -18,6 +19,12 @@ pub struct App {
     pub loading_pipelines: bool,
     /// True until first actions poll completes.
     pub loading_actions: bool,
+    /// Current poll state machine state, for UI display.
+    pub poll_state: PollState,
+    /// Set by orchestrator at start of each poll cycle.
+    pub last_poll_started: Option<Instant>,
+    /// Cooldown remaining, set by orchestrator for UI display.
+    pub cooldown_remaining: Option<std::time::Duration>,
 }
 
 impl App {
@@ -32,7 +39,20 @@ impl App {
             rate_limited_until: None,
             loading_pipelines: true,
             loading_actions: true,
+            poll_state: PollState::Idle,
+            last_poll_started: None,
+            cooldown_remaining: None,
         }
+    }
+
+    pub fn has_any_running(&self) -> bool {
+        self.bars_pipelines
+            .iter()
+            .any(|b| b.status == BuildStatus::Running)
+            || self.workflow_groups.iter().any(|g| {
+                g.summary_status == BuildStatus::Running
+                    || g.jobs.iter().any(|j| j.status == BuildStatus::Running)
+            })
     }
 }
 
@@ -45,11 +65,68 @@ impl Default for App {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::{Bar, BarSource, WorkflowGroup};
 
     #[test]
     fn app_starts_with_loading_flags() {
         let app = App::new();
         assert!(app.loading_pipelines);
         assert!(app.loading_actions);
+    }
+
+    #[test]
+    fn has_any_running_empty() {
+        let app = App::new();
+        assert!(!app.has_any_running());
+    }
+
+    #[test]
+    fn has_any_running_pipeline_running() {
+        let mut app = App::new();
+        let mut bar = Bar::new("deploy".into(), BarSource::CodePipeline);
+        bar.set_status(BuildStatus::Running);
+        app.bars_pipelines.push(bar);
+        assert!(app.has_any_running());
+    }
+
+    #[test]
+    fn has_any_running_gh_summary_running() {
+        let mut app = App::new();
+        app.workflow_groups.push(WorkflowGroup {
+            name: "CI".into(),
+            jobs: vec![],
+            gone: false,
+            summary_status: BuildStatus::Running,
+        });
+        assert!(app.has_any_running());
+    }
+
+    #[test]
+    fn has_any_running_gh_job_running() {
+        let mut app = App::new();
+        let mut job = Bar::new("build".into(), BarSource::GitHubAction);
+        job.set_status(BuildStatus::Running);
+        app.workflow_groups.push(WorkflowGroup {
+            name: "CI".into(),
+            jobs: vec![job],
+            gone: false,
+            summary_status: BuildStatus::Succeeded,
+        });
+        assert!(app.has_any_running());
+    }
+
+    #[test]
+    fn has_any_running_all_succeeded() {
+        let mut app = App::new();
+        let mut bar = Bar::new("deploy".into(), BarSource::CodePipeline);
+        bar.set_status(BuildStatus::Succeeded);
+        app.bars_pipelines.push(bar);
+        app.workflow_groups.push(WorkflowGroup {
+            name: "CI".into(),
+            jobs: vec![],
+            gone: false,
+            summary_status: BuildStatus::Succeeded,
+        });
+        assert!(!app.has_any_running());
     }
 }

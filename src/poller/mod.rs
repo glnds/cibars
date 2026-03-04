@@ -79,7 +79,7 @@ pub async fn poll_pipelines_tick(
             let mut a = app.lock().expect("app mutex poisoned");
             if msg.contains("ExpiredToken") || msg.contains("UnauthorizedException") {
                 a.warnings.push(format!(
-                    "AWS: SSO session expired \u{2014} run `aws sso login --profile {profile}` then press R"
+                    "AWS: SSO session expired \u{2014} run `aws sso login --profile {profile}` then press r"
                 ));
             } else {
                 a.warnings.push(format!("AWS: {msg}"));

@@ -1,18 +1,19 @@
 mod app;
 mod config;
 mod model;
+mod poll_scheduler;
 mod poller;
 mod ui;
 
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 use anyhow::{Context, Result};
 
 use app::App;
 use config::Config;
-
-const POLL_INTERVAL_SECS: u64 = 5;
+use poll_scheduler::PollScheduler;
 
 fn setup_tracing() -> Result<()> {
     use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
@@ -28,11 +29,7 @@ fn setup_tracing() -> Result<()> {
     Ok(())
 }
 
-async fn run_aws_poller(
-    app: Arc<Mutex<App>>,
-    config: Config,
-    mut refresh_rx: tokio::sync::watch::Receiver<()>,
-) -> Result<()> {
+async fn init_aws_client(config: &Config) -> poller::aws::AwsPipelineClient {
     let aws_config = aws_config::defaults(aws_config::BehaviorVersion::latest())
         .profile_name(&config.aws_profile)
         .region(aws_config::Region::new(config.region.clone()))
@@ -44,36 +41,71 @@ async fn run_aws_poller(
         .load()
         .await;
 
-    let client =
-        poller::aws::AwsPipelineClient::new(aws_sdk_codepipeline::Client::new(&aws_config));
-
-    loop {
-        poller::poll_pipelines_tick(&app, &client, &config.aws_profile).await;
-        tokio::select! {
-            _ = tokio::time::sleep(std::time::Duration::from_secs(POLL_INTERVAL_SECS)) => {}
-            _ = refresh_rx.changed() => {}
-        }
-    }
+    poller::aws::AwsPipelineClient::new(aws_sdk_codepipeline::Client::new(&aws_config))
 }
 
-async fn run_github_poller(
+async fn run_poll_orchestrator(
     app: Arc<Mutex<App>>,
     config: Config,
     token: String,
-    mut refresh_rx: tokio::sync::watch::Receiver<()>,
+    mut boost_rx: tokio::sync::watch::Receiver<()>,
 ) -> Result<()> {
     let (owner, repo) = config
         .github_repo
         .split_once('/')
         .context("github-repo missing '/'; should have been validated in config")?;
-    let client =
+    let gh_client =
         poller::github::GitHubActionsClient::new(&token, owner.to_string(), repo.to_string())?;
 
+    let mut aws_client: Option<poller::aws::AwsPipelineClient> = None;
+    let mut scheduler = PollScheduler::new();
+
     loop {
-        poller::poll_actions_tick(&app, &client).await;
+        let is_boost = boost_rx.has_changed().unwrap_or(false);
+        let need_aws = scheduler.should_poll_aws() || is_boost;
+
+        // Lazy-init AWS on first need
+        if need_aws && aws_client.is_none() {
+            tracing::info!("initializing AWS client (first active poll)");
+            aws_client = Some(init_aws_client(&config).await);
+        }
+
+        // Record poll start for UI tick visualization
+        {
+            let mut a = app.lock().expect("app mutex poisoned");
+            a.last_poll_started = Some(Instant::now());
+        }
+
+        // Poll: parallel when both, GH-only otherwise
+        if let Some(aws) = aws_client.as_ref().filter(|_| need_aws) {
+            tokio::join!(
+                poller::poll_actions_tick(&app, &gh_client),
+                poller::poll_pipelines_tick(&app, aws, &config.aws_profile),
+            );
+        } else {
+            poller::poll_actions_tick(&app, &gh_client).await;
+        }
+
+        // Transition + update App display state
+        let any_running = app.lock().expect("app mutex poisoned").has_any_running();
+        scheduler.transition(any_running);
+        {
+            let mut a = app.lock().expect("app mutex poisoned");
+            a.poll_state = scheduler.state();
+            a.cooldown_remaining = scheduler.cooldown_remaining();
+        }
+
+        tracing::debug!(
+            state = ?scheduler.state(),
+            any_running,
+            interval = ?scheduler.interval(),
+            "poll cycle complete"
+        );
+
+        // Sleep, interruptible by boost key
         tokio::select! {
-            _ = tokio::time::sleep(std::time::Duration::from_secs(POLL_INTERVAL_SECS)) => {}
-            _ = refresh_rx.changed() => {}
+            _ = tokio::time::sleep(scheduler.interval()) => {}
+            _ = boost_rx.changed() => {}
         }
     }
 }
@@ -94,31 +126,20 @@ fn main() -> Result<()> {
     let rt = tokio::runtime::Runtime::new()?;
     let _guard = rt.enter();
 
-    // Watch channel for manual refresh
-    let (refresh_tx, refresh_rx) = tokio::sync::watch::channel(());
+    // Watch channel for boost (manual full poll cycle)
+    let (boost_tx, boost_rx) = tokio::sync::watch::channel(());
 
     // SIGTERM handling: set flag checked by UI loop
     let term_flag = Arc::new(AtomicBool::new(false));
     signal_hook::flag::register(signal_hook::consts::SIGTERM, Arc::clone(&term_flag))
         .context("failed to register SIGTERM handler")?;
 
-    // Spawn AWS poller (loads AWS config, then polls pipelines)
-    let aws_app = app.clone();
-    let aws_config = config.clone();
-    let aws_refresh_rx = refresh_rx;
+    // Spawn single poll orchestrator
+    let poll_app = app.clone();
+    let poll_config = config.clone();
     rt.spawn(async move {
-        if let Err(e) = run_aws_poller(aws_app, aws_config, aws_refresh_rx).await {
-            tracing::error!("AWS poller failed: {e:#}");
-        }
-    });
-
-    // Spawn GitHub poller (starts immediately, no slow config loading)
-    let gh_app = app.clone();
-    let gh_config = config.clone();
-    let gh_refresh_rx = refresh_tx.subscribe();
-    rt.spawn(async move {
-        if let Err(e) = run_github_poller(gh_app, gh_config, token, gh_refresh_rx).await {
-            tracing::error!("GitHub poller failed: {e:#}");
+        if let Err(e) = run_poll_orchestrator(poll_app, poll_config, token, boost_rx).await {
+            tracing::error!("poll orchestrator failed: {e:#}");
         }
     });
 
@@ -130,7 +151,7 @@ fn main() -> Result<()> {
         &config.aws_profile,
         &config.region,
         &config.github_repo,
-        refresh_tx,
+        boost_tx,
         &term_flag,
     );
     ratatui::restore();

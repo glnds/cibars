@@ -193,9 +193,15 @@ pub fn run_ui(
             idx += 1;
 
             // Status bar
+            let elapsed = app
+                .last_poll_started
+                .map(|t| t.elapsed())
+                .unwrap_or_default();
             frame.render_widget(
                 StatusBar {
-                    last_poll: &app.last_poll,
+                    poll_state: &app.poll_state,
+                    elapsed_since_poll: elapsed,
+                    cooldown_remaining: app.cooldown_remaining,
                     warnings: &app.warnings,
                 },
                 areas[idx],
