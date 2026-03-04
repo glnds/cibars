@@ -1,4 +1,4 @@
-.PHONY: build test clippy fmt check run
+.PHONY: build test clippy fmt check run install
 
 build:
 	cargo build --release
@@ -16,3 +16,6 @@ fmt:
 	cargo fmt
 
 check: fmt clippy test
+
+install: build
+	cp target/release/cibars /usr/local/bin/cibars
