@@ -86,7 +86,7 @@ impl<'a> ActionsTitle<'a> {
         Self { groups }
     }
 
-    fn dot_color(status: &BuildStatus) -> Color {
+    pub fn dot_color(status: &BuildStatus) -> Color {
         match status {
             BuildStatus::Succeeded => Color::Green,
             BuildStatus::Running => Color::Yellow,
@@ -114,6 +114,39 @@ impl Widget for ActionsTitle<'_> {
                     Style::default().fg(Self::dot_color(&job.status)),
                 ));
             }
+        }
+
+        Line::from(spans).render(area, buf);
+    }
+}
+
+/// "CodePipelines" title with inline status dots for each pipeline.
+pub struct PipelinesTitle<'a> {
+    bars: &'a [Bar],
+}
+
+impl<'a> PipelinesTitle<'a> {
+    pub fn new(bars: &'a [Bar]) -> Self {
+        Self { bars }
+    }
+}
+
+impl Widget for PipelinesTitle<'_> {
+    fn render(self, area: Rect, buf: &mut Buffer) {
+        if area.width < 10 || area.height < 1 {
+            return;
+        }
+
+        let mut spans = vec![Span::styled(
+            "CodePipelines ",
+            Style::default().fg(Color::Cyan),
+        )];
+
+        for bar in self.bars {
+            spans.push(Span::styled(
+                "\u{25CF} ",
+                Style::default().fg(ActionsTitle::dot_color(&bar.status)),
+            ));
         }
 
         Line::from(spans).render(area, buf);
@@ -287,6 +320,59 @@ mod tests {
         );
         let groups = vec![&group];
         let widget = ActionsTitle::new(&groups);
+        let area = Rect::new(0, 0, 40, 1);
+        let mut buf = Buffer::empty(area);
+        widget.render(area, &mut buf);
+
+        let dots: Vec<_> = buf
+            .content()
+            .iter()
+            .filter(|c| c.symbol() == "\u{25CF}")
+            .collect();
+        assert_eq!(dots.len(), 4);
+        assert_eq!(dots[0].fg, Color::Red);
+        assert_eq!(dots[1].fg, Color::DarkGray);
+        assert_eq!(dots[2].fg, Color::Green);
+        assert_eq!(dots[3].fg, Color::Yellow);
+    }
+
+    #[test]
+    fn pipelines_title_renders_label_and_dots() {
+        let bars = vec![
+            make_bar("pipe-a", BuildStatus::Succeeded, 5),
+            make_bar("pipe-b", BuildStatus::Running, 3),
+        ];
+        let widget = PipelinesTitle::new(&bars);
+        let area = Rect::new(0, 0, 40, 1);
+        let mut buf = Buffer::empty(area);
+        widget.render(area, &mut buf);
+
+        let content: String = buf
+            .content()
+            .iter()
+            .map(|c| c.symbol().chars().next().unwrap_or(' '))
+            .collect();
+        assert!(content.contains("CodePipelines"));
+
+        let dots: Vec<_> = buf
+            .content()
+            .iter()
+            .filter(|c| c.symbol() == "\u{25CF}")
+            .collect();
+        assert_eq!(dots.len(), 2);
+        assert_eq!(dots[0].fg, Color::Green);
+        assert_eq!(dots[1].fg, Color::Yellow);
+    }
+
+    #[test]
+    fn pipelines_title_dot_colors() {
+        let bars = vec![
+            make_bar("p1", BuildStatus::Failed, 1),
+            make_bar("p2", BuildStatus::Idle, 0),
+            make_bar("p3", BuildStatus::Succeeded, 5),
+            make_bar("p4", BuildStatus::Running, 2),
+        ];
+        let widget = PipelinesTitle::new(&bars);
         let area = Rect::new(0, 0, 40, 1);
         let mut buf = Buffer::empty(area);
         widget.render(area, &mut buf);

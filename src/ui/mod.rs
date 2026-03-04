@@ -16,7 +16,7 @@ use ratatui::DefaultTerminal;
 use crate::app::App;
 use crate::model::{Bar, BuildStatus, WorkflowGroup};
 
-use bar::{compute_name_width, ActionsTitle, BarWidget};
+use bar::{compute_name_width, ActionsTitle, BarWidget, PipelinesTitle};
 use header::Header;
 use statusbar::StatusBar;
 
@@ -145,10 +145,7 @@ pub fn run_ui(
                     areas[idx],
                 );
             } else {
-                frame.render_widget(
-                    ActionsTitle::new(&sorted_groups),
-                    areas[idx],
-                );
+                frame.render_widget(ActionsTitle::new(&sorted_groups), areas[idx]);
             }
             idx += 1;
 
@@ -171,10 +168,7 @@ pub fn run_ui(
                     areas[idx],
                 );
             } else {
-                frame.render_widget(
-                    Paragraph::new("CodePipelines").style(Style::default().fg(Color::Cyan)),
-                    areas[idx],
-                );
+                frame.render_widget(PipelinesTitle::new(&app.bars_pipelines), areas[idx]);
             }
             idx += 1;
 
@@ -254,5 +248,36 @@ mod tests {
         assert_eq!(sorted[1].name, "gamma");
         assert_eq!(sorted[2].name, "beta");
         assert_eq!(sorted[3].name, "zebra");
+    }
+
+    #[test]
+    fn gone_groups_filtered_from_display() {
+        let groups = vec![
+            WorkflowGroup {
+                name: "CI".to_string(),
+                jobs: vec![
+                    Bar::new("build".to_string(), BarSource::GitHubAction),
+                    Bar::new("test".to_string(), BarSource::GitHubAction),
+                ],
+                gone: false,
+            },
+            WorkflowGroup {
+                name: "Deploy".to_string(),
+                jobs: vec![Bar::new(
+                    "deploy-backend".to_string(),
+                    BarSource::GitHubAction,
+                )],
+                gone: true,
+            },
+        ];
+
+        let visible: Vec<&WorkflowGroup> = sorted_workflow_groups(&groups)
+            .into_iter()
+            .filter(|g| !g.gone)
+            .collect();
+
+        assert_eq!(visible.len(), 1);
+        assert_eq!(visible[0].name, "CI");
+        assert_eq!(visible[0].jobs.len(), 2);
     }
 }
