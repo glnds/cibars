@@ -18,4 +18,4 @@ fmt:
 check: fmt clippy test
 
 install: build
-	cp target/release/cibars /usr/local/bin/cibars
+	cp target/release/cibars ~/.cargo/bin/cibars
