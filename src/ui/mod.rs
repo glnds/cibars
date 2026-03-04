@@ -160,7 +160,7 @@ pub fn run_ui(
                 let job_name_width = all_jobs_name_width(&app.workflow_groups);
                 for group in &sorted_groups {
                     for bar in group.jobs.iter().filter(|j| !j.gone) {
-                        frame.render_widget(BarWidget::new(bar, job_name_width), areas[idx]);
+                        frame.render_widget(BarWidget::new(bar, job_name_width, false), areas[idx]);
                         idx += 1;
                     }
                 }
@@ -185,7 +185,7 @@ pub fn run_ui(
             // Pipeline bars
             let pipe_name_width = compute_name_width(&app.bars_pipelines);
             for bar in &pipes_sorted {
-                frame.render_widget(BarWidget::new(bar, pipe_name_width), areas[idx]);
+                frame.render_widget(BarWidget::new(bar, pipe_name_width, false), areas[idx]);
                 idx += 1;
             }
 

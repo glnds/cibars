@@ -12,17 +12,22 @@ pub const MAX_NAME_WIDTH: usize = 30;
 pub struct BarWidget<'a> {
     bar: &'a Bar,
     name_width: usize,
+    dim: bool,
 }
 
 impl<'a> BarWidget<'a> {
-    pub fn new(bar: &'a Bar, name_width: usize) -> Self {
+    pub fn new(bar: &'a Bar, name_width: usize, dim: bool) -> Self {
         Self {
             bar,
             name_width: name_width.min(MAX_NAME_WIDTH),
+            dim,
         }
     }
 
     fn status_color(&self) -> Color {
+        if self.dim {
+            return Color::DarkGray;
+        }
         match self.bar.status {
             BuildStatus::Running => Color::Yellow,
             BuildStatus::Succeeded => Color::Green,
@@ -181,7 +186,7 @@ mod tests {
     #[test]
     fn renders_idle_bar() {
         let bar = make_bar("deploy", BuildStatus::Idle, 0);
-        let widget = BarWidget::new(&bar, 10);
+        let widget = BarWidget::new(&bar, 10, false);
         let area = Rect::new(0, 0, 25, 1);
         let mut buf = Buffer::empty(area);
         widget.render(area, &mut buf);
@@ -199,7 +204,7 @@ mod tests {
     #[test]
     fn renders_running_bar_in_yellow() {
         let bar = make_bar("build", BuildStatus::Running, 3);
-        let widget = BarWidget::new(&bar, 10);
+        let widget = BarWidget::new(&bar, 10, false);
         let area = Rect::new(0, 0, 25, 1);
         let mut buf = Buffer::empty(area);
         widget.render(area, &mut buf);
@@ -217,7 +222,7 @@ mod tests {
     #[test]
     fn renders_succeeded_bar_in_green() {
         let bar = make_bar("test", BuildStatus::Succeeded, 5);
-        let widget = BarWidget::new(&bar, 10);
+        let widget = BarWidget::new(&bar, 10, false);
         let area = Rect::new(0, 0, 25, 1);
         let mut buf = Buffer::empty(area);
         widget.render(area, &mut buf);
@@ -234,7 +239,7 @@ mod tests {
     #[test]
     fn renders_failed_bar_in_red() {
         let bar = make_bar("lint", BuildStatus::Failed, 2);
-        let widget = BarWidget::new(&bar, 10);
+        let widget = BarWidget::new(&bar, 10, false);
         let area = Rect::new(0, 0, 25, 1);
         let mut buf = Buffer::empty(area);
         widget.render(area, &mut buf);
@@ -252,7 +257,7 @@ mod tests {
     fn gone_bar_shows_asterisk() {
         let mut bar = make_bar("old", BuildStatus::Idle, 0);
         bar.gone = true;
-        let widget = BarWidget::new(&bar, 10);
+        let widget = BarWidget::new(&bar, 10, false);
         let area = Rect::new(0, 0, 25, 1);
         let mut buf = Buffer::empty(area);
         widget.render(area, &mut buf);
@@ -397,6 +402,24 @@ mod tests {
         assert_eq!(dots[1].fg, Color::DarkGray);
         assert_eq!(dots[2].fg, Color::Green);
         assert_eq!(dots[3].fg, Color::Yellow);
+    }
+
+    #[test]
+    fn dim_bar_renders_dark_gray_regardless_of_status() {
+        let bar = make_bar("build", BuildStatus::Running, 3);
+        let widget = BarWidget::new(&bar, 10, true);
+        let area = Rect::new(0, 0, 25, 1);
+        let mut buf = Buffer::empty(area);
+        widget.render(area, &mut buf);
+
+        let bracket_pos = buf
+            .content()
+            .iter()
+            .position(|c| c.symbol() == "[")
+            .unwrap();
+        let first_fill = &buf.content()[bracket_pos + 1];
+        assert_eq!(first_fill.symbol(), "|");
+        assert_eq!(first_fill.fg, Color::DarkGray);
     }
 
     #[test]
