@@ -5,9 +5,9 @@ mod poll_scheduler;
 mod poller;
 mod ui;
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use anyhow::{Context, Result};
 
@@ -48,7 +48,7 @@ async fn run_poll_orchestrator(
     app: Arc<Mutex<App>>,
     config: Config,
     token: String,
-    boost_flag: Arc<AtomicBool>,
+    boost_notify: Arc<tokio::sync::Notify>,
 ) -> Result<()> {
     let (owner, repo) = config
         .github_repo
@@ -61,10 +61,6 @@ async fn run_poll_orchestrator(
     let mut scheduler = PollScheduler::new();
 
     loop {
-        // Consume boost flag (atomic swap, no race)
-        if boost_flag.swap(false, Ordering::Relaxed) {
-            scheduler.boost();
-        }
         let need_aws = scheduler.should_poll_aws();
 
         // Lazy-init AWS on first need
@@ -104,17 +100,11 @@ async fn run_poll_orchestrator(
 
         // Sleep, interruptible by boost key
         let interval = scheduler.interval();
-        let flag = boost_flag.clone();
         tokio::select! {
             _ = tokio::time::sleep(interval) => {}
-            _ = async {
-                loop {
-                    tokio::time::sleep(Duration::from_millis(100)).await;
-                    if flag.load(Ordering::Relaxed) {
-                        break;
-                    }
-                }
-            } => {}
+            _ = boost_notify.notified() => {
+                scheduler.boost();
+            }
         }
     }
 }
@@ -135,8 +125,8 @@ fn main() -> Result<()> {
     let rt = tokio::runtime::Runtime::new()?;
     let _guard = rt.enter();
 
-    // AtomicBool for boost (manual poll trigger, no race)
-    let boost_flag = Arc::new(AtomicBool::new(false));
+    // Notify for boost (manual poll trigger, zero overhead)
+    let boost_notify = Arc::new(tokio::sync::Notify::new());
 
     // SIGTERM handling: set flag checked by UI loop
     let term_flag = Arc::new(AtomicBool::new(false));
@@ -146,7 +136,7 @@ fn main() -> Result<()> {
     // Spawn single poll orchestrator
     let poll_app = app.clone();
     let poll_config = config.clone();
-    let poll_boost = boost_flag.clone();
+    let poll_boost = boost_notify.clone();
     rt.spawn(async move {
         if let Err(e) = run_poll_orchestrator(poll_app, poll_config, token, poll_boost).await {
             tracing::error!("poll orchestrator failed: {e:#}");
@@ -161,7 +151,7 @@ fn main() -> Result<()> {
         &config.aws_profile,
         &config.region,
         &config.github_repo,
-        boost_flag,
+        boost_notify,
         &term_flag,
     );
     ratatui::restore();

@@ -1,9 +1,21 @@
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BuildStatus {
     Running,
     Succeeded,
     Failed,
     Idle,
+}
+
+impl BuildStatus {
+    pub fn color(&self) -> ratatui::style::Color {
+        use ratatui::style::Color;
+        match self {
+            Self::Running => Color::Yellow,
+            Self::Succeeded => Color::Green,
+            Self::Failed => Color::Red,
+            Self::Idle => Color::DarkGray,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -15,7 +27,6 @@ pub enum BarSource {
 #[derive(Debug, Clone)]
 pub struct Bar {
     pub name: String,
-    /// Retained for data-model completeness; bars are separated by source in App.
     #[allow(dead_code)]
     pub source: BarSource,
     pub status: BuildStatus,

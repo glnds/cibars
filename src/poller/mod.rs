@@ -192,25 +192,28 @@ async fn poll_pipelines(client: &dyn PipelineClient) -> Result<Vec<PipelineState
     futures::future::join_all(futs).await.into_iter().collect()
 }
 
-fn update_pipeline_bars(app: &mut App, states: Vec<PipelineState>) {
-    let seen: HashSet<String> = states.iter().map(|s| s.name.clone()).collect();
-
-    for bar in &mut app.bars_pipelines {
-        if !seen.contains(&bar.name) {
+fn reconcile_bars(bars: &mut Vec<Bar>, updates: Vec<(String, BuildStatus)>, source: BarSource) {
+    let seen: HashSet<&str> = updates.iter().map(|(n, _)| n.as_str()).collect();
+    for bar in bars.iter_mut() {
+        if !seen.contains(bar.name.as_str()) {
             bar.gone = true;
         }
     }
-
-    for state in states {
-        if let Some(bar) = app.bars_pipelines.iter_mut().find(|b| b.name == state.name) {
+    for (name, status) in updates {
+        if let Some(bar) = bars.iter_mut().find(|b| b.name == name) {
             bar.gone = false;
-            bar.set_status(state.status);
+            bar.set_status(status);
         } else {
-            let mut bar = Bar::new(state.name, BarSource::CodePipeline);
-            bar.set_status(state.status);
-            app.bars_pipelines.push(bar);
+            let mut bar = Bar::new(name, source.clone());
+            bar.set_status(status);
+            bars.push(bar);
         }
     }
+}
+
+fn update_pipeline_bars(app: &mut App, states: Vec<PipelineState>) {
+    let updates: Vec<_> = states.into_iter().map(|s| (s.name, s.status)).collect();
+    reconcile_bars(&mut app.bars_pipelines, updates, BarSource::CodePipeline);
 }
 
 /// Phase 1: create/update workflow groups from summaries (no jobs yet).
@@ -230,13 +233,13 @@ fn update_workflow_summaries(app: &mut App, summaries: &[WorkflowRunSummary]) {
             .find(|g| g.name == summary.workflow_name)
         {
             g.gone = false;
-            g.summary_status = summary.status.clone();
+            g.summary_status = summary.status;
         } else {
             app.workflow_groups.push(WorkflowGroup {
                 name: summary.workflow_name.clone(),
                 jobs: Vec::new(),
                 gone: false,
-                summary_status: summary.status.clone(),
+                summary_status: summary.status,
             });
         }
     }
@@ -253,24 +256,8 @@ fn update_workflow_jobs(app: &mut App, workflow_name: &str, jobs: Vec<JobInfo>) 
         None => return,
     };
 
-    let seen_jobs: HashSet<String> = jobs.iter().map(|j| j.name.clone()).collect();
-
-    for job in &mut group.jobs {
-        if !seen_jobs.contains(&job.name) {
-            job.gone = true;
-        }
-    }
-
-    for job_info in jobs {
-        if let Some(bar) = group.jobs.iter_mut().find(|b| b.name == job_info.name) {
-            bar.gone = false;
-            bar.set_status(job_info.status);
-        } else {
-            let mut bar = Bar::new(job_info.name, BarSource::GitHubAction);
-            bar.set_status(job_info.status);
-            group.jobs.push(bar);
-        }
-    }
+    let updates: Vec<_> = jobs.into_iter().map(|j| (j.name, j.status)).collect();
+    reconcile_bars(&mut group.jobs, updates, BarSource::GitHubAction);
 }
 
 #[cfg(test)]
@@ -293,7 +280,7 @@ mod tests {
                 .find(|p| p.name == name)
                 .map(|p| PipelineState {
                     name: p.name.clone(),
-                    status: p.status.clone(),
+                    status: p.status,
                 })
                 .context("not found")
         }
@@ -312,7 +299,7 @@ mod tests {
                 .map(|r| WorkflowRunSummary {
                     workflow_name: r.workflow_name.clone(),
                     run_id: r.run_id,
-                    status: r.status.clone(),
+                    status: r.status,
                 })
                 .collect())
         }
@@ -327,7 +314,7 @@ mod tests {
                         .iter()
                         .map(|j| JobInfo {
                             name: j.name.clone(),
-                            status: j.status.clone(),
+                            status: j.status,
                         })
                         .collect()
                 })

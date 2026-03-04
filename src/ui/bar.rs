@@ -4,7 +4,7 @@ use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Widget;
 
-use crate::model::{Bar, BuildStatus, WorkflowGroup};
+use crate::model::{Bar, WorkflowGroup};
 
 /// Max chars for the name column
 pub const MAX_NAME_WIDTH: usize = 30;
@@ -26,13 +26,9 @@ impl<'a> BarWidget<'a> {
 
     fn status_color(&self) -> Color {
         if self.dim {
-            return Color::DarkGray;
-        }
-        match self.bar.status {
-            BuildStatus::Running => Color::Yellow,
-            BuildStatus::Succeeded => Color::Green,
-            BuildStatus::Failed => Color::Red,
-            BuildStatus::Idle => Color::DarkGray,
+            Color::DarkGray
+        } else {
+            self.bar.status.color()
         }
     }
 }
@@ -90,15 +86,6 @@ impl<'a> ActionsTitle<'a> {
     pub fn new(groups: &'a [&'a WorkflowGroup]) -> Self {
         Self { groups }
     }
-
-    pub fn dot_color(status: &BuildStatus) -> Color {
-        match status {
-            BuildStatus::Succeeded => Color::Green,
-            BuildStatus::Running => Color::Yellow,
-            BuildStatus::Failed => Color::Red,
-            BuildStatus::Idle => Color::DarkGray,
-        }
-    }
 }
 
 impl Widget for ActionsTitle<'_> {
@@ -118,13 +105,13 @@ impl Widget for ActionsTitle<'_> {
                 // Jobs not loaded yet; show one dot per workflow using summary status
                 spans.push(Span::styled(
                     "\u{25CF} ",
-                    Style::default().fg(Self::dot_color(&group.summary_status)),
+                    Style::default().fg(group.summary_status.color()),
                 ));
             } else {
                 for job in visible_jobs {
                     spans.push(Span::styled(
                         "\u{25CF} ",
-                        Style::default().fg(Self::dot_color(&job.status)),
+                        Style::default().fg(job.status.color()),
                     ));
                 }
             }
@@ -159,7 +146,7 @@ impl Widget for PipelinesTitle<'_> {
         for bar in self.bars {
             spans.push(Span::styled(
                 "\u{25CF} ",
-                Style::default().fg(ActionsTitle::dot_color(&bar.status)),
+                Style::default().fg(bar.status.color()),
             ));
         }
 
@@ -170,7 +157,7 @@ impl Widget for PipelinesTitle<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::BarSource;
+    use crate::model::{BarSource, BuildStatus};
 
     fn make_bar(name: &str, status: BuildStatus, fill: usize) -> Bar {
         Bar {
@@ -287,7 +274,7 @@ mod tests {
                 .enumerate()
                 .map(|(i, s)| {
                     let mut bar = Bar::new(format!("job-{i}"), BarSource::GitHubAction);
-                    bar.status = s.clone();
+                    bar.status = *s;
                     bar
                 })
                 .collect(),

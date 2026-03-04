@@ -6,6 +6,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use tokio::sync::Notify;
+
 use anyhow::Result;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use ratatui::layout::{Constraint, Layout};
@@ -66,7 +68,7 @@ pub fn run_ui(
     profile: &str,
     region: &str,
     repo: &str,
-    boost_flag: Arc<AtomicBool>,
+    boost_notify: Arc<Notify>,
     term_flag: &AtomicBool,
 ) -> Result<()> {
     let mut last_animation = Instant::now();
@@ -250,7 +252,7 @@ pub fn run_ui(
                         }
                     }
                     KeyCode::Char('b') => {
-                        boost_flag.store(true, Ordering::Relaxed);
+                        boost_notify.notify_one();
                     }
                     _ => {}
                 }

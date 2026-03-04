@@ -15,7 +15,7 @@ pub enum PollState {
 pub struct PollScheduler {
     state: PollState,
     cooldown_started: Option<Instant>,
-    pub(crate) watching_started: Option<Instant>,
+    watching_started: Option<Instant>,
     needs_initial_poll: bool,
 }
 
@@ -92,6 +92,11 @@ impl PollScheduler {
                 }
             }
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn force_expire_watching(&mut self) {
+        self.watching_started = Some(Instant::now() - COOLDOWN_DURATION - Duration::from_secs(1));
     }
 
     pub fn cooldown_remaining(&self) -> Option<Duration> {
@@ -300,7 +305,7 @@ mod tests {
         let mut s = PollScheduler::new();
         s.transition(false);
         s.boost(); // → Watching
-        s.watching_started = Some(Instant::now() - Duration::from_secs(61));
+        s.force_expire_watching();
         s.transition(false);
         assert_eq!(s.state(), PollState::Idle);
     }

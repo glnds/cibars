@@ -16,7 +16,7 @@ impl AwsPipelineClient {
 }
 
 /// Map AWS pipeline execution status string to BuildStatus.
-#[cfg(test)]
+#[allow(dead_code)]
 pub fn map_pipeline_status(status: Option<&str>) -> BuildStatus {
     match status {
         Some("InProgress") => BuildStatus::Running,
