@@ -73,12 +73,6 @@ async fn run_poll_orchestrator(
             aws_client = Some(init_aws_client(&config).await);
         }
 
-        // Record poll start for UI tick visualization
-        {
-            let mut a = app.lock().expect("app mutex poisoned");
-            a.last_poll_started = Some(Instant::now());
-        }
-
         // Poll: parallel when both, GH-only otherwise
         if let Some(aws) = aws_client.as_ref().filter(|_| need_aws) {
             tokio::join!(
@@ -96,6 +90,9 @@ async fn run_poll_orchestrator(
             let mut a = app.lock().expect("app mutex poisoned");
             a.poll_state = scheduler.state();
             a.cooldown_remaining = scheduler.cooldown_remaining();
+            // Reset tick bar after poll completes (not before),
+            // so elapsed only measures sleep time, not poll duration.
+            a.last_poll_started = Some(Instant::now());
         }
 
         tracing::debug!(
