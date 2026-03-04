@@ -65,7 +65,7 @@ pub fn run_ui(
     profile: &str,
     region: &str,
     repo: &str,
-    refresh_tx: tokio::sync::watch::Sender<()>,
+    boost_flag: Arc<AtomicBool>,
     term_flag: &AtomicBool,
 ) -> Result<()> {
     let mut last_animation = Instant::now();
@@ -247,8 +247,8 @@ pub fn run_ui(
                             a.actions_expanded = !a.actions_expanded;
                         }
                     }
-                    KeyCode::Char('r') => {
-                        let _ = refresh_tx.send(());
+                    KeyCode::Char('b') => {
+                        boost_flag.store(true, Ordering::Relaxed);
                     }
                     _ => {}
                 }

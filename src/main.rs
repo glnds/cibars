@@ -5,9 +5,9 @@ mod poll_scheduler;
 mod poller;
 mod ui;
 
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 
@@ -48,7 +48,7 @@ async fn run_poll_orchestrator(
     app: Arc<Mutex<App>>,
     config: Config,
     token: String,
-    mut boost_rx: tokio::sync::watch::Receiver<()>,
+    boost_flag: Arc<AtomicBool>,
 ) -> Result<()> {
     let (owner, repo) = config
         .github_repo
@@ -61,8 +61,11 @@ async fn run_poll_orchestrator(
     let mut scheduler = PollScheduler::new();
 
     loop {
-        let is_boost = boost_rx.has_changed().unwrap_or(false);
-        let need_aws = scheduler.should_poll_aws() || is_boost;
+        // Consume boost flag (atomic swap, no race)
+        if boost_flag.swap(false, Ordering::Relaxed) {
+            scheduler.boost();
+        }
+        let need_aws = scheduler.should_poll_aws();
 
         // Lazy-init AWS on first need
         if need_aws && aws_client.is_none() {
@@ -103,9 +106,18 @@ async fn run_poll_orchestrator(
         );
 
         // Sleep, interruptible by boost key
+        let interval = scheduler.interval();
+        let flag = boost_flag.clone();
         tokio::select! {
-            _ = tokio::time::sleep(scheduler.interval()) => {}
-            _ = boost_rx.changed() => {}
+            _ = tokio::time::sleep(interval) => {}
+            _ = async {
+                loop {
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    if flag.load(Ordering::Relaxed) {
+                        break;
+                    }
+                }
+            } => {}
         }
     }
 }
@@ -126,8 +138,8 @@ fn main() -> Result<()> {
     let rt = tokio::runtime::Runtime::new()?;
     let _guard = rt.enter();
 
-    // Watch channel for boost (manual full poll cycle)
-    let (boost_tx, boost_rx) = tokio::sync::watch::channel(());
+    // AtomicBool for boost (manual poll trigger, no race)
+    let boost_flag = Arc::new(AtomicBool::new(false));
 
     // SIGTERM handling: set flag checked by UI loop
     let term_flag = Arc::new(AtomicBool::new(false));
@@ -137,8 +149,9 @@ fn main() -> Result<()> {
     // Spawn single poll orchestrator
     let poll_app = app.clone();
     let poll_config = config.clone();
+    let poll_boost = boost_flag.clone();
     rt.spawn(async move {
-        if let Err(e) = run_poll_orchestrator(poll_app, poll_config, token, boost_rx).await {
+        if let Err(e) = run_poll_orchestrator(poll_app, poll_config, token, poll_boost).await {
             tracing::error!("poll orchestrator failed: {e:#}");
         }
     });
@@ -151,7 +164,7 @@ fn main() -> Result<()> {
         &config.aws_profile,
         &config.region,
         &config.github_repo,
-        boost_tx,
+        boost_flag,
         &term_flag,
     );
     ratatui::restore();
