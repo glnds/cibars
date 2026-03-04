@@ -6,7 +6,7 @@ edition = "2021"
 [dependencies]
 anyhow = "1"
 async-trait = "0.1"
-aws-config = { version = "1", features = ["behavior-version-latest"] }
+aws-config = { version = "1", features = ["behavior-version-latest", "sso"] }
 aws-sdk-codepipeline = "1"
 chrono = "0.4"
 clap = { version = "4", features = ["derive"] }
