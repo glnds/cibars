@@ -67,10 +67,24 @@ impl ActionsClient for GitHubActionsClient {
             }
         }
 
+        tracing::debug!(
+            workflows = latest_per_workflow.len(),
+            "deduped workflow runs"
+        );
+
         // Fetch jobs for each workflow's latest run
         let mut results = Vec::new();
         for (workflow_name, (run_id, status)) in latest_per_workflow {
-            let jobs = self.fetch_jobs(run_id).await.unwrap_or_default();
+            let jobs = match self.fetch_jobs(run_id).await {
+                Ok(j) => {
+                    tracing::debug!(workflow = %workflow_name, run_id, count = j.len(), "fetched jobs");
+                    j
+                }
+                Err(e) => {
+                    tracing::error!(workflow = %workflow_name, run_id, error = %e, "failed to fetch jobs");
+                    Vec::new()
+                }
+            };
             results.push(WorkflowRunInfo {
                 workflow_name,
                 run_id,

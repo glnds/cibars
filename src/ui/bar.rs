@@ -111,7 +111,7 @@ impl Widget for WorkflowHeaderWidget<'_> {
 
         for job in &self.group.jobs {
             spans.push(Span::styled(
-                "\u{25CF}",
+                "\u{25CF} ",
                 Style::default().fg(Self::dot_color(&job.status)),
             ));
         }

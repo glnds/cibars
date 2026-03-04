@@ -20,7 +20,10 @@ impl Widget for StatusBar<'_> {
             None => "Last poll: --:--:--".to_string(),
         };
 
-        let mut spans = vec![Span::raw(poll_text), Span::raw(" | r=refresh q=quit")];
+        let mut spans = vec![
+            Span::raw(poll_text),
+            Span::raw(" | e=expand r=refresh q=quit"),
+        ];
 
         if !self.warnings.is_empty() {
             let warn_text = format!(" | {}", self.warnings.join("; "));
