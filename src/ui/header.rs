@@ -16,7 +16,11 @@ impl Widget for Header<'_> {
         let time = Local::now().format("%H:%M:%S");
         let line = Line::from(vec![
             Span::styled(
-                "cibars",
+                format!(
+                    "cibars (v{}-{})",
+                    env!("CARGO_PKG_VERSION"),
+                    env!("VERGEN_GIT_COMMIT_COUNT"),
+                ),
                 Style::default()
                     .fg(Color::Cyan)
                     .add_modifier(Modifier::BOLD),
