@@ -15,6 +15,7 @@ use ratatui::DefaultTerminal;
 
 use crate::app::App;
 use crate::model::{Bar, BuildStatus, WorkflowGroup};
+use crate::poll_scheduler::PollState;
 
 use bar::{compute_name_width, ActionsTitle, BarWidget, PipelinesTitle};
 use header::Header;
@@ -91,6 +92,7 @@ pub fn run_ui(
             }
 
             let app = app.lock().expect("app mutex poisoned");
+            let dim = !matches!(app.poll_state, PollState::Active | PollState::Watching);
 
             let pipes_sorted = sorted_bars(&app.bars_pipelines);
             let sorted_groups: Vec<&WorkflowGroup> = sorted_workflow_groups(&app.workflow_groups)
@@ -160,7 +162,7 @@ pub fn run_ui(
                 let job_name_width = all_jobs_name_width(&app.workflow_groups);
                 for group in &sorted_groups {
                     for bar in group.jobs.iter().filter(|j| !j.gone) {
-                        frame.render_widget(BarWidget::new(bar, job_name_width, false), areas[idx]);
+                        frame.render_widget(BarWidget::new(bar, job_name_width, dim), areas[idx]);
                         idx += 1;
                     }
                 }
@@ -185,7 +187,7 @@ pub fn run_ui(
             // Pipeline bars
             let pipe_name_width = compute_name_width(&app.bars_pipelines);
             for bar in &pipes_sorted {
-                frame.render_widget(BarWidget::new(bar, pipe_name_width, false), areas[idx]);
+                frame.render_widget(BarWidget::new(bar, pipe_name_width, dim), areas[idx]);
                 idx += 1;
             }
 
