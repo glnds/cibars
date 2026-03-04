@@ -615,6 +615,7 @@ dependencies = [
  "clap",
  "crossterm",
  "dirs",
+ "futures",
  "octocrab",
  "ratatui",
  "rustls 0.23.37",

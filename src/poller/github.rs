@@ -72,10 +72,18 @@ impl ActionsClient for GitHubActionsClient {
             "deduped workflow runs"
         );
 
-        // Fetch jobs for each workflow's latest run
+        // Fetch jobs for each workflow's latest run in parallel
+        let entries: Vec<_> = latest_per_workflow.into_iter().collect();
+        let job_futs: Vec<_> = entries
+            .iter()
+            .map(|(_, (run_id, _))| self.fetch_jobs(*run_id))
+            .collect();
+        let job_results = futures::future::join_all(job_futs).await;
+
         let mut results = Vec::new();
-        for (workflow_name, (run_id, status)) in latest_per_workflow {
-            let jobs = match self.fetch_jobs(run_id).await {
+        for ((workflow_name, (run_id, status)), jobs_result) in entries.into_iter().zip(job_results)
+        {
+            let jobs = match jobs_result {
                 Ok(j) => {
                     tracing::debug!(workflow = %workflow_name, run_id, count = j.len(), "fetched jobs");
                     j

@@ -56,7 +56,6 @@ pub async fn poll_once(
     actions_client: &dyn ActionsClient,
     tick_area_width: usize,
 ) {
-    // Check if GitHub is rate-limited
     let skip_github = {
         let a = app.lock().expect("app mutex poisoned");
         a.rate_limited_until
@@ -64,59 +63,77 @@ pub async fn poll_once(
             .unwrap_or(false)
     };
 
-    let pipe_result = poll_pipelines(pipeline_client).await;
-    let actions_result = if skip_github {
-        Err(anyhow::anyhow!("rate-limited, backing off"))
-    } else {
-        poll_actions(actions_client).await
-    };
-
-    let mut app = app.lock().expect("app mutex poisoned");
-    app.warnings.clear();
-
-    match pipe_result {
-        Ok(states) => {
-            update_pipeline_bars(&mut app, states, tick_area_width);
-        }
-        Err(e) => {
-            app.warnings.push(format!("AWS: {e:#}"));
-        }
+    {
+        let mut a = app.lock().expect("app mutex poisoned");
+        a.warnings.clear();
     }
 
-    match actions_result {
-        Ok(runs) => {
-            update_workflows(&mut app, runs, tick_area_width);
-            // Clear rate limit on success
-            app.rate_limited_until = None;
+    let pipe_fut = poll_pipelines(pipeline_client);
+    let actions_fut = async {
+        if skip_github {
+            Err(anyhow::anyhow!("rate-limited, backing off"))
+        } else {
+            poll_actions(actions_client).await
         }
-        Err(e) => {
-            let msg = format!("{e:#}");
-            // Set backoff if error looks like a rate limit
-            if msg.to_lowercase().contains("rate limit") {
-                app.rate_limited_until =
-                    Some(Instant::now() + Duration::from_secs(RATE_LIMIT_BACKOFF_SECS));
-                app.warnings.push(format!(
-                    "GitHub: rate limited, backing off {RATE_LIMIT_BACKOFF_SECS}s"
-                ));
-            } else if !skip_github {
-                app.warnings.push(format!("GitHub: {msg}"));
-            } else {
-                app.warnings
-                    .push("GitHub: rate-limited, backing off".to_string());
+    };
+
+    tokio::pin!(pipe_fut);
+    tokio::pin!(actions_fut);
+    let mut pipe_done = false;
+    let mut actions_done = false;
+
+    while !pipe_done || !actions_done {
+        tokio::select! {
+            result = &mut pipe_fut, if !pipe_done => {
+                pipe_done = true;
+                let mut a = app.lock().expect("app mutex poisoned");
+                match result {
+                    Ok(states) => {
+                        update_pipeline_bars(&mut a, states, tick_area_width);
+                    }
+                    Err(e) => {
+                        a.warnings.push(format!("AWS: {e:#}"));
+                    }
+                }
+                a.loading_pipelines = false;
+            }
+            result = &mut actions_fut, if !actions_done => {
+                actions_done = true;
+                let mut a = app.lock().expect("app mutex poisoned");
+                match result {
+                    Ok(runs) => {
+                        update_workflows(&mut a, runs, tick_area_width);
+                        a.rate_limited_until = None;
+                    }
+                    Err(e) => {
+                        let msg = format!("{e:#}");
+                        if msg.to_lowercase().contains("rate limit") {
+                            a.rate_limited_until =
+                                Some(Instant::now() + Duration::from_secs(RATE_LIMIT_BACKOFF_SECS));
+                            a.warnings.push(format!(
+                                "GitHub: rate limited, backing off {RATE_LIMIT_BACKOFF_SECS}s"
+                            ));
+                        } else if !skip_github {
+                            a.warnings.push(format!("GitHub: {msg}"));
+                        } else {
+                            a.warnings
+                                .push("GitHub: rate-limited, backing off".to_string());
+                        }
+                    }
+                }
+                a.loading_actions = false;
             }
         }
     }
 
-    app.last_poll = Some(Utc::now());
+    let mut a = app.lock().expect("app mutex poisoned");
+    a.last_poll = Some(Utc::now());
 }
 
 async fn poll_pipelines(client: &dyn PipelineClient) -> Result<Vec<PipelineState>> {
     let names = client.list_pipeline_names().await?;
-    let mut states = Vec::new();
-    for name in &names {
-        states.push(client.get_pipeline_state(name).await?);
-    }
-    Ok(states)
+    let futs: Vec<_> = names.iter().map(|n| client.get_pipeline_state(n)).collect();
+    futures::future::join_all(futs).await.into_iter().collect()
 }
 
 async fn poll_actions(client: &dyn ActionsClient) -> Result<Vec<WorkflowRunInfo>> {
@@ -278,6 +295,8 @@ mod tests {
         assert_eq!(app.workflow_groups[0].jobs.len(), 1);
         assert_eq!(app.workflow_groups[0].jobs[0].name, "build");
         assert!(app.last_poll.is_some());
+        assert!(!app.loading_pipelines);
+        assert!(!app.loading_actions);
     }
 
     #[tokio::test]
@@ -400,6 +419,21 @@ mod tests {
         let app = app.lock().unwrap();
         assert_eq!(app.workflow_groups.len(), 1);
         assert!(app.workflow_groups[0].gone);
+    }
+
+    #[tokio::test]
+    async fn poll_clears_loading_flags_on_error() {
+        let app = Arc::new(Mutex::new(App::new()));
+        assert!(app.lock().unwrap().loading_pipelines);
+        assert!(app.lock().unwrap().loading_actions);
+
+        let pipes = FailingPipelineClient;
+        let actions = MockActionsClient { runs: vec![] };
+        poll_once(&app, &pipes, &actions, 20).await;
+
+        let app = app.lock().unwrap();
+        assert!(!app.loading_pipelines);
+        assert!(!app.loading_actions);
     }
 
     #[tokio::test]

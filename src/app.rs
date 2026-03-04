@@ -14,6 +14,10 @@ pub struct App {
     pub terminal_width: u16,
     /// If set, skip GitHub polling until this instant (rate limit back-off).
     pub rate_limited_until: Option<Instant>,
+    /// True until first pipeline poll completes.
+    pub loading_pipelines: bool,
+    /// True until first actions poll completes.
+    pub loading_actions: bool,
 }
 
 impl App {
@@ -26,6 +30,8 @@ impl App {
             warnings: Vec::new(),
             terminal_width: 80,
             rate_limited_until: None,
+            loading_pipelines: true,
+            loading_actions: true,
         }
     }
 }
@@ -33,5 +39,17 @@ impl App {
 impl Default for App {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn app_starts_with_loading_flags() {
+        let app = App::new();
+        assert!(app.loading_pipelines);
+        assert!(app.loading_actions);
     }
 }

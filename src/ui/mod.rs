@@ -139,9 +139,13 @@ pub fn run_ui(
 
             // Actions title (with inline dots)
             if !has_actions {
+                let msg = if app.loading_actions {
+                    "Loading GitHub Actions..."
+                } else {
+                    "No recent workflow runs found"
+                };
                 frame.render_widget(
-                    Paragraph::new("No recent workflow runs found")
-                        .style(Style::default().fg(Color::DarkGray)),
+                    Paragraph::new(msg).style(Style::default().fg(Color::DarkGray)),
                     areas[idx],
                 );
             } else {
@@ -162,9 +166,13 @@ pub fn run_ui(
 
             // Pipelines title
             if pipe_count == 0 {
+                let msg = if app.loading_pipelines {
+                    "Loading CodePipelines..."
+                } else {
+                    "No pipelines found in this account/region"
+                };
                 frame.render_widget(
-                    Paragraph::new("No pipelines found in this account/region")
-                        .style(Style::default().fg(Color::DarkGray)),
+                    Paragraph::new(msg).style(Style::default().fg(Color::DarkGray)),
                     areas[idx],
                 );
             } else {
