@@ -21,10 +21,10 @@ impl Widget for StatusBar<'_> {
 
         let poll_text = match self.last_poll {
             Some(t) => {
-                let local = t.with_timezone(&chrono::Local);
-                format!("Last poll: {}", local.format("%H:%M:%S"))
+                let secs = Utc::now().signed_duration_since(*t).num_seconds().max(0);
+                format!("Last poll: {secs}s ago")
             }
-            None => "Last poll: --:--:--".to_string(),
+            None => "Last poll: --".to_string(),
         };
 
         let mut spans = vec![
@@ -49,27 +49,43 @@ mod tests {
     use ratatui::buffer::Buffer;
     use ratatui::layout::Rect;
 
-    #[test]
-    fn status_bar_contains_version_info() {
+    fn render_status_bar(last_poll: &Option<DateTime<Utc>>) -> String {
         let bar = StatusBar {
-            last_poll: &None,
+            last_poll,
             warnings: &[],
         };
-        let area = Rect::new(0, 0, 80, 1);
+        let area = Rect::new(0, 0, 120, 1);
         let mut buf = Buffer::empty(area);
         bar.render(area, &mut buf);
-
-        let content: String = (0..80)
+        (0..120)
             .map(|x| buf.cell((x, 0)).unwrap().symbol().to_string())
-            .collect();
+            .collect()
+    }
 
+    #[test]
+    fn status_bar_contains_version_info() {
+        let content = render_status_bar(&None);
         assert!(
             content.contains("v0.1.0"),
             "expected version, got: {content}"
         );
+    }
+
+    #[test]
+    fn status_bar_no_poll_shows_dash() {
+        let content = render_status_bar(&None);
         assert!(
-            content.contains("("),
-            "expected build info parens, got: {content}"
+            content.contains("Last poll: --"),
+            "expected --, got: {content}"
+        );
+    }
+
+    #[test]
+    fn status_bar_recent_poll_shows_seconds_ago() {
+        let content = render_status_bar(&Some(Utc::now()));
+        assert!(
+            content.contains("0s ago"),
+            "expected 0s ago, got: {content}"
         );
     }
 }

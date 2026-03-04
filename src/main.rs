@@ -12,7 +12,7 @@ use anyhow::{Context, Result};
 use app::App;
 use config::Config;
 
-const POLL_INTERVAL_SECS: u64 = 10;
+const POLL_INTERVAL_SECS: u64 = 5;
 
 fn setup_tracing() -> Result<()> {
     use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
