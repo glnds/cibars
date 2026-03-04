@@ -12,6 +12,8 @@ use anyhow::{Context, Result};
 use app::App;
 use config::Config;
 
+const POLL_INTERVAL_SECS: u64 = 10;
+
 fn setup_tracing() -> Result<()> {
     use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
@@ -46,13 +48,9 @@ async fn run_aws_poller(
         poller::aws::AwsPipelineClient::new(aws_sdk_codepipeline::Client::new(&aws_config));
 
     loop {
-        let tick_area_width = {
-            let a = app.lock().expect("app mutex poisoned");
-            a.terminal_width as usize
-        };
-        poller::poll_pipelines_tick(&app, &client, tick_area_width, &config.aws_profile).await;
+        poller::poll_pipelines_tick(&app, &client, &config.aws_profile).await;
         tokio::select! {
-            _ = tokio::time::sleep(std::time::Duration::from_secs(30)) => {}
+            _ = tokio::time::sleep(std::time::Duration::from_secs(POLL_INTERVAL_SECS)) => {}
             _ = refresh_rx.changed() => {}
         }
     }
@@ -72,13 +70,9 @@ async fn run_github_poller(
         poller::github::GitHubActionsClient::new(&token, owner.to_string(), repo.to_string())?;
 
     loop {
-        let tick_area_width = {
-            let a = app.lock().expect("app mutex poisoned");
-            a.terminal_width as usize
-        };
-        poller::poll_actions_tick(&app, &client, tick_area_width).await;
+        poller::poll_actions_tick(&app, &client).await;
         tokio::select! {
-            _ = tokio::time::sleep(std::time::Duration::from_secs(30)) => {}
+            _ = tokio::time::sleep(std::time::Duration::from_secs(POLL_INTERVAL_SECS)) => {}
             _ = refresh_rx.changed() => {}
         }
     }

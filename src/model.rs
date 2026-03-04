@@ -39,24 +39,48 @@ impl Bar {
         }
     }
 
-    /// Update bar state based on polled build status.
-    /// `tick_area_width` is the available fill area.
-    pub fn update(&mut self, status: BuildStatus, tick_area_width: usize) {
+    /// Update bar status from a poll result.
+    /// Resets fill/write_pos on transition into Running (new execution).
+    /// Idle is a no-op (preserves current state).
+    pub fn set_status(&mut self, status: BuildStatus) {
         match status {
             BuildStatus::Running => {
-                self.status = BuildStatus::Running;
-                self.write_pos += 1;
-                if self.write_pos >= tick_area_width {
-                    self.write_pos = 0;
+                if self.status != BuildStatus::Running {
+                    tracing::debug!(bar = %self.name, from = ?self.status, "→ Running");
                     self.fill = 0;
+                    self.write_pos = 0;
                 }
-                self.fill += 1;
+                self.status = BuildStatus::Running;
             }
             BuildStatus::Succeeded | BuildStatus::Failed => {
+                if self.status != status {
+                    tracing::debug!(bar = %self.name, from = ?self.status, to = ?status, "status change");
+                }
                 self.status = status;
             }
-            BuildStatus::Idle => {}
+            BuildStatus::Idle => {
+                if self.status == BuildStatus::Running {
+                    tracing::warn!(bar = %self.name, "Idle received while Running");
+                }
+            }
         }
+    }
+
+    /// Advance animation for Running bars. Called by UI every ~1s.
+    pub fn tick(&mut self, tick_area_width: usize) {
+        if self.status != BuildStatus::Running || tick_area_width == 0 {
+            return;
+        }
+        self.advance_fill(tick_area_width);
+    }
+
+    fn advance_fill(&mut self, tick_area_width: usize) {
+        self.write_pos += 1;
+        if self.write_pos >= tick_area_width {
+            self.write_pos = 0;
+            self.fill = 0;
+        }
+        self.fill += 1;
     }
 }
 
@@ -65,6 +89,8 @@ pub struct WorkflowGroup {
     pub name: String,
     pub jobs: Vec<Bar>,
     pub gone: bool,
+    /// Workflow-level status from runs API; shown as dot before jobs load.
+    pub summary_status: BuildStatus,
 }
 
 #[cfg(test)]
@@ -84,24 +110,99 @@ mod tests {
         assert!(!bar.gone);
     }
 
+    // --- set_status tests ---
+
     #[test]
-    fn running_increments_fill_and_pos() {
+    fn set_status_idle_to_running_resets() {
         let mut bar = make_bar(BarSource::CodePipeline);
-        bar.update(BuildStatus::Running, 10);
+        bar.fill = 5;
+        bar.write_pos = 5;
+        bar.set_status(BuildStatus::Running);
         assert_eq!(bar.status, BuildStatus::Running);
-        assert_eq!(bar.fill, 1);
-        assert_eq!(bar.write_pos, 1);
-        bar.update(BuildStatus::Running, 10);
+        assert_eq!(bar.fill, 0);
+        assert_eq!(bar.write_pos, 0);
+    }
+
+    #[test]
+    fn set_status_running_while_running_no_reset() {
+        let mut bar = make_bar(BarSource::CodePipeline);
+        bar.set_status(BuildStatus::Running);
+        bar.tick(10);
+        bar.tick(10);
+        assert_eq!(bar.fill, 2);
+        bar.set_status(BuildStatus::Running);
         assert_eq!(bar.fill, 2);
         assert_eq!(bar.write_pos, 2);
     }
 
     #[test]
-    fn running_wraps_at_width() {
+    fn set_status_succeeded_from_running() {
         let mut bar = make_bar(BarSource::CodePipeline);
+        bar.set_status(BuildStatus::Running);
+        bar.tick(10);
+        bar.set_status(BuildStatus::Succeeded);
+        assert_eq!(bar.status, BuildStatus::Succeeded);
+        assert_eq!(bar.fill, 1);
+    }
+
+    #[test]
+    fn set_status_failed_from_running() {
+        let mut bar = make_bar(BarSource::CodePipeline);
+        bar.set_status(BuildStatus::Running);
+        bar.tick(10);
+        bar.set_status(BuildStatus::Failed);
+        assert_eq!(bar.status, BuildStatus::Failed);
+        assert_eq!(bar.fill, 1);
+    }
+
+    #[test]
+    fn set_status_idle_is_noop() {
+        let mut bar = make_bar(BarSource::CodePipeline);
+        bar.set_status(BuildStatus::Running);
+        bar.tick(10);
+        let fill_before = bar.fill;
+        let pos_before = bar.write_pos;
+        bar.set_status(BuildStatus::Idle);
+        assert_eq!(bar.fill, fill_before);
+        assert_eq!(bar.write_pos, pos_before);
+        assert_eq!(bar.status, BuildStatus::Running);
+    }
+
+    #[test]
+    fn set_status_resets_on_new_execution() {
+        let mut bar = make_bar(BarSource::CodePipeline);
+        bar.set_status(BuildStatus::Running);
+        bar.tick(10);
+        bar.tick(10);
+        bar.set_status(BuildStatus::Succeeded);
+        assert_eq!(bar.fill, 2);
+        // New execution starts
+        bar.set_status(BuildStatus::Running);
+        assert_eq!(bar.fill, 0);
+        assert_eq!(bar.write_pos, 0);
+    }
+
+    // --- tick tests ---
+
+    #[test]
+    fn tick_advances_running_bar() {
+        let mut bar = make_bar(BarSource::CodePipeline);
+        bar.set_status(BuildStatus::Running);
+        bar.tick(10);
+        assert_eq!(bar.fill, 1);
+        assert_eq!(bar.write_pos, 1);
+        bar.tick(10);
+        assert_eq!(bar.fill, 2);
+        assert_eq!(bar.write_pos, 2);
+    }
+
+    #[test]
+    fn tick_wraps_at_width() {
+        let mut bar = make_bar(BarSource::CodePipeline);
+        bar.set_status(BuildStatus::Running);
         let width = 3;
         for _ in 0..3 {
-            bar.update(BuildStatus::Running, width);
+            bar.tick(width);
         }
         assert_eq!(bar.write_pos, 0);
         assert_eq!(bar.fill, 1);
@@ -109,38 +210,58 @@ mod tests {
     }
 
     #[test]
-    fn wrap_resets_then_continues() {
+    fn tick_wrap_resets_then_continues() {
         let mut bar = make_bar(BarSource::GitHubAction);
+        bar.set_status(BuildStatus::Running);
         let width = 2;
-        bar.update(BuildStatus::Running, width);
-        bar.update(BuildStatus::Running, width);
+        bar.tick(width);
+        bar.tick(width);
         assert_eq!(bar.write_pos, 0);
         assert_eq!(bar.fill, 1);
-        bar.update(BuildStatus::Running, width);
+        bar.tick(width);
         assert_eq!(bar.write_pos, 1);
         assert_eq!(bar.fill, 2);
     }
 
     #[test]
-    fn succeeded_freezes_bar() {
+    fn tick_noop_for_idle() {
         let mut bar = make_bar(BarSource::CodePipeline);
-        bar.update(BuildStatus::Running, 10);
-        bar.update(BuildStatus::Running, 10);
-        bar.update(BuildStatus::Succeeded, 10);
-        assert_eq!(bar.status, BuildStatus::Succeeded);
-        assert_eq!(bar.fill, 2);
-        assert_eq!(bar.write_pos, 2);
+        bar.tick(10);
+        assert_eq!(bar.fill, 0);
+        assert_eq!(bar.write_pos, 0);
     }
 
     #[test]
-    fn failed_freezes_bar() {
+    fn tick_noop_for_succeeded() {
         let mut bar = make_bar(BarSource::CodePipeline);
-        bar.update(BuildStatus::Running, 10);
-        bar.update(BuildStatus::Failed, 10);
-        assert_eq!(bar.status, BuildStatus::Failed);
+        bar.set_status(BuildStatus::Running);
+        bar.tick(10);
+        bar.set_status(BuildStatus::Succeeded);
+        bar.tick(10);
         assert_eq!(bar.fill, 1);
         assert_eq!(bar.write_pos, 1);
     }
+
+    #[test]
+    fn tick_noop_for_failed() {
+        let mut bar = make_bar(BarSource::CodePipeline);
+        bar.set_status(BuildStatus::Running);
+        bar.tick(10);
+        bar.set_status(BuildStatus::Failed);
+        bar.tick(10);
+        assert_eq!(bar.fill, 1);
+    }
+
+    #[test]
+    fn tick_noop_for_zero_width() {
+        let mut bar = make_bar(BarSource::CodePipeline);
+        bar.set_status(BuildStatus::Running);
+        bar.tick(0);
+        assert_eq!(bar.fill, 0);
+        assert_eq!(bar.write_pos, 0);
+    }
+
+    // --- WorkflowGroup tests ---
 
     #[test]
     fn workflow_group_new() {
@@ -148,6 +269,7 @@ mod tests {
             name: "CI".to_string(),
             jobs: vec![],
             gone: false,
+            summary_status: BuildStatus::Idle,
         };
         assert_eq!(group.name, "CI");
         assert!(group.jobs.is_empty());
@@ -163,6 +285,7 @@ mod tests {
                 Bar::new("test".to_string(), BarSource::GitHubAction),
             ],
             gone: false,
+            summary_status: BuildStatus::Running,
         };
         assert_eq!(group.jobs.len(), 2);
         assert_eq!(group.jobs[0].name, "build");
@@ -175,20 +298,9 @@ mod tests {
             name: "CI".to_string(),
             jobs: vec![],
             gone: false,
+            summary_status: BuildStatus::Idle,
         };
         group.gone = true;
         assert!(group.gone);
-    }
-
-    #[test]
-    fn idle_leaves_bar_unchanged() {
-        let mut bar = make_bar(BarSource::CodePipeline);
-        bar.update(BuildStatus::Running, 10);
-        let fill_before = bar.fill;
-        let pos_before = bar.write_pos;
-        bar.update(BuildStatus::Idle, 10);
-        assert_eq!(bar.fill, fill_before);
-        assert_eq!(bar.write_pos, pos_before);
-        assert_eq!(bar.status, BuildStatus::Running);
     }
 }

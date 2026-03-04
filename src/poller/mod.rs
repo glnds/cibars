@@ -61,7 +61,6 @@ pub trait ActionsClient: Send + Sync {
 pub async fn poll_pipelines_tick(
     app: &Arc<Mutex<App>>,
     client: &dyn PipelineClient,
-    tick_area_width: usize,
     profile: &str,
 ) {
     {
@@ -71,8 +70,9 @@ pub async fn poll_pipelines_tick(
 
     match poll_pipelines(client).await {
         Ok(states) => {
+            tracing::debug!(count = states.len(), "polled pipelines");
             let mut a = app.lock().expect("app mutex poisoned");
-            update_pipeline_bars(&mut a, states, tick_area_width);
+            update_pipeline_bars(&mut a, states);
         }
         Err(e) => {
             let msg = format!("{e:#}");
@@ -95,11 +95,7 @@ pub async fn poll_pipelines_tick(
 /// Poll GitHub Actions in two phases for fast perceived startup.
 /// Phase 1: fetch workflow summaries (1 API call) → update UI immediately.
 /// Phase 2: fetch jobs per workflow in parallel → update UI with details.
-pub async fn poll_actions_tick(
-    app: &Arc<Mutex<App>>,
-    client: &dyn ActionsClient,
-    tick_area_width: usize,
-) {
+pub async fn poll_actions_tick(app: &Arc<Mutex<App>>, client: &dyn ActionsClient) {
     let skip_github = {
         let a = app.lock().expect("app mutex poisoned");
         a.rate_limited_until
@@ -162,7 +158,7 @@ pub async fn poll_actions_tick(
         for (summary, jobs_result) in summaries.iter().zip(job_results) {
             match jobs_result {
                 Ok(jobs) => {
-                    update_workflow_jobs(&mut a, &summary.workflow_name, jobs, tick_area_width);
+                    update_workflow_jobs(&mut a, &summary.workflow_name, jobs);
                 }
                 Err(e) => {
                     tracing::error!(
@@ -183,11 +179,10 @@ pub async fn poll_once(
     app: &Arc<Mutex<App>>,
     pipeline_client: &dyn PipelineClient,
     actions_client: &dyn ActionsClient,
-    tick_area_width: usize,
 ) {
     tokio::join!(
-        poll_pipelines_tick(app, pipeline_client, tick_area_width, "test-profile"),
-        poll_actions_tick(app, actions_client, tick_area_width),
+        poll_pipelines_tick(app, pipeline_client, "test-profile"),
+        poll_actions_tick(app, actions_client),
     );
 }
 
@@ -197,7 +192,7 @@ async fn poll_pipelines(client: &dyn PipelineClient) -> Result<Vec<PipelineState
     futures::future::join_all(futs).await.into_iter().collect()
 }
 
-fn update_pipeline_bars(app: &mut App, states: Vec<PipelineState>, tick_area_width: usize) {
+fn update_pipeline_bars(app: &mut App, states: Vec<PipelineState>) {
     let seen: HashSet<String> = states.iter().map(|s| s.name.clone()).collect();
 
     for bar in &mut app.bars_pipelines {
@@ -209,10 +204,10 @@ fn update_pipeline_bars(app: &mut App, states: Vec<PipelineState>, tick_area_wid
     for state in states {
         if let Some(bar) = app.bars_pipelines.iter_mut().find(|b| b.name == state.name) {
             bar.gone = false;
-            bar.update(state.status, tick_area_width);
+            bar.set_status(state.status);
         } else {
             let mut bar = Bar::new(state.name, BarSource::CodePipeline);
-            bar.update(state.status, tick_area_width);
+            bar.set_status(state.status);
             app.bars_pipelines.push(bar);
         }
     }
@@ -248,12 +243,7 @@ fn update_workflow_summaries(app: &mut App, summaries: &[WorkflowRunSummary]) {
 }
 
 /// Phase 2: fill in jobs for a specific workflow group.
-fn update_workflow_jobs(
-    app: &mut App,
-    workflow_name: &str,
-    jobs: Vec<JobInfo>,
-    tick_area_width: usize,
-) {
+fn update_workflow_jobs(app: &mut App, workflow_name: &str, jobs: Vec<JobInfo>) {
     let group = match app
         .workflow_groups
         .iter_mut()
@@ -274,10 +264,10 @@ fn update_workflow_jobs(
     for job_info in jobs {
         if let Some(bar) = group.jobs.iter_mut().find(|b| b.name == job_info.name) {
             bar.gone = false;
-            bar.update(job_info.status, tick_area_width);
+            bar.set_status(job_info.status);
         } else {
             let mut bar = Bar::new(job_info.name, BarSource::GitHubAction);
-            bar.update(job_info.status, tick_area_width);
+            bar.set_status(job_info.status);
             group.jobs.push(bar);
         }
     }
@@ -366,7 +356,7 @@ mod tests {
             }],
         };
 
-        poll_once(&app, &pipes, &actions, 20).await;
+        poll_once(&app, &pipes, &actions).await;
 
         let app = app.lock().unwrap();
         assert_eq!(app.bars_pipelines.len(), 1);
@@ -390,10 +380,10 @@ mod tests {
             }],
         };
         let actions = MockActionsClient { runs: vec![] };
-        poll_once(&app, &pipes, &actions, 20).await;
+        poll_once(&app, &pipes, &actions).await;
 
         let pipes = MockPipelineClient { pipelines: vec![] };
-        poll_once(&app, &pipes, &actions, 20).await;
+        poll_once(&app, &pipes, &actions).await;
 
         let app = app.lock().unwrap();
         assert_eq!(app.bars_pipelines.len(), 1);
@@ -410,12 +400,14 @@ mod tests {
             }],
         };
         let actions = MockActionsClient { runs: vec![] };
-        poll_once(&app, &pipes, &actions, 20).await;
-        poll_once(&app, &pipes, &actions, 20).await;
+        poll_once(&app, &pipes, &actions).await;
+        poll_once(&app, &pipes, &actions).await;
 
         let app = app.lock().unwrap();
         assert_eq!(app.bars_pipelines.len(), 1);
-        assert_eq!(app.bars_pipelines[0].fill, 2);
+        // fill stays 0: set_status doesn't advance fill, tick() does (UI responsibility)
+        assert_eq!(app.bars_pipelines[0].fill, 0);
+        assert_eq!(app.bars_pipelines[0].status, BuildStatus::Running);
     }
 
     struct FailingPipelineClient;
@@ -435,7 +427,7 @@ mod tests {
         let app = Arc::new(Mutex::new(App::new()));
         let pipes = FailingPipelineClient;
         let actions = MockActionsClient { runs: vec![] };
-        poll_once(&app, &pipes, &actions, 20).await;
+        poll_once(&app, &pipes, &actions).await;
 
         let app = app.lock().unwrap();
         assert_eq!(app.warnings.len(), 1);
@@ -464,7 +456,7 @@ mod tests {
                 ],
             }],
         };
-        poll_once(&app, &pipes, &actions, 20).await;
+        poll_once(&app, &pipes, &actions).await;
 
         let app = app.lock().unwrap();
         assert_eq!(app.workflow_groups.len(), 1);
@@ -492,10 +484,10 @@ mod tests {
                 jobs: vec![],
             }],
         };
-        poll_once(&app, &pipes, &actions, 20).await;
+        poll_once(&app, &pipes, &actions).await;
 
         let actions = MockActionsClient { runs: vec![] };
-        poll_once(&app, &pipes, &actions, 20).await;
+        poll_once(&app, &pipes, &actions).await;
 
         let app = app.lock().unwrap();
         assert_eq!(app.workflow_groups.len(), 1);
@@ -510,7 +502,7 @@ mod tests {
 
         let pipes = FailingPipelineClient;
         let actions = MockActionsClient { runs: vec![] };
-        poll_once(&app, &pipes, &actions, 20).await;
+        poll_once(&app, &pipes, &actions).await;
 
         let app = app.lock().unwrap();
         assert!(!app.loading_pipelines);
@@ -533,7 +525,7 @@ mod tests {
     async fn poll_expired_token_shows_sso_login_hint() {
         let app = Arc::new(Mutex::new(App::new()));
         let pipes = ExpiredTokenClient;
-        poll_pipelines_tick(&app, &pipes, 20, "my-profile").await;
+        poll_pipelines_tick(&app, &pipes, "my-profile").await;
 
         let app = app.lock().unwrap();
         assert_eq!(app.warnings.len(), 1);
@@ -563,7 +555,7 @@ mod tests {
                 ],
             }],
         };
-        poll_once(&app, &pipes, &actions, 20).await;
+        poll_once(&app, &pipes, &actions).await;
 
         // Second poll: "test" job disappears
         let actions = MockActionsClient {
@@ -577,7 +569,7 @@ mod tests {
                 }],
             }],
         };
-        poll_once(&app, &pipes, &actions, 20).await;
+        poll_once(&app, &pipes, &actions).await;
 
         let app = app.lock().unwrap();
         let group = &app.workflow_groups[0];

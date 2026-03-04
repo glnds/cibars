@@ -4,7 +4,7 @@ pub mod statusbar;
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
@@ -47,6 +47,7 @@ fn sorted_workflow_groups(groups: &[WorkflowGroup]) -> Vec<&WorkflowGroup> {
 const MIN_WIDTH: u16 = 80;
 const MIN_HEIGHT: u16 = 10;
 const TICK_RATE_MS: u64 = 250;
+const ANIMATION_INTERVAL: Duration = Duration::from_secs(1);
 
 fn sorted_bars(bars: &[Bar]) -> Vec<&Bar> {
     let mut sorted: Vec<&Bar> = bars.iter().collect();
@@ -67,6 +68,7 @@ pub fn run_ui(
     refresh_tx: tokio::sync::watch::Sender<()>,
     term_flag: &AtomicBool,
 ) -> Result<()> {
+    let mut last_animation = Instant::now();
     loop {
         // Check SIGTERM flag
         if term_flag.load(Ordering::Relaxed) {
@@ -202,6 +204,28 @@ pub fn run_ui(
             drop(app);
         })?;
 
+        // Advance animation for Running bars every ~1s
+        if last_animation.elapsed() >= ANIMATION_INTERVAL {
+            last_animation = Instant::now();
+            if let Ok(mut a) = app.lock() {
+                let width = a.terminal_width as usize;
+
+                let pipe_name_width = compute_name_width(&a.bars_pipelines);
+                let pipe_fill_width = width.saturating_sub(pipe_name_width + 4);
+                for bar in &mut a.bars_pipelines {
+                    bar.tick(pipe_fill_width);
+                }
+
+                let job_name_width = all_jobs_name_width(&a.workflow_groups);
+                let job_fill_width = width.saturating_sub(job_name_width + 4);
+                for group in &mut a.workflow_groups {
+                    for job in &mut group.jobs {
+                        job.tick(job_fill_width);
+                    }
+                }
+            }
+        }
+
         if event::poll(Duration::from_millis(TICK_RATE_MS))? {
             if let Event::Key(key) = event::read()? {
                 if key.kind != KeyEventKind::Press {
@@ -268,6 +292,7 @@ mod tests {
                     Bar::new("test".to_string(), BarSource::GitHubAction),
                 ],
                 gone: false,
+                summary_status: BuildStatus::Running,
             },
             WorkflowGroup {
                 name: "Deploy".to_string(),
@@ -276,6 +301,7 @@ mod tests {
                     BarSource::GitHubAction,
                 )],
                 gone: true,
+                summary_status: BuildStatus::Succeeded,
             },
         ];
 

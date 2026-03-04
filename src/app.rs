@@ -10,7 +10,7 @@ pub struct App {
     pub actions_expanded: bool,
     pub last_poll: Option<DateTime<Utc>>,
     pub warnings: Vec<String>,
-    /// Terminal width (updated each UI render), used by poller for tick_area_width.
+    /// Terminal width (updated each UI render), used by animation tick.
     pub terminal_width: u16,
     /// If set, skip GitHub polling until this instant (rate limit back-off).
     pub rate_limited_until: Option<Instant>,
