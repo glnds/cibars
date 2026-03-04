@@ -27,14 +27,18 @@ pub struct JobInfo {
     pub status: BuildStatus,
 }
 
-/// Simplified workflow run from GitHub API
+/// Workflow summary from the runs API (no jobs yet).
+pub struct WorkflowRunSummary {
+    pub workflow_name: String,
+    pub run_id: u64,
+    pub status: BuildStatus,
+}
+
+/// Full workflow run including jobs. Used in tests.
+#[cfg(test)]
 pub struct WorkflowRunInfo {
     pub workflow_name: String,
-    /// Used by GitHubActionsClient to fetch jobs; not read elsewhere.
-    #[allow(dead_code)]
     pub run_id: u64,
-    /// Overall run status; kept for data-model completeness.
-    #[allow(dead_code)]
     pub status: BuildStatus,
     pub jobs: Vec<JobInfo>,
 }
@@ -47,13 +51,53 @@ pub trait PipelineClient: Send + Sync {
 
 #[async_trait]
 pub trait ActionsClient: Send + Sync {
-    async fn list_workflow_runs(&self) -> Result<Vec<WorkflowRunInfo>>;
+    /// Fast: single API call, returns workflow-level status only.
+    async fn list_latest_runs(&self) -> Result<Vec<WorkflowRunSummary>>;
+    /// Fetch jobs for a specific run.
+    async fn fetch_run_jobs(&self, run_id: u64) -> Result<Vec<JobInfo>>;
 }
 
-pub async fn poll_once(
+/// Poll AWS pipelines and update app state. Clears only AWS-specific warnings.
+pub async fn poll_pipelines_tick(
     app: &Arc<Mutex<App>>,
-    pipeline_client: &dyn PipelineClient,
-    actions_client: &dyn ActionsClient,
+    client: &dyn PipelineClient,
+    tick_area_width: usize,
+    profile: &str,
+) {
+    {
+        let mut a = app.lock().expect("app mutex poisoned");
+        a.warnings.retain(|w| !w.starts_with("AWS:"));
+    }
+
+    match poll_pipelines(client).await {
+        Ok(states) => {
+            let mut a = app.lock().expect("app mutex poisoned");
+            update_pipeline_bars(&mut a, states, tick_area_width);
+        }
+        Err(e) => {
+            let msg = format!("{e:#}");
+            let mut a = app.lock().expect("app mutex poisoned");
+            if msg.contains("ExpiredToken") || msg.contains("UnauthorizedException") {
+                a.warnings.push(format!(
+                    "AWS: SSO session expired \u{2014} run `aws sso login --profile {profile}` then press R"
+                ));
+            } else {
+                a.warnings.push(format!("AWS: {msg}"));
+            }
+        }
+    }
+
+    let mut a = app.lock().expect("app mutex poisoned");
+    a.loading_pipelines = false;
+    a.last_poll = Some(Utc::now());
+}
+
+/// Poll GitHub Actions in two phases for fast perceived startup.
+/// Phase 1: fetch workflow summaries (1 API call) → update UI immediately.
+/// Phase 2: fetch jobs per workflow in parallel → update UI with details.
+pub async fn poll_actions_tick(
+    app: &Arc<Mutex<App>>,
+    client: &dyn ActionsClient,
     tick_area_width: usize,
 ) {
     let skip_github = {
@@ -65,79 +109,92 @@ pub async fn poll_once(
 
     {
         let mut a = app.lock().expect("app mutex poisoned");
-        a.warnings.clear();
+        a.warnings.retain(|w| !w.starts_with("GitHub:"));
     }
 
-    let pipe_fut = poll_pipelines(pipeline_client);
-    let actions_fut = async {
-        if skip_github {
-            Err(anyhow::anyhow!("rate-limited, backing off"))
-        } else {
-            poll_actions(actions_client).await
+    if skip_github {
+        let mut a = app.lock().expect("app mutex poisoned");
+        a.warnings
+            .push("GitHub: rate-limited, backing off".to_string());
+        a.loading_actions = false;
+        return;
+    }
+
+    // Phase 1: fetch workflow summaries (single API call)
+    let summaries = match client.list_latest_runs().await {
+        Ok(s) => s,
+        Err(e) => {
+            let msg = format!("{e:#}");
+            let mut a = app.lock().expect("app mutex poisoned");
+            if msg.to_lowercase().contains("rate limit") {
+                a.rate_limited_until =
+                    Some(Instant::now() + Duration::from_secs(RATE_LIMIT_BACKOFF_SECS));
+                a.warnings.push(format!(
+                    "GitHub: rate limited, backing off {RATE_LIMIT_BACKOFF_SECS}s"
+                ));
+            } else {
+                a.warnings.push(format!("GitHub: {msg}"));
+            }
+            a.loading_actions = false;
+            a.last_poll = Some(Utc::now());
+            return;
         }
     };
 
-    tokio::pin!(pipe_fut);
-    tokio::pin!(actions_fut);
-    let mut pipe_done = false;
-    let mut actions_done = false;
-
-    while !pipe_done || !actions_done {
-        tokio::select! {
-            result = &mut pipe_fut, if !pipe_done => {
-                pipe_done = true;
-                let mut a = app.lock().expect("app mutex poisoned");
-                match result {
-                    Ok(states) => {
-                        update_pipeline_bars(&mut a, states, tick_area_width);
-                    }
-                    Err(e) => {
-                        a.warnings.push(format!("AWS: {e:#}"));
-                    }
-                }
-                a.loading_pipelines = false;
-            }
-            result = &mut actions_fut, if !actions_done => {
-                actions_done = true;
-                let mut a = app.lock().expect("app mutex poisoned");
-                match result {
-                    Ok(runs) => {
-                        update_workflows(&mut a, runs, tick_area_width);
-                        a.rate_limited_until = None;
-                    }
-                    Err(e) => {
-                        let msg = format!("{e:#}");
-                        if msg.to_lowercase().contains("rate limit") {
-                            a.rate_limited_until =
-                                Some(Instant::now() + Duration::from_secs(RATE_LIMIT_BACKOFF_SECS));
-                            a.warnings.push(format!(
-                                "GitHub: rate limited, backing off {RATE_LIMIT_BACKOFF_SECS}s"
-                            ));
-                        } else if !skip_github {
-                            a.warnings.push(format!("GitHub: {msg}"));
-                        } else {
-                            a.warnings
-                                .push("GitHub: rate-limited, backing off".to_string());
-                        }
-                    }
-                }
-                a.loading_actions = false;
-            }
-        }
+    // Update UI with workflow-level status immediately
+    {
+        let mut a = app.lock().expect("app mutex poisoned");
+        update_workflow_summaries(&mut a, &summaries);
+        a.rate_limited_until = None;
+        a.loading_actions = false;
+        a.last_poll = Some(Utc::now());
     }
 
-    let mut a = app.lock().expect("app mutex poisoned");
-    a.last_poll = Some(Utc::now());
+    // Phase 2: fetch jobs for each workflow in parallel
+    let job_futs: Vec<_> = summaries
+        .iter()
+        .map(|s| client.fetch_run_jobs(s.run_id))
+        .collect();
+    let job_results = futures::future::join_all(job_futs).await;
+
+    {
+        let mut a = app.lock().expect("app mutex poisoned");
+        for (summary, jobs_result) in summaries.iter().zip(job_results) {
+            match jobs_result {
+                Ok(jobs) => {
+                    update_workflow_jobs(&mut a, &summary.workflow_name, jobs, tick_area_width);
+                }
+                Err(e) => {
+                    tracing::error!(
+                        workflow = %summary.workflow_name,
+                        error = %e,
+                        "failed to fetch jobs"
+                    );
+                }
+            }
+        }
+        a.last_poll = Some(Utc::now());
+    }
+}
+
+/// Poll both sources in parallel. Used by tests.
+#[cfg(test)]
+pub async fn poll_once(
+    app: &Arc<Mutex<App>>,
+    pipeline_client: &dyn PipelineClient,
+    actions_client: &dyn ActionsClient,
+    tick_area_width: usize,
+) {
+    tokio::join!(
+        poll_pipelines_tick(app, pipeline_client, tick_area_width, "test-profile"),
+        poll_actions_tick(app, actions_client, tick_area_width),
+    );
 }
 
 async fn poll_pipelines(client: &dyn PipelineClient) -> Result<Vec<PipelineState>> {
     let names = client.list_pipeline_names().await?;
     let futs: Vec<_> = names.iter().map(|n| client.get_pipeline_state(n)).collect();
     futures::future::join_all(futs).await.into_iter().collect()
-}
-
-async fn poll_actions(client: &dyn ActionsClient) -> Result<Vec<WorkflowRunInfo>> {
-    client.list_workflow_runs().await
 }
 
 fn update_pipeline_bars(app: &mut App, states: Vec<PipelineState>, tick_area_width: usize) {
@@ -161,52 +218,67 @@ fn update_pipeline_bars(app: &mut App, states: Vec<PipelineState>, tick_area_wid
     }
 }
 
-fn update_workflows(app: &mut App, runs: Vec<WorkflowRunInfo>, tick_area_width: usize) {
-    let seen: HashSet<String> = runs.iter().map(|r| r.workflow_name.clone()).collect();
+/// Phase 1: create/update workflow groups from summaries (no jobs yet).
+fn update_workflow_summaries(app: &mut App, summaries: &[WorkflowRunSummary]) {
+    let seen: HashSet<&str> = summaries.iter().map(|s| s.workflow_name.as_str()).collect();
 
-    // Mark gone groups
     for group in &mut app.workflow_groups {
-        if !seen.contains(&group.name) {
+        if !seen.contains(group.name.as_str()) {
             group.gone = true;
         }
     }
 
-    for run in runs {
-        let group = if let Some(g) = app
+    for summary in summaries {
+        if let Some(g) = app
             .workflow_groups
             .iter_mut()
-            .find(|g| g.name == run.workflow_name)
+            .find(|g| g.name == summary.workflow_name)
         {
             g.gone = false;
-            g
+            g.summary_status = summary.status.clone();
         } else {
             app.workflow_groups.push(WorkflowGroup {
-                name: run.workflow_name,
+                name: summary.workflow_name.clone(),
                 jobs: Vec::new(),
                 gone: false,
+                summary_status: summary.status.clone(),
             });
-            app.workflow_groups.last_mut().expect("just pushed")
-        };
-
-        let seen_jobs: HashSet<String> = run.jobs.iter().map(|j| j.name.clone()).collect();
-
-        // Mark gone jobs
-        for job in &mut group.jobs {
-            if !seen_jobs.contains(&job.name) {
-                job.gone = true;
-            }
         }
+    }
+}
 
-        // Create/update jobs
-        for job_info in run.jobs {
-            if let Some(bar) = group.jobs.iter_mut().find(|b| b.name == job_info.name) {
-                bar.gone = false;
-                bar.update(job_info.status, tick_area_width);
-            } else {
-                let mut bar = Bar::new(job_info.name, BarSource::GitHubAction);
-                bar.update(job_info.status, tick_area_width);
-                group.jobs.push(bar);
-            }
+/// Phase 2: fill in jobs for a specific workflow group.
+fn update_workflow_jobs(
+    app: &mut App,
+    workflow_name: &str,
+    jobs: Vec<JobInfo>,
+    tick_area_width: usize,
+) {
+    let group = match app
+        .workflow_groups
+        .iter_mut()
+        .find(|g| g.name == workflow_name)
+    {
+        Some(g) => g,
+        None => return,
+    };
+
+    let seen_jobs: HashSet<String> = jobs.iter().map(|j| j.name.clone()).collect();
+
+    for job in &mut group.jobs {
+        if !seen_jobs.contains(&job.name) {
+            job.gone = true;
+        }
+    }
+
+    for job_info in jobs {
+        if let Some(bar) = group.jobs.iter_mut().find(|b| b.name == job_info.name) {
+            bar.gone = false;
+            bar.update(job_info.status, tick_area_width);
+        } else {
+            let mut bar = Bar::new(job_info.name, BarSource::GitHubAction);
+            bar.update(job_info.status, tick_area_width);
+            group.jobs.push(bar);
         }
     }
 }
@@ -243,24 +315,33 @@ mod tests {
 
     #[async_trait]
     impl ActionsClient for MockActionsClient {
-        async fn list_workflow_runs(&self) -> Result<Vec<WorkflowRunInfo>> {
+        async fn list_latest_runs(&self) -> Result<Vec<WorkflowRunSummary>> {
             Ok(self
                 .runs
                 .iter()
-                .map(|r| WorkflowRunInfo {
+                .map(|r| WorkflowRunSummary {
                     workflow_name: r.workflow_name.clone(),
                     run_id: r.run_id,
                     status: r.status.clone(),
-                    jobs: r
-                        .jobs
+                })
+                .collect())
+        }
+
+        async fn fetch_run_jobs(&self, run_id: u64) -> Result<Vec<JobInfo>> {
+            Ok(self
+                .runs
+                .iter()
+                .find(|r| r.run_id == run_id)
+                .map(|r| {
+                    r.jobs
                         .iter()
                         .map(|j| JobInfo {
                             name: j.name.clone(),
                             status: j.status.clone(),
                         })
-                        .collect(),
+                        .collect()
                 })
-                .collect())
+                .unwrap_or_default())
         }
     }
 
@@ -434,6 +515,30 @@ mod tests {
         let app = app.lock().unwrap();
         assert!(!app.loading_pipelines);
         assert!(!app.loading_actions);
+    }
+
+    struct ExpiredTokenClient;
+
+    #[async_trait]
+    impl PipelineClient for ExpiredTokenClient {
+        async fn list_pipeline_names(&self) -> Result<Vec<String>> {
+            anyhow::bail!("ExpiredToken: the security token is expired")
+        }
+        async fn get_pipeline_state(&self, _name: &str) -> Result<PipelineState> {
+            anyhow::bail!("ExpiredToken")
+        }
+    }
+
+    #[tokio::test]
+    async fn poll_expired_token_shows_sso_login_hint() {
+        let app = Arc::new(Mutex::new(App::new()));
+        let pipes = ExpiredTokenClient;
+        poll_pipelines_tick(&app, &pipes, 20, "my-profile").await;
+
+        let app = app.lock().unwrap();
+        assert_eq!(app.warnings.len(), 1);
+        assert!(app.warnings[0].contains("aws sso login"));
+        assert!(app.warnings[0].contains("my-profile"));
     }
 
     #[tokio::test]

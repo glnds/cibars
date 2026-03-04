@@ -50,7 +50,7 @@ async fn run_aws_poller(
             let a = app.lock().expect("app mutex poisoned");
             a.terminal_width as usize
         };
-        poller::poll_pipelines_tick(&app, &client, tick_area_width).await;
+        poller::poll_pipelines_tick(&app, &client, tick_area_width, &config.aws_profile).await;
         tokio::select! {
             _ = tokio::time::sleep(std::time::Duration::from_secs(30)) => {}
             _ = refresh_rx.changed() => {}
