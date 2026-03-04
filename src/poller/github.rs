@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 
-use super::{ActionsClient, JobInfo, WorkflowRunInfo};
+use super::{ActionsClient, JobInfo, WorkflowRunSummary};
 use crate::model::BuildStatus;
 
 pub struct GitHubActionsClient {
@@ -39,7 +39,7 @@ pub fn map_run_status(status: &str, conclusion: Option<&str>) -> BuildStatus {
 
 #[async_trait]
 impl ActionsClient for GitHubActionsClient {
-    async fn list_workflow_runs(&self) -> Result<Vec<WorkflowRunInfo>> {
+    async fn list_latest_runs(&self) -> Result<Vec<WorkflowRunSummary>> {
         let route = format!(
             "/repos/{}/{}/actions/runs?per_page=50",
             self.owner, self.repo,
@@ -50,7 +50,6 @@ impl ActionsClient for GitHubActionsClient {
             .await
             .context("failed to list workflow runs")?;
 
-        // Deduplicate to latest run per workflow
         let mut latest_per_workflow: std::collections::HashMap<String, (u64, BuildStatus)> =
             std::collections::HashMap::new();
 
@@ -72,41 +71,17 @@ impl ActionsClient for GitHubActionsClient {
             "deduped workflow runs"
         );
 
-        // Fetch jobs for each workflow's latest run in parallel
-        let entries: Vec<_> = latest_per_workflow.into_iter().collect();
-        let job_futs: Vec<_> = entries
-            .iter()
-            .map(|(_, (run_id, _))| self.fetch_jobs(*run_id))
-            .collect();
-        let job_results = futures::future::join_all(job_futs).await;
-
-        let mut results = Vec::new();
-        for ((workflow_name, (run_id, status)), jobs_result) in entries.into_iter().zip(job_results)
-        {
-            let jobs = match jobs_result {
-                Ok(j) => {
-                    tracing::debug!(workflow = %workflow_name, run_id, count = j.len(), "fetched jobs");
-                    j
-                }
-                Err(e) => {
-                    tracing::error!(workflow = %workflow_name, run_id, error = %e, "failed to fetch jobs");
-                    Vec::new()
-                }
-            };
-            results.push(WorkflowRunInfo {
+        Ok(latest_per_workflow
+            .into_iter()
+            .map(|(workflow_name, (run_id, status))| WorkflowRunSummary {
                 workflow_name,
                 run_id,
                 status,
-                jobs,
-            });
-        }
-
-        Ok(results)
+            })
+            .collect())
     }
-}
 
-impl GitHubActionsClient {
-    async fn fetch_jobs(&self, run_id: u64) -> Result<Vec<JobInfo>> {
+    async fn fetch_run_jobs(&self, run_id: u64) -> Result<Vec<JobInfo>> {
         let route = format!(
             "/repos/{}/{}/actions/runs/{run_id}/jobs",
             self.owner, self.repo,
