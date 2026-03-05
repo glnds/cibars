@@ -15,17 +15,6 @@ impl AwsPipelineClient {
     }
 }
 
-/// Map AWS pipeline execution status string to BuildStatus.
-#[allow(dead_code)]
-pub fn map_pipeline_status(status: Option<&str>) -> BuildStatus {
-    match status {
-        Some("InProgress") => BuildStatus::Running,
-        Some("Succeeded") => BuildStatus::Succeeded,
-        Some("Failed") | Some("Stopped") | Some("Superseded") => BuildStatus::Failed,
-        _ => BuildStatus::Idle,
-    }
-}
-
 /// Aggregate statuses across all pipeline stages.
 /// Priority: Running > Failed > Succeeded > Idle.
 pub fn aggregate_stage_statuses(stage_statuses: &[Option<&str>]) -> BuildStatus {
@@ -92,6 +81,16 @@ impl PipelineClient for AwsPipelineClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Map AWS pipeline execution status string to BuildStatus.
+    fn map_pipeline_status(status: Option<&str>) -> BuildStatus {
+        match status {
+            Some("InProgress") => BuildStatus::Running,
+            Some("Succeeded") => BuildStatus::Succeeded,
+            Some("Failed") | Some("Stopped") | Some("Superseded") => BuildStatus::Failed,
+            _ => BuildStatus::Idle,
+        }
+    }
 
     #[test]
     fn maps_in_progress() {

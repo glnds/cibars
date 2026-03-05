@@ -78,7 +78,7 @@ impl Default for App {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{Bar, BarSource, WorkflowGroup};
+    use crate::model::{Bar, WorkflowGroup};
 
     #[test]
     fn app_starts_with_loading_flags() {
@@ -96,7 +96,7 @@ mod tests {
     #[test]
     fn has_any_running_pipeline_running() {
         let mut app = App::new();
-        let mut bar = Bar::new("deploy".into(), BarSource::CodePipeline);
+        let mut bar = Bar::new("deploy".into());
         bar.set_status(BuildStatus::Running);
         app.bars_pipelines.push(bar);
         assert!(app.has_any_running());
@@ -117,7 +117,7 @@ mod tests {
     #[test]
     fn has_any_running_gh_job_running() {
         let mut app = App::new();
-        let mut job = Bar::new("build".into(), BarSource::GitHubAction);
+        let mut job = Bar::new("build".into());
         job.set_status(BuildStatus::Running);
         app.workflow_groups.push(WorkflowGroup {
             name: "CI".into(),
@@ -143,7 +143,7 @@ mod tests {
     #[test]
     fn has_any_running_all_succeeded() {
         let mut app = App::new();
-        let mut bar = Bar::new("deploy".into(), BarSource::CodePipeline);
+        let mut bar = Bar::new("deploy".into());
         bar.set_status(BuildStatus::Succeeded);
         app.bars_pipelines.push(bar);
         app.workflow_groups.push(WorkflowGroup {

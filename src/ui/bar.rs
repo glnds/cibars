@@ -157,12 +157,11 @@ impl Widget for PipelinesTitle<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{BarSource, BuildStatus};
+    use crate::model::BuildStatus;
 
     fn make_bar(name: &str, status: BuildStatus, fill: usize) -> Bar {
         Bar {
             name: name.to_string(),
-            source: BarSource::CodePipeline,
             status,
             fill,
             write_pos: fill,
@@ -273,7 +272,7 @@ mod tests {
                 .iter()
                 .enumerate()
                 .map(|(i, s)| {
-                    let mut bar = Bar::new(format!("job-{i}"), BarSource::GitHubAction);
+                    let mut bar = Bar::new(format!("job-{i}"));
                     bar.status = *s;
                     bar
                 })

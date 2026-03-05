@@ -18,17 +18,9 @@ impl BuildStatus {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
-pub enum BarSource {
-    CodePipeline,
-    GitHubAction,
-}
-
 #[derive(Debug, Clone)]
 pub struct Bar {
     pub name: String,
-    #[allow(dead_code)]
-    pub source: BarSource,
     pub status: BuildStatus,
     /// Number of '|' chars filled in current lap
     pub fill: usize,
@@ -39,10 +31,9 @@ pub struct Bar {
 }
 
 impl Bar {
-    pub fn new(name: String, source: BarSource) -> Self {
+    pub fn new(name: String) -> Self {
         Self {
             name,
-            source,
             status: BuildStatus::Idle,
             fill: 0,
             write_pos: 0,
@@ -108,13 +99,13 @@ pub struct WorkflowGroup {
 mod tests {
     use super::*;
 
-    fn make_bar(source: BarSource) -> Bar {
-        Bar::new("test-pipe".to_string(), source)
+    fn make_bar() -> Bar {
+        Bar::new("test-pipe".to_string())
     }
 
     #[test]
     fn new_bar_is_idle() {
-        let bar = make_bar(BarSource::CodePipeline);
+        let bar = make_bar();
         assert_eq!(bar.status, BuildStatus::Idle);
         assert_eq!(bar.fill, 0);
         assert_eq!(bar.write_pos, 0);
@@ -125,7 +116,7 @@ mod tests {
 
     #[test]
     fn set_status_idle_to_running_resets() {
-        let mut bar = make_bar(BarSource::CodePipeline);
+        let mut bar = make_bar();
         bar.fill = 5;
         bar.write_pos = 5;
         bar.set_status(BuildStatus::Running);
@@ -136,7 +127,7 @@ mod tests {
 
     #[test]
     fn set_status_running_while_running_no_reset() {
-        let mut bar = make_bar(BarSource::CodePipeline);
+        let mut bar = make_bar();
         bar.set_status(BuildStatus::Running);
         bar.tick(10);
         bar.tick(10);
@@ -148,7 +139,7 @@ mod tests {
 
     #[test]
     fn set_status_succeeded_from_running() {
-        let mut bar = make_bar(BarSource::CodePipeline);
+        let mut bar = make_bar();
         bar.set_status(BuildStatus::Running);
         bar.tick(10);
         bar.set_status(BuildStatus::Succeeded);
@@ -158,7 +149,7 @@ mod tests {
 
     #[test]
     fn set_status_failed_from_running() {
-        let mut bar = make_bar(BarSource::CodePipeline);
+        let mut bar = make_bar();
         bar.set_status(BuildStatus::Running);
         bar.tick(10);
         bar.set_status(BuildStatus::Failed);
@@ -168,7 +159,7 @@ mod tests {
 
     #[test]
     fn set_status_idle_is_noop() {
-        let mut bar = make_bar(BarSource::CodePipeline);
+        let mut bar = make_bar();
         bar.set_status(BuildStatus::Running);
         bar.tick(10);
         let fill_before = bar.fill;
@@ -181,7 +172,7 @@ mod tests {
 
     #[test]
     fn set_status_resets_on_new_execution() {
-        let mut bar = make_bar(BarSource::CodePipeline);
+        let mut bar = make_bar();
         bar.set_status(BuildStatus::Running);
         bar.tick(10);
         bar.tick(10);
@@ -197,7 +188,7 @@ mod tests {
 
     #[test]
     fn tick_advances_running_bar() {
-        let mut bar = make_bar(BarSource::CodePipeline);
+        let mut bar = make_bar();
         bar.set_status(BuildStatus::Running);
         bar.tick(10);
         assert_eq!(bar.fill, 1);
@@ -209,7 +200,7 @@ mod tests {
 
     #[test]
     fn tick_wraps_at_width() {
-        let mut bar = make_bar(BarSource::CodePipeline);
+        let mut bar = make_bar();
         bar.set_status(BuildStatus::Running);
         let width = 3;
         for _ in 0..3 {
@@ -222,7 +213,7 @@ mod tests {
 
     #[test]
     fn tick_wrap_resets_then_continues() {
-        let mut bar = make_bar(BarSource::GitHubAction);
+        let mut bar = make_bar();
         bar.set_status(BuildStatus::Running);
         let width = 2;
         bar.tick(width);
@@ -236,7 +227,7 @@ mod tests {
 
     #[test]
     fn tick_noop_for_idle() {
-        let mut bar = make_bar(BarSource::CodePipeline);
+        let mut bar = make_bar();
         bar.tick(10);
         assert_eq!(bar.fill, 0);
         assert_eq!(bar.write_pos, 0);
@@ -244,7 +235,7 @@ mod tests {
 
     #[test]
     fn tick_noop_for_succeeded() {
-        let mut bar = make_bar(BarSource::CodePipeline);
+        let mut bar = make_bar();
         bar.set_status(BuildStatus::Running);
         bar.tick(10);
         bar.set_status(BuildStatus::Succeeded);
@@ -255,7 +246,7 @@ mod tests {
 
     #[test]
     fn tick_noop_for_failed() {
-        let mut bar = make_bar(BarSource::CodePipeline);
+        let mut bar = make_bar();
         bar.set_status(BuildStatus::Running);
         bar.tick(10);
         bar.set_status(BuildStatus::Failed);
@@ -265,7 +256,7 @@ mod tests {
 
     #[test]
     fn tick_noop_for_zero_width() {
-        let mut bar = make_bar(BarSource::CodePipeline);
+        let mut bar = make_bar();
         bar.set_status(BuildStatus::Running);
         bar.tick(0);
         assert_eq!(bar.fill, 0);
@@ -291,10 +282,7 @@ mod tests {
     fn workflow_group_with_jobs() {
         let group = WorkflowGroup {
             name: "CI".to_string(),
-            jobs: vec![
-                Bar::new("build".to_string(), BarSource::GitHubAction),
-                Bar::new("test".to_string(), BarSource::GitHubAction),
-            ],
+            jobs: vec![Bar::new("build".to_string()), Bar::new("test".to_string())],
             gone: false,
             summary_status: BuildStatus::Running,
         };

@@ -295,12 +295,11 @@ pub fn run_ui(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{Bar, BarSource, BuildStatus};
+    use crate::model::{Bar, BuildStatus};
 
     fn make_test_bar(name: &str, status: BuildStatus) -> Bar {
         Bar {
             name: name.to_string(),
-            source: BarSource::CodePipeline,
             status,
             fill: 0,
             write_pos: 0,
@@ -328,19 +327,13 @@ mod tests {
         let groups = vec![
             WorkflowGroup {
                 name: "CI".to_string(),
-                jobs: vec![
-                    Bar::new("build".to_string(), BarSource::GitHubAction),
-                    Bar::new("test".to_string(), BarSource::GitHubAction),
-                ],
+                jobs: vec![Bar::new("build".to_string()), Bar::new("test".to_string())],
                 gone: false,
                 summary_status: BuildStatus::Running,
             },
             WorkflowGroup {
                 name: "Deploy".to_string(),
-                jobs: vec![Bar::new(
-                    "deploy-backend".to_string(),
-                    BarSource::GitHubAction,
-                )],
+                jobs: vec![Bar::new("deploy-backend".to_string())],
                 gone: true,
                 summary_status: BuildStatus::Succeeded,
             },

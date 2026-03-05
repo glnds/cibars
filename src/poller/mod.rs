@@ -10,7 +10,7 @@ use async_trait::async_trait;
 use chrono::Utc;
 
 use crate::app::App;
-use crate::model::{Bar, BarSource, BuildStatus, WorkflowGroup};
+use crate::model::{Bar, BuildStatus, WorkflowGroup};
 
 /// How long to back off when GitHub rate limit is hit.
 const RATE_LIMIT_BACKOFF_SECS: u64 = 60;
@@ -191,7 +191,7 @@ async fn poll_pipelines(client: &dyn PipelineClient) -> Result<Vec<PipelineState
     futures::future::join_all(futs).await.into_iter().collect()
 }
 
-fn reconcile_bars(bars: &mut Vec<Bar>, updates: Vec<(String, BuildStatus)>, source: BarSource) {
+fn reconcile_bars(bars: &mut Vec<Bar>, updates: Vec<(String, BuildStatus)>) {
     let seen: HashSet<&str> = updates.iter().map(|(n, _)| n.as_str()).collect();
     for bar in bars.iter_mut() {
         if !seen.contains(bar.name.as_str()) {
@@ -203,7 +203,7 @@ fn reconcile_bars(bars: &mut Vec<Bar>, updates: Vec<(String, BuildStatus)>, sour
             bar.gone = false;
             bar.set_status(status);
         } else {
-            let mut bar = Bar::new(name, source.clone());
+            let mut bar = Bar::new(name);
             bar.set_status(status);
             bars.push(bar);
         }
@@ -212,7 +212,7 @@ fn reconcile_bars(bars: &mut Vec<Bar>, updates: Vec<(String, BuildStatus)>, sour
 
 fn update_pipeline_bars(app: &mut App, states: Vec<PipelineState>) {
     let updates: Vec<_> = states.into_iter().map(|s| (s.name, s.status)).collect();
-    reconcile_bars(&mut app.bars_pipelines, updates, BarSource::CodePipeline);
+    reconcile_bars(&mut app.bars_pipelines, updates);
 }
 
 /// Phase 1: create/update workflow groups from summaries (no jobs yet).
@@ -256,7 +256,7 @@ fn update_workflow_jobs(app: &mut App, workflow_name: &str, jobs: Vec<JobInfo>) 
     };
 
     let updates: Vec<_> = jobs.into_iter().map(|j| (j.name, j.status)).collect();
-    reconcile_bars(&mut group.jobs, updates, BarSource::GitHubAction);
+    reconcile_bars(&mut group.jobs, updates);
 }
 
 #[cfg(test)]
