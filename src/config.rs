@@ -1,7 +1,16 @@
+use std::path::Path;
 use std::process::Command;
 
 use anyhow::{ensure, Context, Result};
 use clap::Parser;
+use serde::Deserialize;
+
+#[derive(Deserialize, Debug, Default)]
+pub struct FileConfig {
+    pub aws_profile: Option<String>,
+    pub region: Option<String>,
+    pub github_repo: Option<String>,
+}
 
 #[derive(Parser, Debug, Clone)]
 #[command(name = "cibars", about = "CI build status bars")]
@@ -124,6 +133,38 @@ mod tests {
             "eu-west-1",
         ]);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn file_config_parses_full_toml() {
+        let toml_str = r#"
+aws_profile = "staging"
+region = "eu-west-1"
+github_repo = "acme/backend"
+"#;
+        let fc: FileConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(fc.aws_profile.unwrap(), "staging");
+        assert_eq!(fc.region.unwrap(), "eu-west-1");
+        assert_eq!(fc.github_repo.unwrap(), "acme/backend");
+    }
+
+    #[test]
+    fn file_config_parses_partial_toml() {
+        let toml_str = r#"
+aws_profile = "staging"
+"#;
+        let fc: FileConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(fc.aws_profile.unwrap(), "staging");
+        assert!(fc.region.is_none());
+        assert!(fc.github_repo.is_none());
+    }
+
+    #[test]
+    fn file_config_parses_empty_toml() {
+        let fc: FileConfig = toml::from_str("").unwrap();
+        assert!(fc.aws_profile.is_none());
+        assert!(fc.region.is_none());
+        assert!(fc.github_repo.is_none());
     }
 
     #[test]
