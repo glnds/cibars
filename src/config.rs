@@ -36,9 +36,9 @@ pub struct Config {
 }
 
 impl Config {
-    pub fn load() -> Result<(Self, String)> {
+    pub fn load(cwd: &Path) -> Result<(Self, String)> {
         let cli = CliArgs::parse();
-        let file = load_file_config(&std::env::current_dir().context("cannot read cwd")?);
+        let file = load_file_config(cwd);
         let config = Self::merge_sources(cli, file)?;
         let token = resolve_github_token()?;
         Ok((config, token))
@@ -148,7 +148,7 @@ pub fn install_pre_push_hook(dir: &Path) -> Result<()> {
     let existing = std::fs::read_to_string(&hook_path).unwrap_or_default();
 
     // Idempotent: skip if already contains the boost command
-    if existing.contains("pkill -USR1 cibars") {
+    if existing.contains("USR1") && existing.contains("cibars") {
         return Ok(());
     }
 
@@ -442,6 +442,24 @@ aws_profile = "staging"
         install_pre_push_hook(dir.path()).unwrap();
         let content = std::fs::read_to_string(hooks_dir.join("pre-push")).unwrap();
         assert_eq!(content.matches("pkill -USR1 cibars").count(), 1);
+    }
+
+    #[test]
+    fn install_hook_idempotent_with_variant_command() {
+        let dir = tempfile::tempdir().unwrap();
+        let hooks_dir = dir.path().join(".git/hooks");
+        std::fs::create_dir_all(&hooks_dir).unwrap();
+        // Pre-existing hook uses kill variant instead of pkill
+        std::fs::write(
+            hooks_dir.join("pre-push"),
+            "#!/bin/sh\nkill -USR1 $(pgrep cibars)\n",
+        )
+        .unwrap();
+        install_pre_push_hook(dir.path()).unwrap();
+        let content = std::fs::read_to_string(hooks_dir.join("pre-push")).unwrap();
+        // Should NOT append another snippet since USR1+cibars already present
+        assert!(!content.contains("pkill -USR1 cibars"));
+        assert!(content.contains("kill -USR1 $(pgrep cibars)"));
     }
 
     #[cfg(unix)]

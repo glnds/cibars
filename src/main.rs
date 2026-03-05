@@ -123,10 +123,9 @@ fn main() -> Result<()> {
 
     setup_tracing()?;
 
-    let (config, token) = Config::load()?;
-    tracing::info!("starting cibars");
-
     let cwd = std::env::current_dir().context("cannot read cwd")?;
+    let (config, token) = Config::load(&cwd)?;
+    tracing::info!("starting cibars");
     let mut app_state = App::new();
     app_state.hook_status = config::check_pre_push_hook(&cwd);
     let app = Arc::new(Mutex::new(app_state));

@@ -257,17 +257,27 @@ pub fn run_ui(
                         boost_notify.notify_one();
                     }
                     KeyCode::Char('h') => {
-                        if let Ok(mut a) = app.lock() {
-                            if matches!(a.hook_status, HookStatus::Missing | HookStatus::Incomplete)
-                            {
-                                if let Ok(cwd) = std::env::current_dir() {
-                                    match crate::config::install_pre_push_hook(&cwd) {
+                        let should_install = app
+                            .lock()
+                            .map(|a| {
+                                matches!(
+                                    a.hook_status,
+                                    HookStatus::Missing | HookStatus::Incomplete
+                                )
+                            })
+                            .unwrap_or(false);
+
+                        if should_install {
+                            if let Ok(cwd) = std::env::current_dir() {
+                                let result = crate::config::install_pre_push_hook(&cwd);
+                                if let Ok(mut a) = app.lock() {
+                                    match result {
                                         Ok(()) => {
                                             a.hook_status = HookStatus::Installed;
                                             tracing::info!("pre-push hook installed");
                                         }
                                         Err(e) => {
-                                            a.warnings.push(format!("hook install failed: {e}"));
+                                            a.push_warning(format!("hook install failed: {e}"));
                                             tracing::warn!("hook install failed: {e:#}");
                                         }
                                     }

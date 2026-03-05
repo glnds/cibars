@@ -78,11 +78,11 @@ pub async fn poll_pipelines_tick(
             let msg = format!("{e:#}");
             let mut a = app.lock().expect("app mutex poisoned");
             if msg.contains("ExpiredToken") || msg.contains("UnauthorizedException") {
-                a.warnings.push(format!(
+                a.push_warning(format!(
                     "AWS: SSO session expired \u{2014} run `aws sso login --profile {profile}` then press b"
                 ));
             } else {
-                a.warnings.push(format!("AWS: {msg}"));
+                a.push_warning(format!("AWS: {msg}"));
             }
         }
     }
@@ -110,8 +110,7 @@ pub async fn poll_actions_tick(app: &Arc<Mutex<App>>, client: &dyn ActionsClient
 
     if skip_github {
         let mut a = app.lock().expect("app mutex poisoned");
-        a.warnings
-            .push("GitHub: rate-limited, backing off".to_string());
+        a.push_warning("GitHub: rate-limited, backing off".to_string());
         a.loading_actions = false;
         return;
     }
@@ -125,11 +124,11 @@ pub async fn poll_actions_tick(app: &Arc<Mutex<App>>, client: &dyn ActionsClient
             if msg.to_lowercase().contains("rate limit") {
                 a.rate_limited_until =
                     Some(Instant::now() + Duration::from_secs(RATE_LIMIT_BACKOFF_SECS));
-                a.warnings.push(format!(
+                a.push_warning(format!(
                     "GitHub: rate limited, backing off {RATE_LIMIT_BACKOFF_SECS}s"
                 ));
             } else {
-                a.warnings.push(format!("GitHub: {msg}"));
+                a.push_warning(format!("GitHub: {msg}"));
             }
             a.loading_actions = false;
             a.last_poll = Some(Utc::now());

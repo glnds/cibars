@@ -31,6 +31,8 @@ pub struct App {
 }
 
 impl App {
+    pub const MAX_WARNINGS: usize = 10;
+
     pub fn new() -> Self {
         Self {
             bars_pipelines: Vec::new(),
@@ -47,6 +49,13 @@ impl App {
             cooldown_remaining: None,
             hook_status: HookStatus::NoGitDir,
         }
+    }
+
+    pub fn push_warning(&mut self, msg: String) {
+        if self.warnings.len() >= Self::MAX_WARNINGS {
+            self.warnings.remove(0);
+        }
+        self.warnings.push(msg);
     }
 
     pub fn has_any_running(&self) -> bool {
@@ -117,6 +126,18 @@ mod tests {
             summary_status: BuildStatus::Succeeded,
         });
         assert!(app.has_any_running());
+    }
+
+    #[test]
+    fn push_warning_caps_at_limit() {
+        let mut app = App::new();
+        for i in 0..15 {
+            app.push_warning(format!("warning {i}"));
+        }
+        assert_eq!(app.warnings.len(), App::MAX_WARNINGS);
+        // Oldest warnings dropped, newest kept
+        assert_eq!(app.warnings[0], "warning 5");
+        assert_eq!(app.warnings[App::MAX_WARNINGS - 1], "warning 14");
     }
 
     #[test]
