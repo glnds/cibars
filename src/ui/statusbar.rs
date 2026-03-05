@@ -6,6 +6,7 @@ use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Widget;
 
+use crate::config::HookStatus;
 use crate::poll_scheduler::PollState;
 
 const NUM_TICKS: u64 = 5;
@@ -15,6 +16,7 @@ pub struct StatusBar<'a> {
     pub elapsed_since_poll: Duration,
     pub cooldown_remaining: Option<Duration>,
     pub warnings: &'a [String],
+    pub hook_status: &'a HookStatus,
 }
 
 /// Compute how many ticks are filled based on elapsed time and state interval.
@@ -53,6 +55,16 @@ impl Widget for StatusBar<'_> {
 
         spans.push(Span::raw(" | e=expand b=boost q=quit"));
 
+        match self.hook_status {
+            HookStatus::Missing | HookStatus::Incomplete => {
+                spans.push(Span::styled(
+                    " | h=install pre-push hook",
+                    Style::default().fg(Color::Yellow),
+                ));
+            }
+            _ => {}
+        }
+
         if !self.warnings.is_empty() {
             let warn_text = format!(" | {}", self.warnings.join("; "));
             spans.push(Span::styled(warn_text, Style::default().fg(Color::Yellow)));
@@ -69,11 +81,21 @@ mod tests {
     use ratatui::layout::Rect;
 
     fn render_bar(state: &PollState, elapsed: Duration, cooldown: Option<Duration>) -> String {
+        render_bar_with_hook(state, elapsed, cooldown, &HookStatus::Installed)
+    }
+
+    fn render_bar_with_hook(
+        state: &PollState,
+        elapsed: Duration,
+        cooldown: Option<Duration>,
+        hook_status: &HookStatus,
+    ) -> String {
         let bar = StatusBar {
             poll_state: state,
             elapsed_since_poll: elapsed,
             cooldown_remaining: cooldown,
             warnings: &[],
+            hook_status,
         };
         let area = Rect::new(0, 0, 120, 1);
         let mut buf = Buffer::empty(area);
@@ -165,6 +187,35 @@ mod tests {
             filled_ticks(Duration::from_secs(999), &PollState::Active),
             5
         );
+    }
+
+    #[test]
+    fn shows_hook_hint_when_missing() {
+        let content =
+            render_bar_with_hook(&PollState::Idle, Duration::ZERO, None, &HookStatus::Missing);
+        assert!(content.contains("h=install"), "got: {content}");
+    }
+
+    #[test]
+    fn shows_hook_hint_when_incomplete() {
+        let content = render_bar_with_hook(
+            &PollState::Idle,
+            Duration::ZERO,
+            None,
+            &HookStatus::Incomplete,
+        );
+        assert!(content.contains("h=install"), "got: {content}");
+    }
+
+    #[test]
+    fn no_hook_hint_when_installed() {
+        let content = render_bar_with_hook(
+            &PollState::Idle,
+            Duration::ZERO,
+            None,
+            &HookStatus::Installed,
+        );
+        assert!(!content.contains("h=install"), "got: {content}");
     }
 
     #[test]

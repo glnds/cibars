@@ -110,6 +110,68 @@ fn resolve_github_token() -> Result<String> {
     Ok(token)
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HookStatus {
+    Installed,
+    Incomplete,
+    Missing,
+    NoGitDir,
+}
+
+pub fn check_pre_push_hook(dir: &Path) -> HookStatus {
+    let git_dir = dir.join(".git");
+    if !git_dir.is_dir() {
+        return HookStatus::NoGitDir;
+    }
+    let hook_path = git_dir.join("hooks/pre-push");
+    match std::fs::read_to_string(&hook_path) {
+        Ok(contents) => {
+            if contents.contains("USR1") && contents.contains("cibars") {
+                HookStatus::Installed
+            } else {
+                HookStatus::Incomplete
+            }
+        }
+        Err(_) => HookStatus::Missing,
+    }
+}
+
+const HOOK_SNIPPET: &str =
+    "\n# cibars: boost polling on push\npkill -USR1 cibars 2>/dev/null || true\n";
+
+pub fn install_pre_push_hook(dir: &Path) -> Result<()> {
+    let hook_path = dir.join(".git/hooks/pre-push");
+    let hooks_dir = dir.join(".git/hooks");
+    std::fs::create_dir_all(&hooks_dir)
+        .with_context(|| format!("cannot create {}", hooks_dir.display()))?;
+
+    let existing = std::fs::read_to_string(&hook_path).unwrap_or_default();
+
+    // Idempotent: skip if already contains the boost command
+    if existing.contains("pkill -USR1 cibars") {
+        return Ok(());
+    }
+
+    let content = if existing.is_empty() {
+        format!("#!/bin/sh{HOOK_SNIPPET}")
+    } else {
+        format!("{existing}{HOOK_SNIPPET}")
+    };
+
+    std::fs::write(&hook_path, content)
+        .with_context(|| format!("cannot write {}", hook_path.display()))?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(&hook_path)?.permissions();
+        perms.set_mode(perms.mode() | 0o755);
+        std::fs::set_permissions(&hook_path, perms)?;
+    }
+
+    Ok(())
+}
+
 fn load_file_config(dir: &Path) -> FileConfig {
     let path = dir.join("config.toml");
     match std::fs::read_to_string(&path) {
@@ -297,6 +359,103 @@ aws_profile = "staging"
         };
         let result = Config::merge(&["cibars"], file);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn hook_status_missing_when_no_git_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(check_pre_push_hook(dir.path()), HookStatus::NoGitDir);
+    }
+
+    #[test]
+    fn hook_status_missing_when_no_hook_file() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(".git/hooks")).unwrap();
+        assert_eq!(check_pre_push_hook(dir.path()), HookStatus::Missing);
+    }
+
+    #[test]
+    fn hook_status_incomplete_when_no_boost_command() {
+        let dir = tempfile::tempdir().unwrap();
+        let hooks_dir = dir.path().join(".git/hooks");
+        std::fs::create_dir_all(&hooks_dir).unwrap();
+        std::fs::write(hooks_dir.join("pre-push"), "#!/bin/sh\necho pushing\n").unwrap();
+        assert_eq!(check_pre_push_hook(dir.path()), HookStatus::Incomplete);
+    }
+
+    #[test]
+    fn hook_status_installed_when_boost_present() {
+        let dir = tempfile::tempdir().unwrap();
+        let hooks_dir = dir.path().join(".git/hooks");
+        std::fs::create_dir_all(&hooks_dir).unwrap();
+        std::fs::write(
+            hooks_dir.join("pre-push"),
+            "#!/bin/sh\npkill -USR1 cibars 2>/dev/null\nexit 0\n",
+        )
+        .unwrap();
+        assert_eq!(check_pre_push_hook(dir.path()), HookStatus::Installed);
+    }
+
+    #[test]
+    fn hook_status_installed_with_variant_commands() {
+        let dir = tempfile::tempdir().unwrap();
+        let hooks_dir = dir.path().join(".git/hooks");
+        std::fs::create_dir_all(&hooks_dir).unwrap();
+        // kill -USR1 variant (not pkill)
+        std::fs::write(
+            hooks_dir.join("pre-push"),
+            "#!/bin/sh\nkill -USR1 $(pgrep cibars)\n",
+        )
+        .unwrap();
+        assert_eq!(check_pre_push_hook(dir.path()), HookStatus::Installed);
+    }
+
+    #[test]
+    fn install_hook_creates_new_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let hooks_dir = dir.path().join(".git/hooks");
+        std::fs::create_dir_all(&hooks_dir).unwrap();
+        install_pre_push_hook(dir.path()).unwrap();
+        let content = std::fs::read_to_string(hooks_dir.join("pre-push")).unwrap();
+        assert!(content.contains("#!/bin/sh"));
+        assert!(content.contains("pkill -USR1 cibars"));
+    }
+
+    #[test]
+    fn install_hook_appends_to_existing() {
+        let dir = tempfile::tempdir().unwrap();
+        let hooks_dir = dir.path().join(".git/hooks");
+        std::fs::create_dir_all(&hooks_dir).unwrap();
+        std::fs::write(hooks_dir.join("pre-push"), "#!/bin/sh\necho pushing\n").unwrap();
+        install_pre_push_hook(dir.path()).unwrap();
+        let content = std::fs::read_to_string(hooks_dir.join("pre-push")).unwrap();
+        assert!(content.contains("echo pushing"));
+        assert!(content.contains("pkill -USR1 cibars"));
+    }
+
+    #[test]
+    fn install_hook_is_idempotent() {
+        let dir = tempfile::tempdir().unwrap();
+        let hooks_dir = dir.path().join(".git/hooks");
+        std::fs::create_dir_all(&hooks_dir).unwrap();
+        install_pre_push_hook(dir.path()).unwrap();
+        install_pre_push_hook(dir.path()).unwrap();
+        let content = std::fs::read_to_string(hooks_dir.join("pre-push")).unwrap();
+        assert_eq!(content.matches("pkill -USR1 cibars").count(), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn install_hook_sets_executable() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let hooks_dir = dir.path().join(".git/hooks");
+        std::fs::create_dir_all(&hooks_dir).unwrap();
+        install_pre_push_hook(dir.path()).unwrap();
+        let perms = std::fs::metadata(hooks_dir.join("pre-push"))
+            .unwrap()
+            .permissions();
+        assert!(perms.mode() & 0o111 != 0, "hook should be executable");
     }
 
     #[test]

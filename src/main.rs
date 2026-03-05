@@ -126,7 +126,10 @@ fn main() -> Result<()> {
     let (config, token) = Config::load()?;
     tracing::info!("starting cibars");
 
-    let app = Arc::new(Mutex::new(App::new()));
+    let cwd = std::env::current_dir().context("cannot read cwd")?;
+    let mut app_state = App::new();
+    app_state.hook_status = config::check_pre_push_hook(&cwd);
+    let app = Arc::new(Mutex::new(app_state));
 
     // Build tokio runtime for async polling
     let rt = tokio::runtime::Runtime::new()?;

@@ -16,6 +16,7 @@ use ratatui::widgets::Paragraph;
 use ratatui::DefaultTerminal;
 
 use crate::app::App;
+use crate::config::HookStatus;
 use crate::model::{Bar, BuildStatus, WorkflowGroup};
 use crate::poll_scheduler::PollState;
 
@@ -207,6 +208,7 @@ pub fn run_ui(
                     elapsed_since_poll: elapsed,
                     cooldown_remaining: app.cooldown_remaining,
                     warnings: &app.warnings,
+                    hook_status: &app.hook_status,
                 },
                 areas[idx],
             );
@@ -253,6 +255,25 @@ pub fn run_ui(
                     }
                     KeyCode::Char('b') => {
                         boost_notify.notify_one();
+                    }
+                    KeyCode::Char('h') => {
+                        if let Ok(mut a) = app.lock() {
+                            if matches!(a.hook_status, HookStatus::Missing | HookStatus::Incomplete)
+                            {
+                                if let Ok(cwd) = std::env::current_dir() {
+                                    match crate::config::install_pre_push_hook(&cwd) {
+                                        Ok(()) => {
+                                            a.hook_status = HookStatus::Installed;
+                                            tracing::info!("pre-push hook installed");
+                                        }
+                                        Err(e) => {
+                                            a.warnings.push(format!("hook install failed: {e}"));
+                                            tracing::warn!("hook install failed: {e:#}");
+                                        }
+                                    }
+                                }
+                            }
+                        }
                     }
                     _ => {}
                 }

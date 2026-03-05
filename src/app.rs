@@ -2,6 +2,7 @@ use std::time::Instant;
 
 use chrono::{DateTime, Utc};
 
+use crate::config::HookStatus;
 use crate::model::{Bar, BuildStatus, WorkflowGroup};
 use crate::poll_scheduler::PollState;
 
@@ -25,6 +26,8 @@ pub struct App {
     pub last_poll_started: Option<Instant>,
     /// Cooldown remaining, set by orchestrator for UI display.
     pub cooldown_remaining: Option<std::time::Duration>,
+    /// Git pre-push hook status for boost integration.
+    pub hook_status: HookStatus,
 }
 
 impl App {
@@ -42,6 +45,7 @@ impl App {
             poll_state: PollState::Idle,
             last_poll_started: None,
             cooldown_remaining: None,
+            hook_status: HookStatus::NoGitDir,
         }
     }
 
