@@ -78,6 +78,20 @@ fn resolve_github_token() -> Result<String> {
     Ok(token)
 }
 
+fn load_file_config(dir: &Path) -> FileConfig {
+    let path = dir.join("config.toml");
+    match std::fs::read_to_string(&path) {
+        Ok(contents) => {
+            tracing::info!("loaded config from {}", path.display());
+            toml::from_str(&contents).unwrap_or_else(|e| {
+                tracing::warn!("failed to parse {}: {e}", path.display());
+                FileConfig::default()
+            })
+        }
+        Err(_) => FileConfig::default(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -133,6 +147,34 @@ mod tests {
             "eu-west-1",
         ]);
         assert!(result.is_err());
+    }
+
+    use std::io::Write;
+
+    #[test]
+    fn load_file_config_reads_toml_from_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("config.toml");
+        let mut f = std::fs::File::create(&config_path).unwrap();
+        write!(
+            f,
+            "aws_profile = \"prod\"\nregion = \"us-east-1\"\ngithub_repo = \"org/repo\""
+        )
+        .unwrap();
+
+        let fc = load_file_config(dir.path());
+        assert_eq!(fc.aws_profile.unwrap(), "prod");
+        assert_eq!(fc.region.unwrap(), "us-east-1");
+        assert_eq!(fc.github_repo.unwrap(), "org/repo");
+    }
+
+    #[test]
+    fn load_file_config_returns_default_when_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let fc = load_file_config(dir.path());
+        assert!(fc.aws_profile.is_none());
+        assert!(fc.region.is_none());
+        assert!(fc.github_repo.is_none());
     }
 
     #[test]
