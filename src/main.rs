@@ -9,6 +9,8 @@ use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
+use tokio::signal::unix::{signal, SignalKind};
+
 use anyhow::{Context, Result};
 
 use app::App;
@@ -49,6 +51,7 @@ async fn run_poll_orchestrator(
     config: Config,
     token: String,
     boost_notify: Arc<tokio::sync::Notify>,
+    mut sigusr1: tokio::signal::unix::Signal,
 ) -> Result<()> {
     let (owner, repo) = config
         .github_repo
@@ -98,12 +101,16 @@ async fn run_poll_orchestrator(
             "poll cycle complete"
         );
 
-        // Sleep, interruptible by boost key
+        // Sleep, interruptible by boost key or SIGUSR1
         let interval = scheduler.interval();
         tokio::select! {
             _ = tokio::time::sleep(interval) => {}
             _ = boost_notify.notified() => {
                 scheduler.boost();
+            }
+            _ = sigusr1.recv() => {
+                scheduler.boost();
+                tracing::info!("boost triggered by SIGUSR1");
             }
         }
     }
@@ -133,12 +140,18 @@ fn main() -> Result<()> {
     signal_hook::flag::register(signal_hook::consts::SIGTERM, Arc::clone(&term_flag))
         .context("failed to register SIGTERM handler")?;
 
+    // SIGUSR1 handling: external boost trigger (e.g. git pre-push hook)
+    let sigusr1 =
+        signal(SignalKind::user_defined1()).context("failed to register SIGUSR1 handler")?;
+
     // Spawn single poll orchestrator
     let poll_app = app.clone();
     let poll_config = config.clone();
     let poll_boost = boost_notify.clone();
     rt.spawn(async move {
-        if let Err(e) = run_poll_orchestrator(poll_app, poll_config, token, poll_boost).await {
+        if let Err(e) =
+            run_poll_orchestrator(poll_app, poll_config, token, poll_boost, sigusr1).await
+        {
             tracing::error!("poll orchestrator failed: {e:#}");
         }
     });

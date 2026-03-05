@@ -10,7 +10,7 @@ single screen — no browser required.
 
 - Live polling of AWS CodePipelines and GitHub Actions
 - Intelligent polling: slow when idle, fast when builds are running
-- Manual boost (`b`) for immediate refresh
+- Manual boost (`b`) or external boost (SIGUSR1) for immediate refresh
 - htop-inspired terminal UI: compact, color-coded, always up-to-date
 - Visual indicators for running, succeeded, and failed builds
 - Auto-discovery of new pipelines and workflow runs — no restart needed
@@ -115,7 +115,7 @@ to give immediate visibility into current status.
 
 **Key transitions:**
 
-- Press `b` in Idle/LongIdle → Watching (fast GH-only polling)
+- Press `b` or send SIGUSR1 in Idle/LongIdle → Watching (fast GH-only polling)
 - 5min of Idle with no running builds → LongIdle (5min polling)
 - GitHub finds running builds → Active (adds AWS polling)
 - All builds finish → Cooldown (keeps fast polling for 60s)
@@ -137,6 +137,28 @@ cp target/release/cibars ~/.local/bin/
 tmux new-window -n cibars
 tmux send-keys 'cibars --aws-profile staging --region eu-west-1 --github-repo acme/backend' Enter
 ```
+
+## External boost via SIGUSR1
+
+Send `SIGUSR1` to trigger an immediate poll boost from outside
+the TUI — no pane switching needed:
+
+```bash
+kill -USR1 $(pgrep cibars)
+```
+
+### Git pre-push hook
+
+Auto-boost cibars on every `git push`:
+
+```bash
+# .git/hooks/pre-push
+#!/bin/sh
+pkill -USR1 cibars 2>/dev/null
+exit 0
+```
+
+Make it executable: `chmod +x .git/hooks/pre-push`
 
 ## License
 
