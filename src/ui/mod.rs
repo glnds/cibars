@@ -63,6 +63,36 @@ fn sorted_bars(bars: &[Bar]) -> Vec<&Bar> {
     sorted
 }
 
+/// Handle the 'h' key press: install pre-push hook if needed.
+/// Returns true if installation was attempted.
+fn handle_hook_install(app: &Arc<Mutex<App>>) -> bool {
+    let should_install = app
+        .lock()
+        .map(|a| matches!(a.hook_status, HookStatus::Missing | HookStatus::Incomplete))
+        .unwrap_or(false);
+
+    if !should_install {
+        return false;
+    }
+
+    if let Ok(cwd) = std::env::current_dir() {
+        let result = crate::config::install_pre_push_hook(&cwd);
+        if let Ok(mut a) = app.lock() {
+            match result {
+                Ok(()) => {
+                    a.hook_status = HookStatus::Installed;
+                    tracing::info!("pre-push hook installed");
+                }
+                Err(e) => {
+                    a.push_warning(format!("hook install failed: {e}"));
+                    tracing::warn!("hook install failed: {e:#}");
+                }
+            }
+        }
+    }
+    true
+}
+
 pub fn run_ui(
     app: Arc<Mutex<App>>,
     mut terminal: DefaultTerminal,
@@ -258,33 +288,7 @@ pub fn run_ui(
                         boost_notify.notify_one();
                     }
                     KeyCode::Char('h') => {
-                        let should_install = app
-                            .lock()
-                            .map(|a| {
-                                matches!(
-                                    a.hook_status,
-                                    HookStatus::Missing | HookStatus::Incomplete
-                                )
-                            })
-                            .unwrap_or(false);
-
-                        if should_install {
-                            if let Ok(cwd) = std::env::current_dir() {
-                                let result = crate::config::install_pre_push_hook(&cwd);
-                                if let Ok(mut a) = app.lock() {
-                                    match result {
-                                        Ok(()) => {
-                                            a.hook_status = HookStatus::Installed;
-                                            tracing::info!("pre-push hook installed");
-                                        }
-                                        Err(e) => {
-                                            a.push_warning(format!("hook install failed: {e}"));
-                                            tracing::warn!("hook install failed: {e:#}");
-                                        }
-                                    }
-                                }
-                            }
-                        }
+                        handle_hook_install(&app);
                     }
                     _ => {}
                 }
@@ -321,6 +325,70 @@ mod tests {
         assert_eq!(sorted[1].name, "gamma");
         assert_eq!(sorted[2].name, "beta");
         assert_eq!(sorted[3].name, "zebra");
+    }
+
+    #[test]
+    fn toggle_expand_actions() {
+        let app = Arc::new(Mutex::new(App::new()));
+        assert!(app.lock().unwrap().actions_expanded);
+        {
+            let mut a = app.lock().unwrap();
+            a.actions_expanded = !a.actions_expanded;
+        }
+        assert!(!app.lock().unwrap().actions_expanded);
+        {
+            let mut a = app.lock().unwrap();
+            a.actions_expanded = !a.actions_expanded;
+        }
+        assert!(app.lock().unwrap().actions_expanded);
+    }
+
+    #[test]
+    fn handle_hook_install_skips_when_already_installed() {
+        let app = Arc::new(Mutex::new(App::new()));
+        app.lock().unwrap().hook_status = HookStatus::Installed;
+        assert!(!handle_hook_install(&app));
+    }
+
+    #[test]
+    fn handle_hook_install_skips_when_no_git_dir() {
+        let app = Arc::new(Mutex::new(App::new()));
+        app.lock().unwrap().hook_status = HookStatus::NoGitDir;
+        assert!(!handle_hook_install(&app));
+    }
+
+    #[test]
+    fn handle_hook_install_attempts_when_missing() {
+        let app = Arc::new(Mutex::new(App::new()));
+        app.lock().unwrap().hook_status = HookStatus::Missing;
+        let attempted = handle_hook_install(&app);
+        assert!(attempted);
+    }
+
+    #[test]
+    fn handle_hook_install_attempts_when_incomplete() {
+        let app = Arc::new(Mutex::new(App::new()));
+        app.lock().unwrap().hook_status = HookStatus::Incomplete;
+        let attempted = handle_hook_install(&app);
+        assert!(attempted);
+    }
+
+    #[test]
+    fn handle_hook_install_sets_installed_on_success() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join(".git/hooks")).unwrap();
+
+        let original_dir = std::env::current_dir().unwrap();
+        std::env::set_current_dir(tmp.path()).unwrap();
+
+        let app = Arc::new(Mutex::new(App::new()));
+        app.lock().unwrap().hook_status = HookStatus::Missing;
+
+        let attempted = handle_hook_install(&app);
+        assert!(attempted);
+        assert_eq!(app.lock().unwrap().hook_status, HookStatus::Installed);
+
+        std::env::set_current_dir(original_dir).unwrap();
     }
 
     #[test]

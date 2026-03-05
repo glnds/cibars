@@ -168,8 +168,8 @@ On each poll cycle the poller updates each `Bar` as follows:
 | Layer | Approach |
 |---|---|
 | Model mapping | Unit tests with fixture JSON from AWS/GitHub API responses |
-| Poller | Integration tests against LocalStack (CodePipeline) and GitHub API mock |
-| UI | Manual verification in tmux; snapshot tests via `ratatui` test helpers if needed |
+| Poller | Integration tests against LocalStack (CodePipeline) and GitHub API mock (deferred -- not yet implemented) |
+| UI | Manual verification in tmux; snapshot tests via `ratatui` test helpers if needed; key handler logic extracted into testable functions with unit tests |
 | CLI parsing | Unit tests via `clap` test utilities |
 
 ---
