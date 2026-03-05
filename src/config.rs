@@ -14,39 +14,71 @@ pub struct FileConfig {
 
 #[derive(Parser, Debug, Clone)]
 #[command(name = "cibars", about = "CI build status bars")]
-pub struct Config {
+pub struct CliArgs {
     /// AWS profile name
     #[arg(long)]
-    pub aws_profile: String,
+    pub aws_profile: Option<String>,
 
     /// AWS region
     #[arg(long)]
-    pub region: String,
+    pub region: Option<String>,
 
     /// GitHub repository (owner/repo)
     #[arg(long)]
+    pub github_repo: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct Config {
+    pub aws_profile: String,
+    pub region: String,
     pub github_repo: String,
 }
 
 impl Config {
     pub fn load() -> Result<(Self, String)> {
-        let config = Self::parse();
+        let cli = CliArgs::parse();
+        let file = load_file_config(&std::env::current_dir().context("cannot read cwd")?);
+        let config = Self::merge_sources(cli, file)?;
         let token = resolve_github_token()?;
+        Ok((config, token))
+    }
+
+    fn merge_sources(cli: CliArgs, file: FileConfig) -> Result<Self> {
+        let aws_profile = cli
+            .aws_profile
+            .or(file.aws_profile)
+            .context("aws_profile: not provided via --aws-profile or config.toml")?;
+        let region = cli
+            .region
+            .or(file.region)
+            .context("region: not provided via --region or config.toml")?;
+        let github_repo = cli
+            .github_repo
+            .or(file.github_repo)
+            .context("github_repo: not provided via --github-repo or config.toml")?;
+
         ensure!(
-            config.github_repo.contains('/'),
+            github_repo.contains('/'),
             "github-repo must be in owner/repo format"
         );
-        Ok((config, token))
+
+        Ok(Config {
+            aws_profile,
+            region,
+            github_repo,
+        })
+    }
+
+    #[cfg(test)]
+    fn merge(args: &[&str], file: FileConfig) -> Result<Self> {
+        let cli = CliArgs::try_parse_from(args)?;
+        Self::merge_sources(cli, file)
     }
 
     #[cfg(test)]
     pub fn try_from_args(args: &[&str]) -> Result<Self> {
-        let config = Self::try_parse_from(args)?;
-        ensure!(
-            config.github_repo.contains('/'),
-            "github-repo must be in owner/repo format"
-        );
-        Ok(config)
+        Self::merge(args, FileConfig::default())
     }
 }
 
@@ -207,6 +239,64 @@ aws_profile = "staging"
         assert!(fc.aws_profile.is_none());
         assert!(fc.region.is_none());
         assert!(fc.github_repo.is_none());
+    }
+
+    #[test]
+    fn merge_cli_overrides_file_config() {
+        let file = FileConfig {
+            aws_profile: Some("from-file".into()),
+            region: Some("eu-west-1".into()),
+            github_repo: Some("org/repo".into()),
+        };
+        let config = Config::merge(&["cibars", "--aws-profile", "from-cli"], file).unwrap();
+        assert_eq!(config.aws_profile, "from-cli");
+        assert_eq!(config.region, "eu-west-1");
+        assert_eq!(config.github_repo, "org/repo");
+    }
+
+    #[test]
+    fn merge_file_only_no_cli_args() {
+        let file = FileConfig {
+            aws_profile: Some("staging".into()),
+            region: Some("eu-west-1".into()),
+            github_repo: Some("acme/backend".into()),
+        };
+        let config = Config::merge(&["cibars"], file).unwrap();
+        assert_eq!(config.aws_profile, "staging");
+        assert_eq!(config.region, "eu-west-1");
+        assert_eq!(config.github_repo, "acme/backend");
+    }
+
+    #[test]
+    fn merge_cli_only_no_file() {
+        let file = FileConfig::default();
+        let config = Config::merge(
+            &[
+                "cibars",
+                "--aws-profile",
+                "p",
+                "--region",
+                "r",
+                "--github-repo",
+                "o/r",
+            ],
+            file,
+        )
+        .unwrap();
+        assert_eq!(config.aws_profile, "p");
+        assert_eq!(config.region, "r");
+        assert_eq!(config.github_repo, "o/r");
+    }
+
+    #[test]
+    fn merge_missing_field_errors() {
+        let file = FileConfig {
+            aws_profile: Some("staging".into()),
+            region: None,
+            github_repo: None,
+        };
+        let result = Config::merge(&["cibars"], file);
+        assert!(result.is_err());
     }
 
     #[test]
