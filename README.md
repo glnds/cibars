@@ -141,7 +141,9 @@ tmux send-keys 'cibars --aws-profile staging --region eu-west-1 --github-repo ac
 ## External boost via SIGUSR1
 
 Send `SIGUSR1` to trigger an immediate poll boost from outside
-the TUI — no pane switching needed:
+the TUI — no pane switching needed.
+
+Manual test:
 
 ```bash
 kill -USR1 $(pgrep cibars)
@@ -149,16 +151,17 @@ kill -USR1 $(pgrep cibars)
 
 ### Git pre-push hook
 
-Auto-boost cibars on every `git push`:
+Add a `pre-push` hook to the repository cibars monitors so
+every `git push` auto-boosts polling:
 
 ```bash
-# .git/hooks/pre-push
+cat > .git/hooks/pre-push << 'EOF'
 #!/bin/sh
 pkill -USR1 cibars 2>/dev/null
 exit 0
+EOF
+chmod +x .git/hooks/pre-push
 ```
-
-Make it executable: `chmod +x .git/hooks/pre-push`
 
 ## License
 
