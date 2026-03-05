@@ -1,0 +1,36 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    name: ${{ matrix.name }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Build
+            command: cargo build --locked
+          - name: Test
+            command: cargo test --locked
+          - name: Clippy
+            command: cargo clippy --locked -- -D warnings
+          - name: Format
+            command: cargo fmt --check
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - name: Install system deps
+        if: matrix.name != 'Format'
+        run: sudo apt-get update && sudo apt-get install -y cmake
+      - run: ${{ matrix.command }}
