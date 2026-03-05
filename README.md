@@ -36,6 +36,23 @@ cibars --aws-profile <profile> --region <region> --github-repo <owner/repo>
 | `--region` | AWS region | `eu-west-1` |
 | `--github-repo` | GitHub repository in `owner/repo` format | `acme/backend` |
 
+### Configuration file
+
+Instead of passing CLI flags, you can create a `config.toml` in
+the working directory. CLI args take precedence over file values.
+
+```toml
+aws_profile = "staging"
+region = "eu-west-1"
+github_repo = "acme/backend"
+```
+
+Copy `config.toml.example` to get started:
+
+```bash
+cp config.toml.example config.toml
+```
+
 ### Environment variables
 
 | Variable | Required | Description |
