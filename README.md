@@ -93,26 +93,30 @@ to give immediate visibility into current status.
     │                          ▼
   Idle ──────────────────► Watching
   30s GH, no AWS           5s GH, no AWS
-    ▲                          │
-    │                          │ GH finds running
-    │                          ▼
-  Cooldown ◄──────────── Active
-  5s GH+AWS               5s GH+AWS
-  60s timer                    │
-    │                          │ nothing running
-    └──────────────────────────┘
+    ▲         │                │
+    │         │ 5min idle      │ GH finds running
+    │         ▼                ▼
+  LongIdle  Cooldown ◄──── Active
+  5min GH   5s GH+AWS      5s GH+AWS
+  no AWS    60s timer           │
+    │         │                 │ nothing running
+    │         └─────────────────┘
+    │  boost (b key)
+    └──────────────────► Watching
 ```
 
-| State | GH interval | Poll AWS? | Entry |
-|---|---|---|---|
-| Idle | 30s | No | Startup (after initial poll), or cooldown expired |
-| Watching | 5s | No | User pressed `b` from Idle |
-| Active | 5s | Yes | GitHub detects running builds |
-| Cooldown | 5s | Yes | Nothing running (from Active), 60s timer |
+| State    | GH interval | Poll AWS? | Entry                                               |
+|----------|-------------|-----------|-----------------------------------------------------|
+| Idle     | 30s         | No        | Startup (after initial poll), or cooldown expired   |
+| LongIdle | 5min        | No        | 5min of Idle with no running builds                 |
+| Watching | 5s          | No        | User pressed `b` from Idle or LongIdle              |
+| Active   | 5s          | Yes       | GitHub detects running builds                       |
+| Cooldown | 5s          | Yes       | Nothing running (from Active), 60s timer            |
 
 **Key transitions:**
 
-- Press `b` in Idle → Watching (fast GH-only polling)
+- Press `b` in Idle/LongIdle → Watching (fast GH-only polling)
+- 5min of Idle with no running builds → LongIdle (5min polling)
 - GitHub finds running builds → Active (adds AWS polling)
 - All builds finish → Cooldown (keeps fast polling for 60s)
 - 60s of inactivity → back to Idle

@@ -20,7 +20,8 @@ pub struct StatusBar<'a> {
 /// Compute how many ticks are filled based on elapsed time and state interval.
 fn filled_ticks(elapsed: Duration, state: &PollState) -> usize {
     let tick_duration_ms = match state {
-        PollState::Idle => 30_000 / NUM_TICKS, // 6s per tick
+        PollState::Idle => 30_000 / NUM_TICKS,      // 6s per tick
+        PollState::LongIdle => 300_000 / NUM_TICKS, // 60s per tick
         PollState::Watching | PollState::Active | PollState::Cooldown => 5_000 / NUM_TICKS, // 1s per tick
     };
     let filled = elapsed.as_millis() as u64 / tick_duration_ms;
@@ -37,6 +38,7 @@ impl Widget for StatusBar<'_> {
     fn render(self, area: Rect, buf: &mut Buffer) {
         let label = match self.poll_state {
             PollState::Idle => "Slow",
+            PollState::LongIdle => "Long",
             PollState::Watching | PollState::Active | PollState::Cooldown => "Fast",
         };
 
@@ -141,6 +143,19 @@ mod tests {
     fn watching_shows_fast_polling() {
         let content = render_bar(&PollState::Watching, Duration::ZERO, None);
         assert!(content.contains("Fast Polling:"), "got: {content}");
+    }
+
+    #[test]
+    fn long_idle_shows_long_polling() {
+        let content = render_bar(&PollState::LongIdle, Duration::ZERO, None);
+        assert!(content.contains("Long Polling:"), "got: {content}");
+    }
+
+    #[test]
+    fn long_idle_partial_elapsed() {
+        // 60s per tick, 120s elapsed → 2 filled
+        let content = render_bar(&PollState::LongIdle, Duration::from_secs(120), None);
+        assert!(content.contains("==---"), "got: {content}");
     }
 
     #[test]
