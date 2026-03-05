@@ -121,7 +121,12 @@ pub async fn poll_actions_tick(app: &Arc<Mutex<App>>, client: &dyn ActionsClient
         Err(e) => {
             let msg = format!("{e:#}");
             let mut a = app.lock().expect("app mutex poisoned");
-            if msg.to_lowercase().contains("rate limit") {
+            let msg_lower = msg.to_lowercase();
+            if msg_lower.contains("rate limit")
+                || msg_lower.contains("403")
+                || msg_lower.contains("429")
+                || msg_lower.contains("abuse detection")
+            {
                 a.rate_limited_until =
                     Some(Instant::now() + Duration::from_secs(RATE_LIMIT_BACKOFF_SECS));
                 a.push_warning(format!(
@@ -517,6 +522,75 @@ mod tests {
         assert_eq!(app.warnings.len(), 1);
         assert!(app.warnings[0].contains("aws sso login"));
         assert!(app.warnings[0].contains("my-profile"));
+    }
+
+    struct RateLimitActionsClient {
+        error_msg: String,
+    }
+
+    #[async_trait]
+    impl ActionsClient for RateLimitActionsClient {
+        async fn list_latest_runs(&self) -> Result<Vec<WorkflowRunSummary>> {
+            anyhow::bail!("{}", self.error_msg)
+        }
+        async fn fetch_run_jobs(&self, _run_id: u64) -> Result<Vec<JobInfo>> {
+            Ok(vec![])
+        }
+    }
+
+    #[tokio::test]
+    async fn rate_limit_detected_from_string_match() {
+        let app = Arc::new(Mutex::new(App::new()));
+        let client = RateLimitActionsClient {
+            error_msg: "API rate limit exceeded".to_string(),
+        };
+        poll_actions_tick(&app, &client).await;
+        let a = app.lock().unwrap();
+        assert!(a.rate_limited_until.is_some());
+    }
+
+    #[tokio::test]
+    async fn rate_limit_detected_from_403() {
+        let app = Arc::new(Mutex::new(App::new()));
+        let client = RateLimitActionsClient {
+            error_msg: "HTTP 403 Forbidden".to_string(),
+        };
+        poll_actions_tick(&app, &client).await;
+        let a = app.lock().unwrap();
+        assert!(a.rate_limited_until.is_some());
+    }
+
+    #[tokio::test]
+    async fn rate_limit_detected_from_429() {
+        let app = Arc::new(Mutex::new(App::new()));
+        let client = RateLimitActionsClient {
+            error_msg: "HTTP 429 Too Many Requests".to_string(),
+        };
+        poll_actions_tick(&app, &client).await;
+        let a = app.lock().unwrap();
+        assert!(a.rate_limited_until.is_some());
+    }
+
+    #[tokio::test]
+    async fn rate_limit_detected_from_abuse_detection() {
+        let app = Arc::new(Mutex::new(App::new()));
+        let client = RateLimitActionsClient {
+            error_msg: "abuse detection mechanism triggered".to_string(),
+        };
+        poll_actions_tick(&app, &client).await;
+        let a = app.lock().unwrap();
+        assert!(a.rate_limited_until.is_some());
+    }
+
+    #[tokio::test]
+    async fn non_rate_limit_error_not_flagged() {
+        let app = Arc::new(Mutex::new(App::new()));
+        let client = RateLimitActionsClient {
+            error_msg: "network timeout".to_string(),
+        };
+        poll_actions_tick(&app, &client).await;
+        let a = app.lock().unwrap();
+        assert!(a.rate_limited_until.is_none());
     }
 
     #[tokio::test]

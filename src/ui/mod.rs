@@ -98,10 +98,7 @@ pub fn run_ui(
             let dim = !matches!(app.poll_state, PollState::Active | PollState::Watching);
 
             let pipes_sorted = sorted_bars(&app.bars_pipelines);
-            let sorted_groups: Vec<&WorkflowGroup> = sorted_workflow_groups(&app.workflow_groups)
-                .into_iter()
-                .filter(|g| !g.gone)
-                .collect();
+            let sorted_groups: Vec<&WorkflowGroup> = sorted_workflow_groups(&app.workflow_groups);
 
             let pipe_count = pipes_sorted.len();
             let has_actions = !sorted_groups.is_empty();
@@ -160,12 +157,16 @@ pub fn run_ui(
             }
             idx += 1;
 
-            // Action job bars (when expanded, skip gone)
+            // Action job bars (when expanded)
             if app.actions_expanded {
                 let job_name_width = all_jobs_name_width(&app.workflow_groups);
                 for group in &sorted_groups {
                     for bar in group.jobs.iter().filter(|j| !j.gone) {
-                        frame.render_widget(BarWidget::new(bar, job_name_width, dim), areas[idx]);
+                        let bar_dim = dim || group.gone;
+                        frame.render_widget(
+                            BarWidget::new(bar, job_name_width, bar_dim),
+                            areas[idx],
+                        );
                         idx += 1;
                     }
                 }
@@ -323,7 +324,7 @@ mod tests {
     }
 
     #[test]
-    fn gone_groups_filtered_from_display() {
+    fn gone_groups_included_in_display() {
         let groups = vec![
             WorkflowGroup {
                 name: "CI".to_string(),
@@ -339,13 +340,11 @@ mod tests {
             },
         ];
 
-        let visible: Vec<&WorkflowGroup> = sorted_workflow_groups(&groups)
-            .into_iter()
-            .filter(|g| !g.gone)
-            .collect();
+        let visible: Vec<&WorkflowGroup> = sorted_workflow_groups(&groups);
 
-        assert_eq!(visible.len(), 1);
+        // Gone groups are now included (shown dimmed), not filtered out
+        assert_eq!(visible.len(), 2);
         assert_eq!(visible[0].name, "CI");
-        assert_eq!(visible[0].jobs.len(), 2);
+        assert!(visible.iter().any(|g| g.name == "Deploy" && g.gone));
     }
 }

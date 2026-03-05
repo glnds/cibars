@@ -103,16 +103,20 @@ impl Widget for ActionsTitle<'_> {
             let visible_jobs: Vec<_> = group.jobs.iter().filter(|j| !j.gone).collect();
             if visible_jobs.is_empty() {
                 // Jobs not loaded yet; show one dot per workflow using summary status
-                spans.push(Span::styled(
-                    "\u{25CF} ",
-                    Style::default().fg(group.summary_status.color()),
-                ));
+                let color = if group.gone {
+                    Color::DarkGray
+                } else {
+                    group.summary_status.color()
+                };
+                spans.push(Span::styled("\u{25CF} ", Style::default().fg(color)));
             } else {
                 for job in visible_jobs {
-                    spans.push(Span::styled(
-                        "\u{25CF} ",
-                        Style::default().fg(job.status.color()),
-                    ));
+                    let color = if group.gone {
+                        Color::DarkGray
+                    } else {
+                        job.status.color()
+                    };
+                    spans.push(Span::styled("\u{25CF} ", Style::default().fg(color)));
                 }
             }
         }
