@@ -125,7 +125,7 @@ to give immediate visibility into current status.
 ## Installation
 
 ```bash
-git clone https://github.com/your-org/cibars
+git clone https://github.com/glnds/cibars
 cd cibars
 cargo build --release
 cp target/release/cibars ~/.local/bin/
