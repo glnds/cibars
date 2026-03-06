@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use async_trait::async_trait;
 use aws_sdk_codepipeline::Client;
 
-use super::{ActionState, PipelineClient, PipelineState, StageState};
+use super::{ActionState, PipelineClient, PipelineDefinition, PipelineState, S3Source, StageState};
 use crate::model::BuildStatus;
 
 pub struct AwsPipelineClient {
@@ -108,6 +108,50 @@ impl PipelineClient for AwsPipelineClient {
             name: name.to_string(),
             status: aggregate_stage_statuses(&stage_statuses),
             stages,
+        })
+    }
+
+    async fn get_pipeline_definition(&self, name: &str) -> Result<PipelineDefinition> {
+        let resp = self
+            .client
+            .get_pipeline()
+            .name(name)
+            .send()
+            .await
+            .with_context(|| format!("failed to get definition for {name}"))?;
+
+        let source_s3 = resp
+            .pipeline()
+            .and_then(|p| {
+                p.stages().iter().find(|s| {
+                    s.name() == "Source"
+                        || s.actions().iter().any(|a| {
+                            a.action_type_id()
+                                .map(|t| t.provider() == "S3")
+                                .unwrap_or(false)
+                        })
+                })
+            })
+            .and_then(|stage| {
+                stage.actions().iter().find(|a| {
+                    a.action_type_id()
+                        .map(|t| t.provider() == "S3")
+                        .unwrap_or(false)
+                })
+            })
+            .and_then(|action| {
+                let config = action.configuration()?;
+                let bucket = config.get("S3Bucket")?.to_string();
+                let key = config.get("S3ObjectKey")?.to_string();
+                Some(S3Source {
+                    bucket,
+                    object_key: key,
+                })
+            });
+
+        Ok(PipelineDefinition {
+            name: name.to_string(),
+            source_s3,
         })
     }
 }

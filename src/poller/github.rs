@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 
-use super::{ActionsClient, JobInfo, WorkflowRunSummary};
+use super::{ActionsClient, JobInfo, S3Upload, WorkflowFile, WorkflowRunSummary};
 use crate::model::BuildStatus;
 
 pub struct GitHubActionsClient {
@@ -113,6 +113,108 @@ impl ActionsClient for GitHubActionsClient {
         }
         Ok(jobs)
     }
+
+    async fn fetch_workflow_files(&self) -> Result<Vec<WorkflowFile>> {
+        let route = format!(
+            "/repos/{}/{}/contents/.github/workflows",
+            self.owner, self.repo,
+        );
+        let listing: serde_json::Value = self
+            .octocrab
+            .get(&route, None::<&()>)
+            .await
+            .context("failed to list workflow files")?;
+
+        let files = match listing.as_array() {
+            Some(a) => a,
+            None => return Ok(Vec::new()),
+        };
+
+        let yaml_paths: Vec<String> = files
+            .iter()
+            .filter_map(|f| {
+                let name = f["name"].as_str()?;
+                if name.ends_with(".yml") || name.ends_with(".yaml") {
+                    f["path"].as_str().map(String::from)
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        let mut workflow_files = Vec::new();
+        for path in &yaml_paths {
+            let file_route = format!("/repos/{}/{}/contents/{path}", self.owner, self.repo,);
+            match self
+                .octocrab
+                .get::<serde_json::Value, _, _>(&file_route, None::<&()>)
+                .await
+            {
+                Ok(file_resp) => {
+                    let content = file_resp["content"]
+                        .as_str()
+                        .map(|c| c.replace('\n', ""))
+                        .and_then(|c| {
+                            use base64::Engine;
+                            base64::engine::general_purpose::STANDARD.decode(c).ok()
+                        })
+                        .and_then(|bytes| String::from_utf8(bytes).ok());
+
+                    if let Some(content) = content {
+                        let filename = path.rsplit('/').next().unwrap_or(path);
+                        if let Some(wf) = parse_workflow_yaml(filename, &content) {
+                            if !wf.s3_uploads.is_empty() {
+                                tracing::info!(
+                                    workflow = %wf.name,
+                                    uploads = wf.s3_uploads.len(),
+                                    "found S3 uploads in workflow"
+                                );
+                                workflow_files.push(wf);
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(path = %path, error = %e, "failed to fetch workflow file");
+                }
+            }
+        }
+
+        Ok(workflow_files)
+    }
+}
+
+/// Extract S3 paths from shell commands in workflow YAML `run` steps.
+/// Looks for `aws s3 cp` and `aws s3 sync` commands with `s3://bucket/key` patterns.
+pub fn extract_s3_paths(yaml_content: &str) -> Vec<S3Upload> {
+    let re = regex::Regex::new(r"s3://([^/\s]+)/(\S+)").expect("valid regex");
+    let mut uploads = Vec::new();
+
+    for cap in re.captures_iter(yaml_content) {
+        let bucket = cap[1].to_string();
+        let key = cap[2].to_string();
+        // Deduplicate
+        if !uploads
+            .iter()
+            .any(|u: &S3Upload| u.bucket == bucket && u.key == key)
+        {
+            uploads.push(S3Upload { bucket, key });
+        }
+    }
+    uploads
+}
+
+/// Parse a GH workflow YAML and extract its name + S3 upload targets.
+pub fn parse_workflow_yaml(filename: &str, content: &str) -> Option<WorkflowFile> {
+    let yaml: serde_yaml::Value = serde_yaml::from_str(content).ok()?;
+    let name = yaml
+        .get("name")
+        .and_then(|n| n.as_str())
+        .unwrap_or(filename)
+        .to_string();
+
+    let s3_uploads = extract_s3_paths(content);
+    Some(WorkflowFile { name, s3_uploads })
 }
 
 /// Parse workflow runs from a JSON response page into the latest-per-workflow map.
@@ -240,5 +342,116 @@ mod tests {
     #[test]
     fn maps_unknown_to_idle() {
         assert_eq!(map_run_status("unknown", None), BuildStatus::Idle);
+    }
+
+    // --- extract_s3_paths tests ---
+
+    #[test]
+    fn extract_s3_cp_command() {
+        let yaml = "run: aws s3 cp dist.zip s3://my-bucket/my-app/dist.zip";
+        let uploads = extract_s3_paths(yaml);
+        assert_eq!(uploads.len(), 1);
+        assert_eq!(uploads[0].bucket, "my-bucket");
+        assert_eq!(uploads[0].key, "my-app/dist.zip");
+    }
+
+    #[test]
+    fn extract_s3_sync_command() {
+        let yaml = "run: aws s3 sync ./build s3://deploy-bucket/frontend/";
+        let uploads = extract_s3_paths(yaml);
+        assert_eq!(uploads.len(), 1);
+        assert_eq!(uploads[0].bucket, "deploy-bucket");
+        assert_eq!(uploads[0].key, "frontend/");
+    }
+
+    #[test]
+    fn extract_multiple_s3_paths() {
+        let yaml = r#"
+        run: |
+          aws s3 cp a.zip s3://bucket-a/key-a.zip
+          aws s3 cp b.zip s3://bucket-b/key-b.zip
+        "#;
+        let uploads = extract_s3_paths(yaml);
+        assert_eq!(uploads.len(), 2);
+    }
+
+    #[test]
+    fn extract_deduplicates() {
+        let yaml = r#"
+          aws s3 cp a.zip s3://bucket/key.zip
+          aws s3 cp a.zip s3://bucket/key.zip
+        "#;
+        let uploads = extract_s3_paths(yaml);
+        assert_eq!(uploads.len(), 1);
+    }
+
+    #[test]
+    fn extract_no_s3_paths() {
+        let yaml = "run: echo hello";
+        let uploads = extract_s3_paths(yaml);
+        assert!(uploads.is_empty());
+    }
+
+    #[test]
+    fn extract_s3_with_env_var_in_bucket() {
+        let yaml = "run: aws s3 cp dist.zip s3://${AWS_ACCOUNT_ID}-deploy/app.zip";
+        let uploads = extract_s3_paths(yaml);
+        assert_eq!(uploads.len(), 1);
+        assert_eq!(uploads[0].bucket, "${AWS_ACCOUNT_ID}-deploy");
+    }
+
+    // --- parse_workflow_yaml tests ---
+
+    #[test]
+    fn parse_yaml_with_name_and_s3() {
+        let yaml = r#"
+name: Deploy Frontend
+on: push
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - run: aws s3 cp dist.zip s3://my-bucket/frontend/dist.zip
+"#;
+        let wf = parse_workflow_yaml("deploy.yml", yaml).unwrap();
+        assert_eq!(wf.name, "Deploy Frontend");
+        assert_eq!(wf.s3_uploads.len(), 1);
+        assert_eq!(wf.s3_uploads[0].bucket, "my-bucket");
+        assert_eq!(wf.s3_uploads[0].key, "frontend/dist.zip");
+    }
+
+    #[test]
+    fn parse_yaml_no_name_uses_filename() {
+        let yaml = r#"
+on: push
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - run: aws s3 cp out.zip s3://bucket/key.zip
+"#;
+        let wf = parse_workflow_yaml("ci.yml", yaml).unwrap();
+        assert_eq!(wf.name, "ci.yml");
+    }
+
+    #[test]
+    fn parse_yaml_no_s3() {
+        let yaml = r#"
+name: CI
+on: push
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - run: cargo test
+"#;
+        let wf = parse_workflow_yaml("ci.yml", yaml).unwrap();
+        assert!(wf.s3_uploads.is_empty());
+    }
+
+    #[test]
+    fn parse_invalid_yaml_returns_none() {
+        let result = parse_workflow_yaml("bad.yml", "\t\t---\n\t bad:\n\t\t\t[[[unterminated");
+        assert!(result.is_none());
     }
 }
