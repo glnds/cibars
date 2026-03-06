@@ -20,7 +20,7 @@ pub struct StatusBar<'a> {
 }
 
 /// Compute how many ticks are filled based on elapsed time and state interval.
-/// Returns 0 when elapsed >= interval (poll in progress / overdue).
+/// Returns NUM_TICKS when elapsed >= interval (poll due/running; resets naturally on completion).
 fn filled_ticks(elapsed: Duration, state: &PollState) -> usize {
     let interval_ms: u64 = match state {
         PollState::Idle => 30_000,
@@ -29,7 +29,7 @@ fn filled_ticks(elapsed: Duration, state: &PollState) -> usize {
     };
     let elapsed_ms = elapsed.as_millis() as u64;
     if elapsed_ms >= interval_ms {
-        return 0;
+        return NUM_TICKS as usize;
     }
     let tick_duration_ms = interval_ms / NUM_TICKS;
     (elapsed_ms / tick_duration_ms) as usize
@@ -147,10 +147,10 @@ mod tests {
     }
 
     #[test]
-    fn idle_at_interval_resets_to_empty() {
-        // At exactly the interval boundary, bar resets
+    fn idle_at_interval_shows_full() {
+        // At exactly the interval boundary, bar should be full (poll is due)
         let content = render_bar(&PollState::Idle, Duration::from_secs(30), None);
-        assert!(content.contains("-----"), "got: {content}");
+        assert!(content.contains("====="), "got: {content}");
     }
 
     #[test]
@@ -194,17 +194,17 @@ mod tests {
     }
 
     #[test]
-    fn filled_ticks_resets_after_interval() {
-        // When elapsed exceeds the poll interval (during poll execution),
-        // bar should reset to 0 rather than lingering at all-filled.
+    fn filled_ticks_full_after_interval() {
+        // When elapsed exceeds the poll interval (poll due/running),
+        // bar should be full — reset happens when poll completes and timer resets.
         assert_eq!(
             filled_ticks(Duration::from_millis(5500), &PollState::Active),
-            0
+            5
         );
-        assert_eq!(filled_ticks(Duration::from_secs(35), &PollState::Idle), 0);
+        assert_eq!(filled_ticks(Duration::from_secs(35), &PollState::Idle), 5);
         assert_eq!(
             filled_ticks(Duration::from_secs(999), &PollState::Active),
-            0
+            5
         );
     }
 
