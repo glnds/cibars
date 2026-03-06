@@ -58,6 +58,11 @@ impl Bar {
                 if self.status != status {
                     tracing::debug!(bar = %self.name, from = ?self.status, to = ?status, "status change");
                 }
+                // Guarantee at least one bar segment for fast-completing stages
+                if self.fill == 0 {
+                    self.fill = 1;
+                    self.write_pos = 1;
+                }
                 self.status = status;
             }
             BuildStatus::Idle => {
@@ -176,6 +181,40 @@ mod tests {
         assert_eq!(bar.fill, fill_before);
         assert_eq!(bar.write_pos, pos_before);
         assert_eq!(bar.status, BuildStatus::Running);
+    }
+
+    #[test]
+    fn set_status_succeeded_with_zero_fill_gets_minimum_fill() {
+        let mut bar = make_bar();
+        bar.set_status(BuildStatus::Running);
+        // No ticks — fill stays 0 (fast-completing stage like Source)
+        assert_eq!(bar.fill, 0);
+        bar.set_status(BuildStatus::Succeeded);
+        assert_eq!(bar.status, BuildStatus::Succeeded);
+        assert_eq!(bar.fill, 1);
+        assert_eq!(bar.write_pos, 1);
+    }
+
+    #[test]
+    fn set_status_failed_with_zero_fill_gets_minimum_fill() {
+        let mut bar = make_bar();
+        bar.set_status(BuildStatus::Running);
+        assert_eq!(bar.fill, 0);
+        bar.set_status(BuildStatus::Failed);
+        assert_eq!(bar.status, BuildStatus::Failed);
+        assert_eq!(bar.fill, 1);
+        assert_eq!(bar.write_pos, 1);
+    }
+
+    #[test]
+    fn set_status_succeeded_with_existing_fill_unchanged() {
+        let mut bar = make_bar();
+        bar.set_status(BuildStatus::Running);
+        bar.tick(10);
+        bar.tick(10);
+        assert_eq!(bar.fill, 2);
+        bar.set_status(BuildStatus::Succeeded);
+        assert_eq!(bar.fill, 2);
     }
 
     #[test]
