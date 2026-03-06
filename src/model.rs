@@ -242,6 +242,37 @@ mod tests {
     }
 
     #[test]
+    fn set_status_succeeded_idempotent_preserves_fill() {
+        let mut bar = make_bar();
+        bar.set_status(BuildStatus::Running);
+        bar.tick(10);
+        bar.tick(10);
+        bar.tick(10);
+        bar.set_status(BuildStatus::Succeeded);
+        assert_eq!(bar.fill, 3);
+        // Simulate repeated polls re-applying Succeeded
+        bar.set_status(BuildStatus::Succeeded);
+        assert_eq!(bar.fill, 3);
+        assert_eq!(bar.write_pos, 3);
+        assert_eq!(bar.status, BuildStatus::Succeeded);
+    }
+
+    #[test]
+    fn set_status_failed_idempotent_preserves_fill() {
+        let mut bar = make_bar();
+        bar.set_status(BuildStatus::Running);
+        bar.tick(10);
+        bar.tick(10);
+        bar.set_status(BuildStatus::Failed);
+        assert_eq!(bar.fill, 2);
+        // Simulate repeated polls re-applying Failed
+        bar.set_status(BuildStatus::Failed);
+        assert_eq!(bar.fill, 2);
+        assert_eq!(bar.write_pos, 2);
+        assert_eq!(bar.status, BuildStatus::Failed);
+    }
+
+    #[test]
     fn set_status_resets_on_new_execution() {
         let mut bar = make_bar();
         bar.set_status(BuildStatus::Running);
@@ -418,5 +449,26 @@ mod tests {
         };
         group.gone = true;
         assert!(group.gone);
+    }
+
+    #[test]
+    fn build_status_color_values() {
+        use ratatui::style::Color;
+        assert_eq!(BuildStatus::Running.color(), Color::Yellow);
+        assert_eq!(BuildStatus::Succeeded.color(), Color::Green);
+        assert_eq!(BuildStatus::Failed.color(), Color::Red);
+        assert_eq!(BuildStatus::Idle.color(), Color::DarkGray);
+    }
+
+    #[test]
+    fn set_status_failed_to_succeeded_transition() {
+        let mut bar = make_bar();
+        bar.set_status(BuildStatus::Running);
+        bar.tick(10);
+        bar.set_status(BuildStatus::Failed);
+        assert_eq!(bar.status, BuildStatus::Failed);
+        // Now transition to Succeeded (e.g. retry succeeded)
+        bar.set_status(BuildStatus::Succeeded);
+        assert_eq!(bar.status, BuildStatus::Succeeded);
     }
 }

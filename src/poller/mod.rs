@@ -865,4 +865,131 @@ mod tests {
         let test = group.jobs.iter().find(|j| j.name == "test").unwrap();
         assert!(test.gone);
     }
+
+    #[tokio::test]
+    async fn rate_limit_skip_path_adds_warning() {
+        let app = Arc::new(Mutex::new(App::new()));
+        app.lock().unwrap().rate_limited_until = Some(Instant::now() + Duration::from_secs(300));
+        let client = MockActionsClient { runs: vec![] };
+        poll_actions_tick(&app, &client).await;
+
+        let a = app.lock().unwrap();
+        assert!(
+            a.warnings.iter().any(|w| w.contains("rate-limited")),
+            "expected a warning containing 'rate-limited', got: {:?}",
+            a.warnings
+        );
+        assert!(!a.loading_actions);
+    }
+
+    struct PartialFailActionsClient;
+
+    #[async_trait]
+    impl ActionsClient for PartialFailActionsClient {
+        async fn list_latest_runs(&self) -> Result<Vec<WorkflowRunSummary>> {
+            Ok(vec![
+                WorkflowRunSummary {
+                    workflow_name: "CI".into(),
+                    run_id: 1,
+                    status: BuildStatus::Running,
+                },
+                WorkflowRunSummary {
+                    workflow_name: "Deploy".into(),
+                    run_id: 2,
+                    status: BuildStatus::Running,
+                },
+            ])
+        }
+        async fn fetch_run_jobs(&self, run_id: u64) -> Result<Vec<JobInfo>> {
+            if run_id == 1 {
+                anyhow::bail!("network error")
+            } else {
+                Ok(vec![JobInfo {
+                    name: "deploy-job".into(),
+                    status: BuildStatus::Succeeded,
+                }])
+            }
+        }
+        async fn fetch_workflow_files(&self) -> Result<Vec<WorkflowFile>> {
+            Ok(vec![])
+        }
+    }
+
+    #[tokio::test]
+    async fn phase2_job_fetch_error_continues_other_workflows() {
+        let app = Arc::new(Mutex::new(App::new()));
+        let client = PartialFailActionsClient;
+        poll_actions_tick(&app, &client).await;
+
+        let a = app.lock().unwrap();
+        let deploy = a
+            .workflow_groups
+            .iter()
+            .find(|g| g.name == "Deploy")
+            .expect("Deploy workflow should exist");
+        assert_eq!(deploy.jobs.len(), 1);
+        assert_eq!(deploy.jobs[0].name, "deploy-job");
+
+        let ci = a
+            .workflow_groups
+            .iter()
+            .find(|g| g.name == "CI")
+            .expect("CI workflow should exist");
+        assert!(
+            ci.jobs.is_empty(),
+            "CI jobs should be empty after fetch error"
+        );
+    }
+
+    struct UnauthorizedClient;
+
+    #[async_trait]
+    impl PipelineClient for UnauthorizedClient {
+        async fn list_pipeline_names(&self) -> Result<Vec<String>> {
+            anyhow::bail!("UnauthorizedException: user is not authorized")
+        }
+        async fn get_pipeline_state(&self, _name: &str) -> Result<PipelineState> {
+            anyhow::bail!("UnauthorizedException")
+        }
+        async fn get_pipeline_definition(&self, _name: &str) -> Result<PipelineDefinition> {
+            anyhow::bail!("UnauthorizedException")
+        }
+    }
+
+    #[tokio::test]
+    async fn poll_unauthorized_exception_shows_sso_hint() {
+        let app = Arc::new(Mutex::new(App::new()));
+        let pipes = UnauthorizedClient;
+        poll_pipelines_tick(&app, &pipes, "my-profile").await;
+
+        let a = app.lock().unwrap();
+        assert_eq!(a.warnings.len(), 1);
+        assert!(
+            a.warnings[0].contains("aws sso login"),
+            "expected SSO hint, got: {}",
+            a.warnings[0]
+        );
+        assert!(a.warnings[0].contains("my-profile"));
+    }
+
+    #[test]
+    fn stage_status_from_empty_actions_is_idle() {
+        assert_eq!(stage_status_from_actions(&[]), BuildStatus::Idle);
+    }
+
+    #[test]
+    fn reconcile_bars_marks_missing_as_gone() {
+        let mut bars = vec![Bar::new("alpha".to_string()), Bar::new("beta".to_string())];
+        bars[0].set_status(BuildStatus::Succeeded);
+        bars[1].set_status(BuildStatus::Running);
+
+        // Update only contains "alpha"; "beta" should be marked gone
+        let updates = vec![("alpha".to_string(), BuildStatus::Succeeded)];
+        reconcile_bars(&mut bars, updates);
+
+        let alpha = bars.iter().find(|b| b.name == "alpha").unwrap();
+        assert!(!alpha.gone);
+        let beta = bars.iter().find(|b| b.name == "beta").unwrap();
+        assert!(beta.gone);
+    }
 }

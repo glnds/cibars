@@ -501,4 +501,131 @@ mod tests {
             .collect();
         assert_eq!(dots.len(), 3);
     }
+
+    #[test]
+    fn dim_bar_succeeded_renders_dark_gray() {
+        let bar = make_bar("deploy", BuildStatus::Succeeded, 5);
+        let widget = BarWidget::new(&bar, 10, true);
+        let area = Rect::new(0, 0, 25, 1);
+        let mut buf = Buffer::empty(area);
+        widget.render(area, &mut buf);
+
+        let bracket_pos = buf
+            .content()
+            .iter()
+            .position(|c| c.symbol() == "[")
+            .unwrap();
+        let first_fill = &buf.content()[bracket_pos + 1];
+        assert_eq!(first_fill.symbol(), "|");
+        assert_eq!(first_fill.fg, Color::DarkGray);
+    }
+
+    #[test]
+    fn dim_bar_failed_renders_dark_gray() {
+        let bar = make_bar("lint", BuildStatus::Failed, 3);
+        let widget = BarWidget::new(&bar, 10, true);
+        let area = Rect::new(0, 0, 25, 1);
+        let mut buf = Buffer::empty(area);
+        widget.render(area, &mut buf);
+
+        let bracket_pos = buf
+            .content()
+            .iter()
+            .position(|c| c.symbol() == "[")
+            .unwrap();
+        let first_fill = &buf.content()[bracket_pos + 1];
+        assert_eq!(first_fill.symbol(), "|");
+        assert_eq!(first_fill.fg, Color::DarkGray);
+    }
+
+    #[test]
+    fn dim_bar_idle_renders_dark_gray() {
+        let bar = make_bar("idle", BuildStatus::Idle, 0);
+        let widget = BarWidget::new(&bar, 10, true);
+        let area = Rect::new(0, 0, 25, 1);
+        let mut buf = Buffer::empty(area);
+        widget.render(area, &mut buf);
+
+        // Idle bar has fill=0, so no '|' chars — just verify it doesn't crash
+        let content: String = buf
+            .content()
+            .iter()
+            .map(|c| c.symbol().chars().next().unwrap_or(' '))
+            .collect();
+        assert!(content.contains('['));
+        assert!(content.ends_with(']'));
+    }
+
+    #[test]
+    fn bar_renders_nothing_for_small_area() {
+        let bar = make_bar("build", BuildStatus::Running, 3);
+        let widget = BarWidget::new(&bar, 10, false);
+        let area = Rect::new(0, 0, 9, 1);
+        let mut buf = Buffer::empty(area);
+        widget.render(area, &mut buf);
+
+        let content: String = buf
+            .content()
+            .iter()
+            .map(|c| c.symbol().chars().next().unwrap_or(' '))
+            .collect();
+        assert_eq!(content.trim(), "");
+    }
+
+    #[test]
+    fn bar_renders_nothing_for_narrow_area() {
+        let name_width: usize = 10;
+        let overhead = name_width + 2 + 2; // name_col + 2
+        let bar = make_bar("build", BuildStatus::Running, 3);
+        let widget = BarWidget::new(&bar, name_width, false);
+        let area = Rect::new(0, 0, overhead as u16, 1);
+        let mut buf = Buffer::empty(area);
+        widget.render(area, &mut buf);
+
+        let content: String = buf
+            .content()
+            .iter()
+            .map(|c| c.symbol().chars().next().unwrap_or(' '))
+            .collect();
+        assert_eq!(content.trim(), "");
+    }
+
+    #[test]
+    fn actions_title_summary_dot_when_no_jobs() {
+        let mut group = make_group("CI", &[]);
+        group.summary_status = BuildStatus::Succeeded;
+        let groups = vec![&group];
+        let widget = ActionsTitle::new(&groups, false);
+        let area = Rect::new(0, 0, 40, 1);
+        let mut buf = Buffer::empty(area);
+        widget.render(area, &mut buf);
+
+        let dots: Vec<_> = buf
+            .content()
+            .iter()
+            .filter(|c| c.symbol() == "\u{25CF}")
+            .collect();
+        assert_eq!(dots.len(), 1);
+        assert_eq!(dots[0].fg, Color::Green);
+    }
+
+    #[test]
+    fn actions_title_gone_group_dimmed() {
+        let mut group = make_group("Old", &[]);
+        group.gone = true;
+        group.summary_status = BuildStatus::Succeeded;
+        let groups = vec![&group];
+        let widget = ActionsTitle::new(&groups, false);
+        let area = Rect::new(0, 0, 40, 1);
+        let mut buf = Buffer::empty(area);
+        widget.render(area, &mut buf);
+
+        let dots: Vec<_> = buf
+            .content()
+            .iter()
+            .filter(|c| c.symbol() == "\u{25CF}")
+            .collect();
+        assert_eq!(dots.len(), 1);
+        assert_eq!(dots[0].fg, Color::DarkGray);
+    }
 }

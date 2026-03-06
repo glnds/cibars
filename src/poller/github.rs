@@ -454,4 +454,24 @@ jobs:
         let result = parse_workflow_yaml("bad.yml", "\t\t---\n\t bad:\n\t\t\t[[[unterminated");
         assert!(result.is_none());
     }
+
+    #[test]
+    fn maps_waiting_to_running() {
+        assert_eq!(map_run_status("waiting", None), BuildStatus::Running);
+    }
+
+    #[test]
+    fn maps_pending_to_running() {
+        assert_eq!(map_run_status("pending", None), BuildStatus::Running);
+    }
+
+    #[test]
+    fn parse_run_missing_name_defaults_to_unknown() {
+        let resp = serde_json::json!({
+            "workflow_runs": [{"id": 1, "status": "completed", "conclusion": "success"}]
+        });
+        let mut latest = std::collections::HashMap::new();
+        parse_workflow_runs(&resp, &mut latest);
+        assert!(latest.contains_key("unknown"));
+    }
 }

@@ -529,4 +529,72 @@ mod tests {
         assert_eq!(visible[0].name, "CI");
         assert!(visible.iter().any(|g| g.name == "Deploy" && g.gone));
     }
+
+    #[test]
+    fn all_jobs_name_width_empty() {
+        assert_eq!(all_jobs_name_width(&[]), 12); // default 10 + 2 indent
+    }
+
+    #[test]
+    fn all_jobs_name_width_computes_max_plus_indent() {
+        let groups = vec![
+            WorkflowGroup {
+                name: "wf1".to_string(),
+                jobs: vec![make_test_bar("build", BuildStatus::Idle)],
+                gone: false,
+                summary_status: BuildStatus::Idle,
+                run_id: None,
+            },
+            WorkflowGroup {
+                name: "wf2".to_string(),
+                jobs: vec![make_test_bar("integration-test", BuildStatus::Idle)],
+                gone: false,
+                summary_status: BuildStatus::Idle,
+                run_id: None,
+            },
+        ];
+        assert_eq!(all_jobs_name_width(&groups), 18); // 16 + 2
+    }
+
+    #[test]
+    fn all_pipeline_stages_name_width_empty() {
+        assert_eq!(all_pipeline_stages_name_width(&[]), 14); // default 10 + 4 indent
+    }
+
+    #[test]
+    fn all_pipeline_stages_name_width_computes_max_plus_indent() {
+        let groups = vec![PipelineGroup {
+            name: "my-pipeline".to_string(),
+            stages: vec![
+                make_test_bar("Source", BuildStatus::Succeeded),
+                make_test_bar("Deploy", BuildStatus::Idle),
+            ],
+            gone: false,
+            summary_status: BuildStatus::Idle,
+        }];
+        assert_eq!(all_pipeline_stages_name_width(&groups), 10); // 6 + 4
+    }
+
+    #[test]
+    fn sorted_workflow_groups_running_first() {
+        let groups = vec![
+            WorkflowGroup {
+                name: "zzz-idle".to_string(),
+                jobs: vec![],
+                gone: false,
+                summary_status: BuildStatus::Idle,
+                run_id: None,
+            },
+            WorkflowGroup {
+                name: "aaa-running".to_string(),
+                jobs: vec![make_test_bar("build", BuildStatus::Running)],
+                gone: false,
+                summary_status: BuildStatus::Running,
+                run_id: None,
+            },
+        ];
+        let sorted = sorted_workflow_groups(&groups);
+        assert_eq!(sorted[0].name, "aaa-running");
+        assert_eq!(sorted[1].name, "zzz-idle");
+    }
 }

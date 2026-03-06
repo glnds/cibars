@@ -60,22 +60,6 @@ impl App {
         self.warnings.push(msg);
     }
 
-    /// Reset all bar fills to zero — called on Active entry to signal "new data incoming".
-    pub fn reset_all_bars(&mut self) {
-        for group in &mut self.pipeline_groups {
-            for stage in &mut group.stages {
-                stage.fill = 0;
-                stage.write_pos = 0;
-            }
-        }
-        for group in &mut self.workflow_groups {
-            for job in &mut group.jobs {
-                job.fill = 0;
-                job.write_pos = 0;
-            }
-        }
-    }
-
     pub fn has_any_running(&self) -> bool {
         self.pipeline_groups.iter().any(|g| {
             g.summary_status == BuildStatus::Running
@@ -177,37 +161,6 @@ mod tests {
     }
 
     #[test]
-    fn reset_all_bars_clears_fill_and_write_pos() {
-        let mut app = App::new();
-        let mut stage = Bar::new("Build".into());
-        stage.fill = 5;
-        stage.write_pos = 5;
-        app.pipeline_groups.push(PipelineGroup {
-            name: "deploy".into(),
-            stages: vec![stage],
-            gone: false,
-            summary_status: BuildStatus::Running,
-        });
-        let mut job = Bar::new("test".into());
-        job.fill = 3;
-        job.write_pos = 3;
-        app.workflow_groups.push(WorkflowGroup {
-            name: "CI".into(),
-            jobs: vec![job],
-            gone: false,
-            summary_status: BuildStatus::Running,
-            run_id: None,
-        });
-
-        app.reset_all_bars();
-
-        assert_eq!(app.pipeline_groups[0].stages[0].fill, 0);
-        assert_eq!(app.pipeline_groups[0].stages[0].write_pos, 0);
-        assert_eq!(app.workflow_groups[0].jobs[0].fill, 0);
-        assert_eq!(app.workflow_groups[0].jobs[0].write_pos, 0);
-    }
-
-    #[test]
     fn has_any_running_all_succeeded() {
         let mut app = App::new();
         app.pipeline_groups.push(PipelineGroup {
@@ -224,5 +177,42 @@ mod tests {
             run_id: None,
         });
         assert!(!app.has_any_running());
+    }
+
+    #[test]
+    fn has_any_running_mixed_states() {
+        let mut app = App::new();
+        app.pipeline_groups.push(PipelineGroup {
+            name: "p1".into(),
+            stages: vec![],
+            gone: false,
+            summary_status: BuildStatus::Succeeded,
+        });
+        app.pipeline_groups.push(PipelineGroup {
+            name: "p2".into(),
+            stages: vec![],
+            gone: false,
+            summary_status: BuildStatus::Failed,
+        });
+        assert!(!app.has_any_running());
+        // Now add one with a running stage
+        let mut stage = Bar::new("Build".into());
+        stage.set_status(BuildStatus::Running);
+        app.pipeline_groups.push(PipelineGroup {
+            name: "p3".into(),
+            stages: vec![stage],
+            gone: false,
+            summary_status: BuildStatus::Idle,
+        });
+        assert!(app.has_any_running());
+    }
+
+    #[test]
+    fn default_matches_new() {
+        let new_app = App::new();
+        let default_app = App::default();
+        assert_eq!(new_app.loading_pipelines, default_app.loading_pipelines);
+        assert_eq!(new_app.loading_actions, default_app.loading_actions);
+        assert_eq!(new_app.actions_expanded, default_app.actions_expanded);
     }
 }

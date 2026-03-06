@@ -457,4 +457,20 @@ mod tests {
         s.transition(false);
         assert_eq!(s.state(), PollState::Idle);
     }
+
+    #[test]
+    fn boost_noop_in_watching() {
+        let mut s = PollScheduler::new();
+        s.transition(false);
+        s.boost(); // → Watching
+        s.boost(); // should stay Watching
+        assert_eq!(s.state(), PollState::Watching);
+    }
+
+    #[test]
+    fn cooldown_remaining_none_in_active() {
+        let mut s = PollScheduler::new();
+        s.transition(true); // → Active
+        assert!(s.cooldown_remaining().is_none());
+    }
 }

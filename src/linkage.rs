@@ -673,4 +673,105 @@ mod tests {
         // stopped_runs should be cleared for "CI"
         assert!(!stopped_runs.contains_key("CI"));
     }
+
+    #[test]
+    fn apply_links_workflow_with_no_run_id() {
+        let mut app = App::new();
+        let mut job = Bar::new("build".into());
+        job.set_status(BuildStatus::Running);
+        app.workflow_groups.push(WorkflowGroup {
+            name: "CI".into(),
+            jobs: vec![job],
+            gone: false,
+            summary_status: BuildStatus::Running,
+            run_id: None,
+        });
+        app.pipeline_groups.push(PipelineGroup {
+            name: "deploy-pipe".into(),
+            stages: vec![],
+            gone: false,
+            summary_status: BuildStatus::Running,
+        });
+        let app = Arc::new(Mutex::new(app));
+        let mut link_map = LinkMap::new();
+        link_map.add_discovered("deploy-pipe".into(), "CI".into(), "b".into(), "k".into());
+        let mut stopped = HashMap::new();
+        apply_links(&app, &mut link_map, &mut stopped);
+        let a = app.lock().unwrap();
+        assert_eq!(a.workflow_groups[0].summary_status, BuildStatus::Succeeded);
+        assert!(stopped.is_empty()); // No run_id, so nothing tracked
+    }
+
+    #[test]
+    fn apply_links_only_running_jobs_marked_succeeded() {
+        let mut app = App::new();
+        let mut running_job = Bar::new("build".into());
+        running_job.set_status(BuildStatus::Running);
+        let mut failed_job = Bar::new("test".into());
+        failed_job.set_status(BuildStatus::Failed);
+        let mut succeeded_job = Bar::new("lint".into());
+        succeeded_job.set_status(BuildStatus::Succeeded);
+        let idle_job = Bar::new("deploy".into());
+        // Idle is default from Bar::new, no set_status needed
+        app.workflow_groups.push(WorkflowGroup {
+            name: "CI".into(),
+            jobs: vec![running_job, failed_job, succeeded_job, idle_job],
+            gone: false,
+            summary_status: BuildStatus::Running,
+            run_id: Some(100),
+        });
+        app.pipeline_groups.push(PipelineGroup {
+            name: "deploy-pipe".into(),
+            stages: vec![],
+            gone: false,
+            summary_status: BuildStatus::Running,
+        });
+        let app = Arc::new(Mutex::new(app));
+        let mut link_map = LinkMap::new();
+        link_map.add_discovered("deploy-pipe".into(), "CI".into(), "b".into(), "k".into());
+        apply_links(&app, &mut link_map, &mut HashMap::new());
+        let a = app.lock().unwrap();
+        assert_eq!(a.workflow_groups[0].summary_status, BuildStatus::Succeeded);
+        assert_eq!(a.workflow_groups[0].jobs[0].status, BuildStatus::Succeeded); // was Running
+        assert_eq!(a.workflow_groups[0].jobs[1].status, BuildStatus::Failed); // stays Failed
+        assert_eq!(a.workflow_groups[0].jobs[2].status, BuildStatus::Succeeded); // stays Succeeded
+        assert_eq!(a.workflow_groups[0].jobs[3].status, BuildStatus::Idle); // stays Idle
+    }
+
+    #[test]
+    fn apply_links_records_workflow_completion() {
+        let mut app = App::new();
+        // GH workflow already Succeeded
+        app.workflow_groups.push(WorkflowGroup {
+            name: "CI".into(),
+            jobs: vec![],
+            gone: false,
+            summary_status: BuildStatus::Succeeded,
+            run_id: Some(100),
+        });
+        let app = Arc::new(Mutex::new(app));
+        let mut link_map = LinkMap::new();
+        let mut stopped = HashMap::new();
+
+        // apply_links should record the completion
+        apply_links(&app, &mut link_map, &mut stopped);
+
+        // Verify by trying to correlate a new pipeline — should find "CI"
+        let result = link_map.try_correlate("new-pipe");
+        assert_eq!(result, Some("CI".to_string()));
+    }
+
+    #[test]
+    fn try_correlate_multiple_completions_uses_last() {
+        let mut map = LinkMap::new();
+        map.record_workflow_completion("CI");
+        map.record_workflow_completion("Deploy");
+        let result = map.try_correlate("new-pipe");
+        assert_eq!(result, Some("Deploy".to_string()));
+    }
+
+    #[test]
+    fn s3_keys_slash_only() {
+        assert!(!s3_keys_match("/", "my-app"));
+    }
 }

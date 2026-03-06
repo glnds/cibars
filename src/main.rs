@@ -153,15 +153,9 @@ async fn run_poll_orchestrator(
 
         // Transition + update App display state
         let any_running = app.lock().expect("app mutex poisoned").has_any_running();
-        let prev_state = scheduler.state();
         scheduler.transition(any_running);
         {
             let mut a = app.lock().expect("app mutex poisoned");
-            if scheduler.state() == poll_scheduler::PollState::Active
-                && prev_state != poll_scheduler::PollState::Active
-            {
-                a.reset_all_bars();
-            }
             a.poll_state = scheduler.state();
             a.cooldown_remaining = scheduler.cooldown_remaining();
             // Reset tick bar after poll completes (not before),

@@ -224,4 +224,53 @@ mod tests {
         assert_eq!(tick_bar(3), "===--");
         assert_eq!(tick_bar(5), "=====");
     }
+
+    fn render_bar_with_warnings(
+        state: &PollState,
+        elapsed: Duration,
+        cooldown: Option<Duration>,
+        hook_status: &HookStatus,
+        warnings: &[String],
+    ) -> String {
+        let bar = StatusBar {
+            poll_state: state,
+            elapsed_since_poll: elapsed,
+            cooldown_remaining: cooldown,
+            warnings,
+            hook_status,
+        };
+        let area = Rect::new(0, 0, 120, 1);
+        let mut buf = Buffer::empty(area);
+        bar.render(area, &mut buf);
+        (0..120)
+            .map(|x| buf.cell((x, 0)).unwrap().symbol().to_string())
+            .collect()
+    }
+
+    #[test]
+    fn renders_warnings() {
+        let warnings = vec!["AWS: timeout".to_string()];
+        let content = render_bar_with_warnings(
+            &PollState::Idle,
+            Duration::ZERO,
+            None,
+            &HookStatus::Installed,
+            &warnings,
+        );
+        assert!(content.contains("AWS: timeout"), "got: {content}");
+    }
+
+    #[test]
+    fn renders_hook_hint_and_warning_together() {
+        let warnings = vec!["AWS: timeout".to_string()];
+        let content = render_bar_with_warnings(
+            &PollState::Idle,
+            Duration::ZERO,
+            None,
+            &HookStatus::Missing,
+            &warnings,
+        );
+        assert!(content.contains("h=install"), "got: {content}");
+        assert!(content.contains("AWS: timeout"), "got: {content}");
+    }
 }
