@@ -31,10 +31,32 @@ pub struct ActionState {
     pub status: BuildStatus,
 }
 
+/// Pipeline definition (source config), from GetPipeline API.
+pub struct PipelineDefinition {
+    pub name: String,
+    pub source_s3: Option<S3Source>,
+}
+
+pub struct S3Source {
+    pub bucket: String,
+    pub object_key: String,
+}
+
 /// A single job within a workflow run
 pub struct JobInfo {
     pub name: String,
     pub status: BuildStatus,
+}
+
+/// Parsed GH workflow file with S3 upload targets.
+pub struct WorkflowFile {
+    pub name: String,
+    pub s3_uploads: Vec<S3Upload>,
+}
+
+pub struct S3Upload {
+    pub bucket: String,
+    pub key: String,
 }
 
 /// Workflow summary from the runs API (no jobs yet).
@@ -57,6 +79,8 @@ pub struct WorkflowRunInfo {
 pub trait PipelineClient: Send + Sync {
     async fn list_pipeline_names(&self) -> Result<Vec<String>>;
     async fn get_pipeline_state(&self, name: &str) -> Result<PipelineState>;
+    /// Fetch pipeline definition (source S3 config) for linkage discovery.
+    async fn get_pipeline_definition(&self, name: &str) -> Result<PipelineDefinition>;
 }
 
 #[async_trait]
@@ -65,6 +89,8 @@ pub trait ActionsClient: Send + Sync {
     async fn list_latest_runs(&self) -> Result<Vec<WorkflowRunSummary>>;
     /// Fetch jobs for a specific run.
     async fn fetch_run_jobs(&self, run_id: u64) -> Result<Vec<JobInfo>>;
+    /// Fetch workflow YAML files and extract S3 upload targets.
+    async fn fetch_workflow_files(&self) -> Result<Vec<WorkflowFile>>;
 }
 
 /// Poll AWS pipelines and update app state. Clears only AWS-specific warnings.
@@ -350,6 +376,12 @@ mod tests {
                 })
                 .context("not found")
         }
+        async fn get_pipeline_definition(&self, name: &str) -> Result<PipelineDefinition> {
+            Ok(PipelineDefinition {
+                name: name.to_string(),
+                source_s3: None,
+            })
+        }
     }
 
     struct MockActionsClient {
@@ -385,6 +417,10 @@ mod tests {
                         .collect()
                 })
                 .unwrap_or_default())
+        }
+
+        async fn fetch_workflow_files(&self) -> Result<Vec<WorkflowFile>> {
+            Ok(Vec::new())
         }
     }
 
@@ -497,6 +533,9 @@ mod tests {
             anyhow::bail!("connection refused")
         }
         async fn get_pipeline_state(&self, _name: &str) -> Result<PipelineState> {
+            anyhow::bail!("connection refused")
+        }
+        async fn get_pipeline_definition(&self, _name: &str) -> Result<PipelineDefinition> {
             anyhow::bail!("connection refused")
         }
     }
@@ -630,6 +669,9 @@ mod tests {
         async fn get_pipeline_state(&self, _name: &str) -> Result<PipelineState> {
             anyhow::bail!("ExpiredToken")
         }
+        async fn get_pipeline_definition(&self, _name: &str) -> Result<PipelineDefinition> {
+            anyhow::bail!("ExpiredToken")
+        }
     }
 
     #[tokio::test]
@@ -655,6 +697,9 @@ mod tests {
         }
         async fn fetch_run_jobs(&self, _run_id: u64) -> Result<Vec<JobInfo>> {
             Ok(vec![])
+        }
+        async fn fetch_workflow_files(&self) -> Result<Vec<WorkflowFile>> {
+            Ok(Vec::new())
         }
     }
 

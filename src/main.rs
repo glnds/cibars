@@ -1,5 +1,6 @@
 mod app;
 mod config;
+mod linkage;
 mod model;
 mod poll_scheduler;
 mod poller;
@@ -15,7 +16,9 @@ use anyhow::{Context, Result};
 
 use app::App;
 use config::Config;
+use linkage::LinkMap;
 use poll_scheduler::PollScheduler;
+use poller::{ActionsClient, PipelineClient};
 
 fn setup_tracing() -> Result<()> {
     use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
@@ -46,6 +49,65 @@ async fn init_aws_client(config: &Config) -> poller::aws::AwsPipelineClient {
     poller::aws::AwsPipelineClient::new(aws_sdk_codepipeline::Client::new(&aws_config))
 }
 
+/// Discover GH workflow <-> CP pipeline links by matching S3 source configs.
+async fn discover_links(aws: &dyn PipelineClient, gh: &dyn ActionsClient) -> LinkMap {
+    let mut link_map = LinkMap::new();
+
+    let pipeline_names = match aws.list_pipeline_names().await {
+        Ok(names) => names,
+        Err(e) => {
+            tracing::warn!(error = %e, "failed to list pipelines for link discovery");
+            return link_map;
+        }
+    };
+
+    // Fetch pipeline definitions in parallel
+    let def_futs: Vec<_> = pipeline_names
+        .iter()
+        .map(|n| aws.get_pipeline_definition(n))
+        .collect();
+    let definitions: Vec<_> = futures::future::join_all(def_futs)
+        .await
+        .into_iter()
+        .filter_map(|r| match r {
+            Ok(d) => Some(d),
+            Err(e) => {
+                tracing::warn!(error = %e, "failed to get pipeline definition");
+                None
+            }
+        })
+        .collect();
+
+    let workflow_files = match gh.fetch_workflow_files().await {
+        Ok(wf) => wf,
+        Err(e) => {
+            tracing::warn!(error = %e, "failed to fetch workflow files for link discovery");
+            return link_map;
+        }
+    };
+
+    // Match: CP source S3 key matches GH upload S3 key
+    for def in &definitions {
+        if let Some(s3) = &def.source_s3 {
+            for wf in &workflow_files {
+                for upload in &wf.s3_uploads {
+                    if linkage::s3_keys_match(&s3.object_key, &upload.key) {
+                        link_map.add_discovered(
+                            def.name.clone(),
+                            wf.name.clone(),
+                            s3.bucket.clone(),
+                            s3.object_key.clone(),
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    tracing::info!(links = link_map.links().len(), "link discovery complete");
+    link_map
+}
+
 async fn run_poll_orchestrator(
     app: Arc<Mutex<App>>,
     config: Config,
@@ -62,14 +124,17 @@ async fn run_poll_orchestrator(
 
     let mut aws_client: Option<poller::aws::AwsPipelineClient> = None;
     let mut scheduler = PollScheduler::new();
+    let mut link_map = LinkMap::new();
 
     loop {
         let need_aws = scheduler.should_poll_aws();
 
-        // Lazy-init AWS on first need
+        // Lazy-init AWS on first need + run link discovery
         if need_aws && aws_client.is_none() {
             tracing::info!("initializing AWS client (first active poll)");
-            aws_client = Some(init_aws_client(&config).await);
+            let client = init_aws_client(&config).await;
+            link_map = discover_links(&client, &gh_client).await;
+            aws_client = Some(client);
         }
 
         // Poll: parallel when both, GH-only otherwise
@@ -81,6 +146,9 @@ async fn run_poll_orchestrator(
         } else {
             poller::poll_actions_tick(&app, &gh_client).await;
         }
+
+        // Apply linkage: mark GH workflows as Succeeded when linked CP starts Running
+        linkage::apply_links(&app, &mut link_map);
 
         // Transition + update App display state
         let any_running = app.lock().expect("app mutex poisoned").has_any_running();
