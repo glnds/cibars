@@ -139,7 +139,7 @@ pub fn run_ui(
             }
 
             let app = app.lock().expect("app mutex poisoned");
-            let dim = !matches!(app.poll_state, PollState::Active | PollState::Watching);
+            let dim = app.poll_state != PollState::Active;
 
             let sorted_wf_groups: Vec<&WorkflowGroup> =
                 sorted_workflow_groups(&app.workflow_groups);
@@ -216,7 +216,7 @@ pub fn run_ui(
                     areas[idx],
                 );
             } else {
-                frame.render_widget(ActionsTitle::new(&sorted_wf_groups), areas[idx]);
+                frame.render_widget(ActionsTitle::new(&sorted_wf_groups, dim), areas[idx]);
             }
             idx += 1;
 
@@ -247,7 +247,7 @@ pub fn run_ui(
                     areas[idx],
                 );
             } else {
-                frame.render_widget(PipelinesTitle::new(&sorted_pipe_groups), areas[idx]);
+                frame.render_widget(PipelinesTitle::new(&sorted_pipe_groups, dim), areas[idx]);
             }
             idx += 1;
 
