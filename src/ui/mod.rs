@@ -77,6 +77,15 @@ const MIN_HEIGHT: u16 = 10;
 const TICK_RATE_MS: u64 = 250;
 const ANIMATION_INTERVAL: Duration = Duration::from_secs(1);
 
+/// Toggle expand/collapse for both GitHub Actions and CodePipelines.
+fn toggle_expand(app: &Arc<Mutex<App>>) {
+    if let Ok(mut a) = app.lock() {
+        let expanded = !a.actions_expanded;
+        a.actions_expanded = expanded;
+        a.pipelines_expanded = expanded;
+    }
+}
+
 /// Handle the 'h' key press: install pre-push hook if needed.
 /// Returns true if installation was attempted.
 fn handle_hook_install(app: &Arc<Mutex<App>>) -> bool {
@@ -340,14 +349,7 @@ pub fn run_ui(
                         return Ok(());
                     }
                     KeyCode::Char('e') => {
-                        if let Ok(mut a) = app.lock() {
-                            a.actions_expanded = !a.actions_expanded;
-                        }
-                    }
-                    KeyCode::Char('p') => {
-                        if let Ok(mut a) = app.lock() {
-                            a.pipelines_expanded = !a.pipelines_expanded;
-                        }
+                        toggle_expand(&app);
                     }
                     KeyCode::Char('b') => {
                         boost_notify.notify_one();
@@ -403,19 +405,21 @@ mod tests {
     }
 
     #[test]
-    fn toggle_expand_actions() {
+    fn toggle_expand_toggles_both_flags() {
         let app = Arc::new(Mutex::new(App::new()));
+        // Both start expanded
         assert!(app.lock().unwrap().actions_expanded);
-        {
-            let mut a = app.lock().unwrap();
-            a.actions_expanded = !a.actions_expanded;
-        }
+        assert!(app.lock().unwrap().pipelines_expanded);
+
+        // Simulate 'e' toggle
+        toggle_expand(&app);
         assert!(!app.lock().unwrap().actions_expanded);
-        {
-            let mut a = app.lock().unwrap();
-            a.actions_expanded = !a.actions_expanded;
-        }
+        assert!(!app.lock().unwrap().pipelines_expanded);
+
+        // Toggle back
+        toggle_expand(&app);
         assert!(app.lock().unwrap().actions_expanded);
+        assert!(app.lock().unwrap().pipelines_expanded);
     }
 
     #[test]
@@ -464,22 +468,6 @@ mod tests {
         assert_eq!(app.lock().unwrap().hook_status, HookStatus::Installed);
 
         std::env::set_current_dir(original_dir).unwrap();
-    }
-
-    #[test]
-    fn toggle_expand_pipelines() {
-        let app = Arc::new(Mutex::new(App::new()));
-        assert!(app.lock().unwrap().pipelines_expanded);
-        {
-            let mut a = app.lock().unwrap();
-            a.pipelines_expanded = !a.pipelines_expanded;
-        }
-        assert!(!app.lock().unwrap().pipelines_expanded);
-        {
-            let mut a = app.lock().unwrap();
-            a.pipelines_expanded = !a.pipelines_expanded;
-        }
-        assert!(app.lock().unwrap().pipelines_expanded);
     }
 
     #[test]
