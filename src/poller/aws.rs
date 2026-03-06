@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use async_trait::async_trait;
 use aws_sdk_codepipeline::Client;
 
-use super::{PipelineClient, PipelineState};
+use super::{ActionState, PipelineClient, PipelineState, StageState};
 use crate::model::BuildStatus;
 
 pub struct AwsPipelineClient {
@@ -12,6 +12,16 @@ pub struct AwsPipelineClient {
 impl AwsPipelineClient {
     pub fn new(client: Client) -> Self {
         Self { client }
+    }
+}
+
+/// Map AWS action execution status string to BuildStatus.
+pub fn map_action_status(status: &str) -> BuildStatus {
+    match status {
+        "InProgress" => BuildStatus::Running,
+        "Succeeded" => BuildStatus::Succeeded,
+        "Failed" | "Abandoned" => BuildStatus::Failed,
+        _ => BuildStatus::Idle,
     }
 }
 
@@ -71,9 +81,37 @@ impl PipelineClient for AwsPipelineClient {
             .iter()
             .map(|s| s.latest_execution().map(|e| e.status().as_str()))
             .collect();
+        let stages: Vec<StageState> = resp
+            .stage_states()
+            .iter()
+            .map(|s| {
+                let stage_name = s.stage_name().unwrap_or("unknown").to_string();
+                let actions = s
+                    .action_states()
+                    .iter()
+                    .map(|a| {
+                        let action_name = a.action_name().unwrap_or("unknown").to_string();
+                        let status = a
+                            .latest_execution()
+                            .and_then(|e| e.status())
+                            .map(|s| map_action_status(s.as_str()))
+                            .unwrap_or(BuildStatus::Idle);
+                        ActionState {
+                            name: action_name,
+                            status,
+                        }
+                    })
+                    .collect();
+                StageState {
+                    name: stage_name,
+                    actions,
+                }
+            })
+            .collect();
         Ok(PipelineState {
             name: name.to_string(),
             status: aggregate_stage_statuses(&stage_statuses),
+            stages,
         })
     }
 }
@@ -187,5 +225,32 @@ mod tests {
     fn aggregate_mixed_with_none() {
         let statuses = vec![None, Some("Succeeded")];
         assert_eq!(aggregate_stage_statuses(&statuses), BuildStatus::Succeeded);
+    }
+
+    // --- map_action_status tests ---
+
+    #[test]
+    fn action_in_progress() {
+        assert_eq!(map_action_status("InProgress"), BuildStatus::Running);
+    }
+
+    #[test]
+    fn action_succeeded() {
+        assert_eq!(map_action_status("Succeeded"), BuildStatus::Succeeded);
+    }
+
+    #[test]
+    fn action_failed() {
+        assert_eq!(map_action_status("Failed"), BuildStatus::Failed);
+    }
+
+    #[test]
+    fn action_abandoned() {
+        assert_eq!(map_action_status("Abandoned"), BuildStatus::Failed);
+    }
+
+    #[test]
+    fn action_unknown_to_idle() {
+        assert_eq!(map_action_status("Whatever"), BuildStatus::Idle);
     }
 }

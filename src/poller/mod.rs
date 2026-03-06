@@ -10,13 +10,24 @@ use async_trait::async_trait;
 use chrono::Utc;
 
 use crate::app::App;
-use crate::model::{Bar, BuildStatus, WorkflowGroup};
+use crate::model::{Bar, BuildStatus, PipelineGroup, StageInfo, WorkflowGroup};
 
 /// How long to back off when GitHub rate limit is hit.
 const RATE_LIMIT_BACKOFF_SECS: u64 = 60;
 
-/// Simplified pipeline state from AWS API
+/// Pipeline state from AWS API, including per-stage action breakdown.
 pub struct PipelineState {
+    pub name: String,
+    pub status: BuildStatus,
+    pub stages: Vec<StageState>,
+}
+
+pub struct StageState {
+    pub name: String,
+    pub actions: Vec<ActionState>,
+}
+
+pub struct ActionState {
     pub name: String,
     pub status: BuildStatus,
 }
@@ -72,7 +83,7 @@ pub async fn poll_pipelines_tick(
         Ok(states) => {
             tracing::debug!(count = states.len(), "polled pipelines");
             let mut a = app.lock().expect("app mutex poisoned");
-            update_pipeline_bars(&mut a, states);
+            update_pipeline_groups(&mut a, states);
         }
         Err(e) => {
             let msg = format!("{e:#}");
@@ -215,9 +226,72 @@ fn reconcile_bars(bars: &mut Vec<Bar>, updates: Vec<(String, BuildStatus)>) {
     }
 }
 
-fn update_pipeline_bars(app: &mut App, states: Vec<PipelineState>) {
-    let updates: Vec<_> = states.into_iter().map(|s| (s.name, s.status)).collect();
-    reconcile_bars(&mut app.bars_pipelines, updates);
+fn update_pipeline_groups(app: &mut App, states: Vec<PipelineState>) {
+    let seen: HashSet<&str> = states.iter().map(|s| s.name.as_str()).collect();
+
+    for group in &mut app.pipeline_groups {
+        if !seen.contains(group.name.as_str()) {
+            group.gone = true;
+        }
+    }
+
+    for state in states {
+        let stages: Vec<StageInfo> = state
+            .stages
+            .into_iter()
+            .map(|s| StageInfo {
+                name: s.name,
+                actions: s
+                    .actions
+                    .into_iter()
+                    .map(|a| {
+                        let mut bar = Bar::new(a.name);
+                        bar.set_status(a.status);
+                        bar
+                    })
+                    .collect(),
+            })
+            .collect();
+
+        if let Some(g) = app
+            .pipeline_groups
+            .iter_mut()
+            .find(|g| g.name == state.name)
+        {
+            g.gone = false;
+            g.summary_status = state.status;
+            // Reconcile actions within each stage
+            for new_stage in &stages {
+                if let Some(existing_stage) = g.stages.iter_mut().find(|s| s.name == new_stage.name)
+                {
+                    let updates: Vec<_> = new_stage
+                        .actions
+                        .iter()
+                        .map(|a| (a.name.clone(), a.status))
+                        .collect();
+                    reconcile_bars(&mut existing_stage.actions, updates);
+                } else {
+                    g.stages.push(new_stage.clone());
+                }
+            }
+            // Mark gone stages
+            let seen_stages: HashSet<&str> = stages.iter().map(|s| s.name.as_str()).collect();
+            for stage in &mut g.stages {
+                if !seen_stages.contains(stage.name.as_str()) {
+                    for action in &mut stage.actions {
+                        action.gone = true;
+                    }
+                }
+            }
+        } else {
+            app.pipeline_groups.push(PipelineGroup {
+                name: state.name,
+                stages,
+                gone: false,
+                summary_status: state.status,
+            });
+        }
+    }
 }
 
 /// Phase 1: create/update workflow groups from summaries (no jobs yet).
@@ -285,6 +359,21 @@ mod tests {
                 .map(|p| PipelineState {
                     name: p.name.clone(),
                     status: p.status,
+                    stages: p
+                        .stages
+                        .iter()
+                        .map(|s| StageState {
+                            name: s.name.clone(),
+                            actions: s
+                                .actions
+                                .iter()
+                                .map(|a| ActionState {
+                                    name: a.name.clone(),
+                                    status: a.status,
+                                })
+                                .collect(),
+                        })
+                        .collect(),
                 })
                 .context("not found")
         }
@@ -326,14 +415,39 @@ mod tests {
         }
     }
 
+    fn mock_pipeline(name: &str, status: BuildStatus, stages: Vec<StageState>) -> PipelineState {
+        PipelineState {
+            name: name.to_string(),
+            status,
+            stages,
+        }
+    }
+
+    fn mock_stage(name: &str, actions: Vec<(&str, BuildStatus)>) -> StageState {
+        StageState {
+            name: name.to_string(),
+            actions: actions
+                .into_iter()
+                .map(|(n, s)| ActionState {
+                    name: n.to_string(),
+                    status: s,
+                })
+                .collect(),
+        }
+    }
+
     #[tokio::test]
-    async fn poll_creates_new_bars() {
+    async fn poll_creates_pipeline_groups() {
         let app = Arc::new(Mutex::new(App::new()));
         let pipes = MockPipelineClient {
-            pipelines: vec![PipelineState {
-                name: "deploy".to_string(),
-                status: BuildStatus::Running,
-            }],
+            pipelines: vec![mock_pipeline(
+                "deploy",
+                BuildStatus::Running,
+                vec![mock_stage(
+                    "Build",
+                    vec![("compile", BuildStatus::Succeeded)],
+                )],
+            )],
         };
         let actions = MockActionsClient {
             runs: vec![WorkflowRunInfo {
@@ -350,12 +464,15 @@ mod tests {
         poll_once(&app, &pipes, &actions).await;
 
         let app = app.lock().unwrap();
-        assert_eq!(app.bars_pipelines.len(), 1);
-        assert_eq!(app.bars_pipelines[0].name, "deploy");
+        assert_eq!(app.pipeline_groups.len(), 1);
+        assert_eq!(app.pipeline_groups[0].name, "deploy");
+        assert_eq!(app.pipeline_groups[0].summary_status, BuildStatus::Running);
+        assert_eq!(app.pipeline_groups[0].stages.len(), 1);
+        assert_eq!(app.pipeline_groups[0].stages[0].name, "Build");
+        assert_eq!(app.pipeline_groups[0].stages[0].actions.len(), 1);
+        assert_eq!(app.pipeline_groups[0].stages[0].actions[0].name, "compile");
         assert_eq!(app.workflow_groups.len(), 1);
         assert_eq!(app.workflow_groups[0].name, "ci");
-        assert_eq!(app.workflow_groups[0].jobs.len(), 1);
-        assert_eq!(app.workflow_groups[0].jobs[0].name, "build");
         assert!(app.last_poll.is_some());
         assert!(!app.loading_pipelines);
         assert!(!app.loading_actions);
@@ -365,10 +482,7 @@ mod tests {
     async fn poll_marks_gone_pipelines() {
         let app = Arc::new(Mutex::new(App::new()));
         let pipes = MockPipelineClient {
-            pipelines: vec![PipelineState {
-                name: "deploy".to_string(),
-                status: BuildStatus::Running,
-            }],
+            pipelines: vec![mock_pipeline("deploy", BuildStatus::Running, vec![])],
         };
         let actions = MockActionsClient { runs: vec![] };
         poll_once(&app, &pipes, &actions).await;
@@ -377,28 +491,30 @@ mod tests {
         poll_once(&app, &pipes, &actions).await;
 
         let app = app.lock().unwrap();
-        assert_eq!(app.bars_pipelines.len(), 1);
-        assert!(app.bars_pipelines[0].gone);
+        assert_eq!(app.pipeline_groups.len(), 1);
+        assert!(app.pipeline_groups[0].gone);
     }
 
     #[tokio::test]
-    async fn poll_updates_existing_bars() {
+    async fn poll_updates_existing_pipeline_groups() {
         let app = Arc::new(Mutex::new(App::new()));
         let pipes = MockPipelineClient {
-            pipelines: vec![PipelineState {
-                name: "deploy".to_string(),
-                status: BuildStatus::Running,
-            }],
+            pipelines: vec![mock_pipeline(
+                "deploy",
+                BuildStatus::Running,
+                vec![mock_stage("Build", vec![("compile", BuildStatus::Running)])],
+            )],
         };
         let actions = MockActionsClient { runs: vec![] };
         poll_once(&app, &pipes, &actions).await;
         poll_once(&app, &pipes, &actions).await;
 
         let app = app.lock().unwrap();
-        assert_eq!(app.bars_pipelines.len(), 1);
-        // fill stays 0: set_status doesn't advance fill, tick() does (UI responsibility)
-        assert_eq!(app.bars_pipelines[0].fill, 0);
-        assert_eq!(app.bars_pipelines[0].status, BuildStatus::Running);
+        assert_eq!(app.pipeline_groups.len(), 1);
+        assert_eq!(
+            app.pipeline_groups[0].stages[0].actions[0].status,
+            BuildStatus::Running
+        );
     }
 
     struct FailingPipelineClient;
@@ -424,6 +540,37 @@ mod tests {
         assert_eq!(app.warnings.len(), 1);
         assert!(app.warnings[0].contains("AWS"));
         assert!(app.last_poll.is_some());
+    }
+
+    #[tokio::test]
+    async fn poll_creates_pipeline_with_multi_stage_actions() {
+        let app = Arc::new(Mutex::new(App::new()));
+        let pipes = MockPipelineClient {
+            pipelines: vec![mock_pipeline(
+                "my-pipe",
+                BuildStatus::Running,
+                vec![
+                    mock_stage("Source", vec![("checkout", BuildStatus::Succeeded)]),
+                    mock_stage(
+                        "Build",
+                        vec![
+                            ("compile", BuildStatus::Succeeded),
+                            ("test", BuildStatus::Running),
+                        ],
+                    ),
+                ],
+            )],
+        };
+        let actions = MockActionsClient { runs: vec![] };
+        poll_once(&app, &pipes, &actions).await;
+
+        let app = app.lock().unwrap();
+        let group = &app.pipeline_groups[0];
+        assert_eq!(group.stages.len(), 2);
+        assert_eq!(group.stages[0].actions.len(), 1);
+        assert_eq!(group.stages[1].actions.len(), 2);
+        assert_eq!(group.stages[1].actions[1].name, "test");
+        assert_eq!(group.stages[1].actions[1].status, BuildStatus::Running);
     }
 
     #[tokio::test]

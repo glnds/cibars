@@ -17,10 +17,10 @@ use ratatui::DefaultTerminal;
 
 use crate::app::App;
 use crate::config::HookStatus;
-use crate::model::{Bar, BuildStatus, WorkflowGroup};
+use crate::model::{BuildStatus, PipelineGroup, WorkflowGroup};
 use crate::poll_scheduler::PollState;
 
-use bar::{compute_name_width, ActionsTitle, BarWidget, PipelinesTitle};
+use bar::{ActionsTitle, BarWidget, PipelinesTitle};
 use header::Header;
 use statusbar::StatusBar;
 
@@ -35,6 +35,36 @@ fn all_jobs_name_width(groups: &[WorkflowGroup]) -> usize {
         .unwrap_or(10);
     // +2 for indent
     (max_job + 2).min(bar::MAX_NAME_WIDTH)
+}
+
+/// Compute name width across all non-gone actions in all pipeline groups (+ 2 for indent)
+fn all_pipeline_actions_name_width(groups: &[PipelineGroup]) -> usize {
+    let max_action = groups
+        .iter()
+        .flat_map(|g| g.stages.iter())
+        .flat_map(|s| s.actions.iter())
+        .filter(|a| !a.gone)
+        .map(|a| a.name.len())
+        .max()
+        .unwrap_or(10);
+    (max_action + 2).min(bar::MAX_NAME_WIDTH)
+}
+
+/// Sort pipeline groups: those with running actions first, then alphabetical
+fn sorted_pipeline_groups(groups: &[PipelineGroup]) -> Vec<&PipelineGroup> {
+    let mut sorted: Vec<&PipelineGroup> = groups.iter().collect();
+    sorted.sort_by(|a, b| {
+        let a_running = a
+            .stages
+            .iter()
+            .any(|s| s.actions.iter().any(|a| a.status == BuildStatus::Running));
+        let b_running = b
+            .stages
+            .iter()
+            .any(|s| s.actions.iter().any(|a| a.status == BuildStatus::Running));
+        b_running.cmp(&a_running).then(a.name.cmp(&b.name))
+    });
+    sorted
 }
 
 /// Sort workflow groups: those with running jobs first, then alphabetical
@@ -52,16 +82,6 @@ const MIN_WIDTH: u16 = 80;
 const MIN_HEIGHT: u16 = 10;
 const TICK_RATE_MS: u64 = 250;
 const ANIMATION_INTERVAL: Duration = Duration::from_secs(1);
-
-fn sorted_bars(bars: &[Bar]) -> Vec<&Bar> {
-    let mut sorted: Vec<&Bar> = bars.iter().collect();
-    sorted.sort_by(|a, b| {
-        let a_running = a.status == BuildStatus::Running;
-        let b_running = b.status == BuildStatus::Running;
-        b_running.cmp(&a_running).then(a.name.cmp(&b.name))
-    });
-    sorted
-}
 
 /// Handle the 'h' key press: install pre-push hook if needed.
 /// Returns true if installation was attempted.
@@ -127,18 +147,32 @@ pub fn run_ui(
             let app = app.lock().expect("app mutex poisoned");
             let dim = !matches!(app.poll_state, PollState::Active | PollState::Watching);
 
-            let pipes_sorted = sorted_bars(&app.bars_pipelines);
-            let sorted_groups: Vec<&WorkflowGroup> = sorted_workflow_groups(&app.workflow_groups);
+            let sorted_wf_groups: Vec<&WorkflowGroup> =
+                sorted_workflow_groups(&app.workflow_groups);
+            let sorted_pipe_groups: Vec<&PipelineGroup> =
+                sorted_pipeline_groups(&app.pipeline_groups);
 
-            let pipe_count = pipes_sorted.len();
-            let has_actions = !sorted_groups.is_empty();
+            let has_actions = !sorted_wf_groups.is_empty();
+            let has_pipelines = !sorted_pipe_groups.is_empty();
 
             // Count action rows: just non-gone jobs (no per-workflow headers)
             let action_rows: usize = if app.actions_expanded {
-                sorted_groups
+                sorted_wf_groups
                     .iter()
                     .flat_map(|g| g.jobs.iter())
                     .filter(|j| !j.gone)
+                    .count()
+            } else {
+                0
+            };
+
+            // Count pipeline action rows: non-gone actions across all stages
+            let pipe_action_rows: usize = if app.pipelines_expanded {
+                sorted_pipe_groups
+                    .iter()
+                    .flat_map(|g| g.stages.iter())
+                    .flat_map(|s| s.actions.iter())
+                    .filter(|a| !a.gone)
                     .count()
             } else {
                 0
@@ -151,7 +185,7 @@ pub fn run_ui(
                 constraints.push(Constraint::Length(1));
             }
             constraints.push(Constraint::Length(1)); // pipelines title
-            for _ in 0..pipe_count {
+            for _ in 0..pipe_action_rows {
                 constraints.push(Constraint::Length(1));
             }
             constraints.push(Constraint::Fill(1)); // remaining space
@@ -183,14 +217,14 @@ pub fn run_ui(
                     areas[idx],
                 );
             } else {
-                frame.render_widget(ActionsTitle::new(&sorted_groups), areas[idx]);
+                frame.render_widget(ActionsTitle::new(&sorted_wf_groups), areas[idx]);
             }
             idx += 1;
 
             // Action job bars (when expanded)
             if app.actions_expanded {
                 let job_name_width = all_jobs_name_width(&app.workflow_groups);
-                for group in &sorted_groups {
+                for group in &sorted_wf_groups {
                     for bar in group.jobs.iter().filter(|j| !j.gone) {
                         let bar_dim = dim || group.gone;
                         frame.render_widget(
@@ -202,8 +236,8 @@ pub fn run_ui(
                 }
             }
 
-            // Pipelines title
-            if pipe_count == 0 {
+            // Pipelines title (with inline dots)
+            if !has_pipelines {
                 let msg = if app.loading_pipelines {
                     "Loading CodePipelines..."
                 } else {
@@ -214,15 +248,25 @@ pub fn run_ui(
                     areas[idx],
                 );
             } else {
-                frame.render_widget(PipelinesTitle::new(&app.bars_pipelines), areas[idx]);
+                frame.render_widget(PipelinesTitle::new(&sorted_pipe_groups), areas[idx]);
             }
             idx += 1;
 
-            // Pipeline bars
-            let pipe_name_width = compute_name_width(&app.bars_pipelines);
-            for bar in &pipes_sorted {
-                frame.render_widget(BarWidget::new(bar, pipe_name_width, dim), areas[idx]);
-                idx += 1;
+            // Pipeline action bars (when expanded)
+            if app.pipelines_expanded {
+                let action_name_width = all_pipeline_actions_name_width(&app.pipeline_groups);
+                for group in &sorted_pipe_groups {
+                    for stage in &group.stages {
+                        for bar in stage.actions.iter().filter(|a| !a.gone) {
+                            let bar_dim = dim || group.gone;
+                            frame.render_widget(
+                                BarWidget::new(bar, action_name_width, bar_dim),
+                                areas[idx],
+                            );
+                            idx += 1;
+                        }
+                    }
+                }
             }
 
             // Skip fill area
@@ -253,10 +297,14 @@ pub fn run_ui(
             if let Ok(mut a) = app.lock() {
                 let width = a.terminal_width as usize;
 
-                let pipe_name_width = compute_name_width(&a.bars_pipelines);
-                let pipe_fill_width = width.saturating_sub(pipe_name_width + 4);
-                for bar in &mut a.bars_pipelines {
-                    bar.tick(pipe_fill_width);
+                let pipe_action_name_width = all_pipeline_actions_name_width(&a.pipeline_groups);
+                let pipe_fill_width = width.saturating_sub(pipe_action_name_width + 4);
+                for group in &mut a.pipeline_groups {
+                    for stage in &mut group.stages {
+                        for action in &mut stage.actions {
+                            action.tick(pipe_fill_width);
+                        }
+                    }
                 }
 
                 let job_name_width = all_jobs_name_width(&a.workflow_groups);
@@ -284,6 +332,11 @@ pub fn run_ui(
                             a.actions_expanded = !a.actions_expanded;
                         }
                     }
+                    KeyCode::Char('p') => {
+                        if let Ok(mut a) = app.lock() {
+                            a.pipelines_expanded = !a.pipelines_expanded;
+                        }
+                    }
                     KeyCode::Char('b') => {
                         boost_notify.notify_one();
                     }
@@ -301,6 +354,16 @@ pub fn run_ui(
 mod tests {
     use super::*;
     use crate::model::{Bar, BuildStatus};
+
+    fn sorted_bars(bars: &[Bar]) -> Vec<&Bar> {
+        let mut sorted: Vec<&Bar> = bars.iter().collect();
+        sorted.sort_by(|a, b| {
+            let a_running = a.status == BuildStatus::Running;
+            let b_running = b.status == BuildStatus::Running;
+            b_running.cmp(&a_running).then(a.name.cmp(&b.name))
+        });
+        sorted
+    }
 
     fn make_test_bar(name: &str, status: BuildStatus) -> Bar {
         Bar {
@@ -389,6 +452,46 @@ mod tests {
         assert_eq!(app.lock().unwrap().hook_status, HookStatus::Installed);
 
         std::env::set_current_dir(original_dir).unwrap();
+    }
+
+    #[test]
+    fn toggle_expand_pipelines() {
+        let app = Arc::new(Mutex::new(App::new()));
+        assert!(app.lock().unwrap().pipelines_expanded);
+        {
+            let mut a = app.lock().unwrap();
+            a.pipelines_expanded = !a.pipelines_expanded;
+        }
+        assert!(!app.lock().unwrap().pipelines_expanded);
+        {
+            let mut a = app.lock().unwrap();
+            a.pipelines_expanded = !a.pipelines_expanded;
+        }
+        assert!(app.lock().unwrap().pipelines_expanded);
+    }
+
+    #[test]
+    fn sorted_pipeline_groups_running_first() {
+        let groups = vec![
+            PipelineGroup {
+                name: "zzz-idle".to_string(),
+                stages: vec![],
+                gone: false,
+                summary_status: BuildStatus::Idle,
+            },
+            PipelineGroup {
+                name: "aaa-running".to_string(),
+                stages: vec![crate::model::StageInfo {
+                    name: "Build".to_string(),
+                    actions: vec![make_test_bar("compile", BuildStatus::Running)],
+                }],
+                gone: false,
+                summary_status: BuildStatus::Running,
+            },
+        ];
+        let sorted = sorted_pipeline_groups(&groups);
+        assert_eq!(sorted[0].name, "aaa-running");
+        assert_eq!(sorted[1].name, "zzz-idle");
     }
 
     #[test]

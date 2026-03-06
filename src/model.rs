@@ -95,6 +95,20 @@ pub struct WorkflowGroup {
     pub summary_status: BuildStatus,
 }
 
+#[derive(Debug, Clone)]
+pub struct PipelineGroup {
+    pub name: String,
+    pub stages: Vec<StageInfo>,
+    pub gone: bool,
+    pub summary_status: BuildStatus,
+}
+
+#[derive(Debug, Clone)]
+pub struct StageInfo {
+    pub name: String,
+    pub actions: Vec<Bar>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -296,6 +310,61 @@ mod tests {
         let mut group = WorkflowGroup {
             name: "CI".to_string(),
             jobs: vec![],
+            gone: false,
+            summary_status: BuildStatus::Idle,
+        };
+        group.gone = true;
+        assert!(group.gone);
+    }
+
+    // --- PipelineGroup tests ---
+
+    #[test]
+    fn pipeline_group_new() {
+        let group = PipelineGroup {
+            name: "deploy-pipe".to_string(),
+            stages: vec![],
+            gone: false,
+            summary_status: BuildStatus::Idle,
+        };
+        assert_eq!(group.name, "deploy-pipe");
+        assert!(group.stages.is_empty());
+        assert!(!group.gone);
+    }
+
+    #[test]
+    fn pipeline_group_with_stages_and_actions() {
+        let group = PipelineGroup {
+            name: "my-pipeline".to_string(),
+            stages: vec![
+                StageInfo {
+                    name: "Source".to_string(),
+                    actions: vec![Bar::new("checkout".to_string())],
+                },
+                StageInfo {
+                    name: "Build".to_string(),
+                    actions: vec![
+                        Bar::new("compile".to_string()),
+                        Bar::new("test".to_string()),
+                    ],
+                },
+            ],
+            gone: false,
+            summary_status: BuildStatus::Running,
+        };
+        assert_eq!(group.stages.len(), 2);
+        assert_eq!(group.stages[0].name, "Source");
+        assert_eq!(group.stages[0].actions.len(), 1);
+        assert_eq!(group.stages[1].name, "Build");
+        assert_eq!(group.stages[1].actions.len(), 2);
+        assert_eq!(group.stages[1].actions[1].name, "test");
+    }
+
+    #[test]
+    fn pipeline_group_gone_marking() {
+        let mut group = PipelineGroup {
+            name: "old-pipe".to_string(),
+            stages: vec![],
             gone: false,
             summary_status: BuildStatus::Idle,
         };

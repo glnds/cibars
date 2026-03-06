@@ -3,13 +3,14 @@ use std::time::Instant;
 use chrono::{DateTime, Utc};
 
 use crate::config::HookStatus;
-use crate::model::{Bar, BuildStatus, WorkflowGroup};
+use crate::model::{BuildStatus, PipelineGroup, WorkflowGroup};
 use crate::poll_scheduler::PollState;
 
 pub struct App {
-    pub bars_pipelines: Vec<Bar>,
+    pub pipeline_groups: Vec<PipelineGroup>,
     pub workflow_groups: Vec<WorkflowGroup>,
     pub actions_expanded: bool,
+    pub pipelines_expanded: bool,
     pub last_poll: Option<DateTime<Utc>>,
     pub warnings: Vec<String>,
     /// Terminal width (updated each UI render), used by animation tick.
@@ -35,9 +36,10 @@ impl App {
 
     pub fn new() -> Self {
         Self {
-            bars_pipelines: Vec::new(),
+            pipeline_groups: Vec::new(),
             workflow_groups: Vec::new(),
             actions_expanded: true,
+            pipelines_expanded: true,
             last_poll: None,
             warnings: Vec::new(),
             terminal_width: 80,
@@ -59,13 +61,15 @@ impl App {
     }
 
     pub fn has_any_running(&self) -> bool {
-        self.bars_pipelines
-            .iter()
-            .any(|b| b.status == BuildStatus::Running)
-            || self.workflow_groups.iter().any(|g| {
-                g.summary_status == BuildStatus::Running
-                    || g.jobs.iter().any(|j| j.status == BuildStatus::Running)
-            })
+        self.pipeline_groups.iter().any(|g| {
+            g.summary_status == BuildStatus::Running
+                || g.stages
+                    .iter()
+                    .any(|s| s.actions.iter().any(|a| a.status == BuildStatus::Running))
+        }) || self.workflow_groups.iter().any(|g| {
+            g.summary_status == BuildStatus::Running
+                || g.jobs.iter().any(|j| j.status == BuildStatus::Running)
+        })
     }
 }
 
@@ -78,7 +82,7 @@ impl Default for App {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{Bar, WorkflowGroup};
+    use crate::model::{Bar, StageInfo, WorkflowGroup};
 
     #[test]
     fn app_starts_with_loading_flags() {
@@ -94,11 +98,31 @@ mod tests {
     }
 
     #[test]
-    fn has_any_running_pipeline_running() {
+    fn has_any_running_pipeline_summary_running() {
         let mut app = App::new();
-        let mut bar = Bar::new("deploy".into());
-        bar.set_status(BuildStatus::Running);
-        app.bars_pipelines.push(bar);
+        app.pipeline_groups.push(PipelineGroup {
+            name: "deploy".into(),
+            stages: vec![],
+            gone: false,
+            summary_status: BuildStatus::Running,
+        });
+        assert!(app.has_any_running());
+    }
+
+    #[test]
+    fn has_any_running_pipeline_action_running() {
+        let mut app = App::new();
+        let mut action = Bar::new("compile".into());
+        action.set_status(BuildStatus::Running);
+        app.pipeline_groups.push(PipelineGroup {
+            name: "deploy".into(),
+            stages: vec![StageInfo {
+                name: "Build".into(),
+                actions: vec![action],
+            }],
+            gone: false,
+            summary_status: BuildStatus::Succeeded,
+        });
         assert!(app.has_any_running());
     }
 
@@ -135,7 +159,6 @@ mod tests {
             app.push_warning(format!("warning {i}"));
         }
         assert_eq!(app.warnings.len(), App::MAX_WARNINGS);
-        // Oldest warnings dropped, newest kept
         assert_eq!(app.warnings[0], "warning 5");
         assert_eq!(app.warnings[App::MAX_WARNINGS - 1], "warning 14");
     }
@@ -143,9 +166,12 @@ mod tests {
     #[test]
     fn has_any_running_all_succeeded() {
         let mut app = App::new();
-        let mut bar = Bar::new("deploy".into());
-        bar.set_status(BuildStatus::Succeeded);
-        app.bars_pipelines.push(bar);
+        app.pipeline_groups.push(PipelineGroup {
+            name: "deploy".into(),
+            stages: vec![],
+            gone: false,
+            summary_status: BuildStatus::Succeeded,
+        });
         app.workflow_groups.push(WorkflowGroup {
             name: "CI".into(),
             jobs: vec![],

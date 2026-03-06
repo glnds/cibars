@@ -4,7 +4,7 @@ use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Widget;
 
-use crate::model::{Bar, WorkflowGroup};
+use crate::model::{Bar, PipelineGroup, WorkflowGroup};
 
 /// Max chars for the name column
 pub const MAX_NAME_WIDTH: usize = 30;
@@ -69,6 +69,7 @@ impl Widget for BarWidget<'_> {
 }
 
 /// Compute the name column width for a set of bars.
+#[cfg(test)]
 pub fn compute_name_width(bars: &[Bar]) -> usize {
     bars.iter()
         .map(|b| b.name.len())
@@ -125,14 +126,14 @@ impl Widget for ActionsTitle<'_> {
     }
 }
 
-/// "CodePipelines" title with inline status dots for each pipeline.
+/// "CodePipelines" title with inline status dots for each pipeline group.
 pub struct PipelinesTitle<'a> {
-    bars: &'a [Bar],
+    groups: &'a [&'a PipelineGroup],
 }
 
 impl<'a> PipelinesTitle<'a> {
-    pub fn new(bars: &'a [Bar]) -> Self {
-        Self { bars }
+    pub fn new(groups: &'a [&'a PipelineGroup]) -> Self {
+        Self { groups }
     }
 }
 
@@ -147,11 +148,31 @@ impl Widget for PipelinesTitle<'_> {
             Style::default().fg(Color::Cyan),
         )];
 
-        for bar in self.bars {
-            spans.push(Span::styled(
-                "\u{25CF} ",
-                Style::default().fg(bar.status.color()),
-            ));
+        for group in self.groups {
+            let has_actions: Vec<_> = group
+                .stages
+                .iter()
+                .flat_map(|s| s.actions.iter())
+                .filter(|a| !a.gone)
+                .collect();
+            if has_actions.is_empty() {
+                // No actions loaded yet; show one dot per pipeline using summary status
+                let color = if group.gone {
+                    Color::DarkGray
+                } else {
+                    group.summary_status.color()
+                };
+                spans.push(Span::styled("\u{25CF} ", Style::default().fg(color)));
+            } else {
+                for action in has_actions {
+                    let color = if group.gone {
+                        Color::DarkGray
+                    } else {
+                        action.status.color()
+                    };
+                    spans.push(Span::styled("\u{25CF} ", Style::default().fg(color)));
+                }
+            }
         }
 
         Line::from(spans).render(area, buf);
@@ -341,13 +362,32 @@ mod tests {
         assert_eq!(dots[3].fg, Color::Yellow);
     }
 
+    fn make_pipe_group(name: &str, action_statuses: &[BuildStatus]) -> PipelineGroup {
+        PipelineGroup {
+            name: name.to_string(),
+            stages: vec![crate::model::StageInfo {
+                name: "Build".to_string(),
+                actions: action_statuses
+                    .iter()
+                    .enumerate()
+                    .map(|(i, s)| {
+                        let mut bar = Bar::new(format!("action-{i}"));
+                        bar.status = *s;
+                        bar
+                    })
+                    .collect(),
+            }],
+            gone: false,
+            summary_status: BuildStatus::Running,
+        }
+    }
+
     #[test]
     fn pipelines_title_renders_label_and_dots() {
-        let bars = vec![
-            make_bar("pipe-a", BuildStatus::Succeeded, 5),
-            make_bar("pipe-b", BuildStatus::Running, 3),
-        ];
-        let widget = PipelinesTitle::new(&bars);
+        let g1 = make_pipe_group("pipe-a", &[BuildStatus::Succeeded]);
+        let g2 = make_pipe_group("pipe-b", &[BuildStatus::Running]);
+        let groups = vec![&g1, &g2];
+        let widget = PipelinesTitle::new(&groups);
         let area = Rect::new(0, 0, 40, 1);
         let mut buf = Buffer::empty(area);
         widget.render(area, &mut buf);
@@ -371,13 +411,17 @@ mod tests {
 
     #[test]
     fn pipelines_title_dot_colors() {
-        let bars = vec![
-            make_bar("p1", BuildStatus::Failed, 1),
-            make_bar("p2", BuildStatus::Idle, 0),
-            make_bar("p3", BuildStatus::Succeeded, 5),
-            make_bar("p4", BuildStatus::Running, 2),
-        ];
-        let widget = PipelinesTitle::new(&bars);
+        let g = make_pipe_group(
+            "p1",
+            &[
+                BuildStatus::Failed,
+                BuildStatus::Idle,
+                BuildStatus::Succeeded,
+                BuildStatus::Running,
+            ],
+        );
+        let groups = vec![&g];
+        let widget = PipelinesTitle::new(&groups);
         let area = Rect::new(0, 0, 40, 1);
         let mut buf = Buffer::empty(area);
         widget.render(area, &mut buf);
@@ -392,6 +436,29 @@ mod tests {
         assert_eq!(dots[1].fg, Color::DarkGray);
         assert_eq!(dots[2].fg, Color::Green);
         assert_eq!(dots[3].fg, Color::Yellow);
+    }
+
+    #[test]
+    fn pipelines_title_summary_dot_when_no_actions() {
+        let g = PipelineGroup {
+            name: "pipe".to_string(),
+            stages: vec![],
+            gone: false,
+            summary_status: BuildStatus::Running,
+        };
+        let groups = vec![&g];
+        let widget = PipelinesTitle::new(&groups);
+        let area = Rect::new(0, 0, 40, 1);
+        let mut buf = Buffer::empty(area);
+        widget.render(area, &mut buf);
+
+        let dots: Vec<_> = buf
+            .content()
+            .iter()
+            .filter(|c| c.symbol() == "\u{25CF}")
+            .collect();
+        assert_eq!(dots.len(), 1);
+        assert_eq!(dots[0].fg, Color::Yellow);
     }
 
     #[test]
