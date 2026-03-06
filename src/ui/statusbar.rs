@@ -20,14 +20,19 @@ pub struct StatusBar<'a> {
 }
 
 /// Compute how many ticks are filled based on elapsed time and state interval.
+/// Returns 0 when elapsed >= interval (poll in progress / overdue).
 fn filled_ticks(elapsed: Duration, state: &PollState) -> usize {
-    let tick_duration_ms = match state {
-        PollState::Idle => 30_000 / NUM_TICKS,      // 6s per tick
-        PollState::LongIdle => 300_000 / NUM_TICKS, // 60s per tick
-        PollState::Watching | PollState::Active | PollState::Cooldown => 5_000 / NUM_TICKS, // 1s per tick
+    let interval_ms: u64 = match state {
+        PollState::Idle => 30_000,
+        PollState::LongIdle => 300_000,
+        PollState::Watching | PollState::Active | PollState::Cooldown => 5_000,
     };
-    let filled = elapsed.as_millis() as u64 / tick_duration_ms;
-    filled.min(NUM_TICKS) as usize
+    let elapsed_ms = elapsed.as_millis() as u64;
+    if elapsed_ms >= interval_ms {
+        return 0;
+    }
+    let tick_duration_ms = interval_ms / NUM_TICKS;
+    (elapsed_ms / tick_duration_ms) as usize
 }
 
 /// Build the tick bar string: filled '=' + remaining '-'.
@@ -135,9 +140,17 @@ mod tests {
     }
 
     #[test]
-    fn idle_full_elapsed_shows_all_filled() {
+    fn idle_near_interval_shows_most_filled() {
+        // At 29s (just before 30s interval), 29000/6000 = 4 ticks filled
+        let content = render_bar(&PollState::Idle, Duration::from_secs(29), None);
+        assert!(content.contains("====-"), "got: {content}");
+    }
+
+    #[test]
+    fn idle_at_interval_resets_to_empty() {
+        // At exactly the interval boundary, bar resets
         let content = render_bar(&PollState::Idle, Duration::from_secs(30), None);
-        assert!(content.contains("====="), "got: {content}");
+        assert!(content.contains("-----"), "got: {content}");
     }
 
     #[test]
@@ -181,11 +194,17 @@ mod tests {
     }
 
     #[test]
-    fn filled_ticks_clamped_to_max() {
-        // Even with huge elapsed, never exceeds NUM_TICKS
+    fn filled_ticks_resets_after_interval() {
+        // When elapsed exceeds the poll interval (during poll execution),
+        // bar should reset to 0 rather than lingering at all-filled.
+        assert_eq!(
+            filled_ticks(Duration::from_millis(5500), &PollState::Active),
+            0
+        );
+        assert_eq!(filled_ticks(Duration::from_secs(35), &PollState::Idle), 0);
         assert_eq!(
             filled_ticks(Duration::from_secs(999), &PollState::Active),
-            5
+            0
         );
     }
 

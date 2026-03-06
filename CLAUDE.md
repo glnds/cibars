@@ -16,6 +16,12 @@ cargo fmt            # format (must be clean before commit)
 cargo run -- --aws-profile <p> --region <r> --github-repo owner/repo
 ```
 
+## !!! TDD IS MANDATORY — NO EXCEPTIONS !!!
+
+**NEVER write implementation code without a failing test first.**
+Cycle: write failing test → implement minimum fix → refactor → full suite green.
+Do NOT skip this. Do NOT "just quickly fix" something. Test FIRST. Always.
+
 ## Workflow
 
 - **Trunk-based dev:** commit directly to `master`, no long-lived branches
