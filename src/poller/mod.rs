@@ -245,7 +245,7 @@ fn reconcile_bars(bars: &mut Vec<Bar>, updates: Vec<(String, BuildStatus)>) {
             bar.set_status(*status);
         } else {
             let mut bar = Bar::new(name.clone());
-            bar.set_status(*status);
+            bar.status = *status;
             bars.push(bar);
         }
     }
@@ -975,6 +975,30 @@ mod tests {
     #[test]
     fn stage_status_from_empty_actions_is_idle() {
         assert_eq!(stage_status_from_actions(&[]), BuildStatus::Idle);
+    }
+
+    #[test]
+    fn reconcile_bars_new_bar_with_terminal_status_has_zero_fill() {
+        let mut bars: Vec<Bar> = vec![];
+        let updates = vec![
+            ("Source".to_string(), BuildStatus::Succeeded),
+            ("Build".to_string(), BuildStatus::Failed),
+        ];
+        reconcile_bars(&mut bars, updates);
+
+        let source = bars.iter().find(|b| b.name == "Source").unwrap();
+        assert_eq!(source.status, BuildStatus::Succeeded);
+        assert_eq!(
+            source.fill, 0,
+            "new bar should start with fill=0, not minimum-fill=1"
+        );
+
+        let build = bars.iter().find(|b| b.name == "Build").unwrap();
+        assert_eq!(build.status, BuildStatus::Failed);
+        assert_eq!(
+            build.fill, 0,
+            "new bar should start with fill=0, not minimum-fill=1"
+        );
     }
 
     #[test]
