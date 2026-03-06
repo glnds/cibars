@@ -83,12 +83,13 @@ impl Bar {
     }
 
     fn advance_fill(&mut self, tick_area_width: usize) {
-        self.write_pos += 1;
-        if self.write_pos >= tick_area_width {
-            self.write_pos = 0;
+        if self.fill >= tick_area_width {
             self.fill = 0;
+            self.write_pos = 0;
+            return;
         }
         self.fill += 1;
+        self.write_pos += 1;
     }
 }
 
@@ -301,30 +302,47 @@ mod tests {
     }
 
     #[test]
-    fn tick_wraps_at_width() {
+    fn tick_fills_entire_width() {
         let mut bar = make_bar();
         bar.set_status(BuildStatus::Running);
-        let width = 3;
-        for _ in 0..3 {
+        let width = 5;
+        for i in 1..=5 {
             bar.tick(width);
+            assert_eq!(bar.fill, i, "after tick {i}, fill should be {i}");
         }
-        assert_eq!(bar.write_pos, 0);
-        assert_eq!(bar.fill, 1);
-        assert_eq!(bar.status, BuildStatus::Running);
+        // After width ticks, bar should be completely full
+        assert_eq!(bar.fill, 5);
     }
 
     #[test]
-    fn tick_wrap_resets_then_continues() {
+    fn tick_shows_empty_bar_after_full() {
+        let mut bar = make_bar();
+        bar.set_status(BuildStatus::Running);
+        let width = 3;
+        // Fill to full
+        for _ in 0..3 {
+            bar.tick(width);
+        }
+        assert_eq!(bar.fill, 3);
+        // Next tick resets to empty
+        bar.tick(width);
+        assert_eq!(bar.fill, 0, "bar should show empty for one tick after full");
+        assert_eq!(bar.write_pos, 0);
+    }
+
+    #[test]
+    fn tick_restarts_fill_after_empty() {
         let mut bar = make_bar();
         bar.set_status(BuildStatus::Running);
         let width = 2;
-        bar.tick(width);
-        bar.tick(width);
-        assert_eq!(bar.write_pos, 0);
+        // Full cycle: fill to full, reset to empty, then start refilling
+        bar.tick(width); // fill=1
+        bar.tick(width); // fill=2 (full)
+        bar.tick(width); // fill=0 (empty)
+        assert_eq!(bar.fill, 0);
+        bar.tick(width); // fill=1 (refilling)
         assert_eq!(bar.fill, 1);
-        bar.tick(width);
         assert_eq!(bar.write_pos, 1);
-        assert_eq!(bar.fill, 2);
     }
 
     #[test]
