@@ -145,6 +145,7 @@ mod tests {
             jobs: vec![],
             gone: false,
             summary_status: BuildStatus::Running,
+            run_id: None,
         });
         assert!(app.has_any_running());
     }
@@ -159,6 +160,7 @@ mod tests {
             jobs: vec![job],
             gone: false,
             summary_status: BuildStatus::Succeeded,
+            run_id: None,
         });
         assert!(app.has_any_running());
     }
@@ -194,6 +196,7 @@ mod tests {
             jobs: vec![job],
             gone: false,
             summary_status: BuildStatus::Running,
+            run_id: None,
         });
 
         app.reset_all_bars();
@@ -218,6 +221,7 @@ mod tests {
             jobs: vec![],
             gone: false,
             summary_status: BuildStatus::Succeeded,
+            run_id: None,
         });
         assert!(!app.has_any_running());
     }

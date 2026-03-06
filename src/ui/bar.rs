@@ -288,6 +288,7 @@ mod tests {
                 .collect(),
             gone: false,
             summary_status: BuildStatus::Running,
+            run_id: None,
         }
     }
 

@@ -511,12 +511,14 @@ mod tests {
                 jobs: vec![Bar::new("build".to_string()), Bar::new("test".to_string())],
                 gone: false,
                 summary_status: BuildStatus::Running,
+                run_id: None,
             },
             WorkflowGroup {
                 name: "Deploy".to_string(),
                 jobs: vec![Bar::new("deploy-backend".to_string())],
                 gone: true,
                 summary_status: BuildStatus::Succeeded,
+                run_id: None,
             },
         ];
 

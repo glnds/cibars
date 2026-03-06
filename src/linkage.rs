@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -153,7 +154,14 @@ pub fn s3_keys_match(cp_key: &str, gh_key: &str) -> bool {
 /// After polling, apply GH→CP links:
 /// 1. Record GH workflow completions for runtime correlation
 /// 2. When a CP pipeline starts Running, mark linked GH workflow as Succeeded
-pub fn apply_links(app: &Arc<Mutex<App>>, link_map: &mut LinkMap) {
+///
+/// `stopped_runs` tracks workflow_name → run_id that was already suppressed,
+/// so new GH runs triggered while CP is still running are not suppressed.
+pub fn apply_links(
+    app: &Arc<Mutex<App>>,
+    link_map: &mut LinkMap,
+    stopped_runs: &mut HashMap<String, u64>,
+) {
     let a = app.lock().expect("app mutex poisoned");
 
     // Record GH workflow completions (non-Running terminal states)
@@ -184,7 +192,24 @@ pub fn apply_links(app: &Arc<Mutex<App>>, link_map: &mut LinkMap) {
         .map(|pg| pg.name.clone())
         .collect();
 
+    // Collect linked workflow names whose CP is no longer Running
+    let linked_wf_names: Vec<String> = link_map
+        .links()
+        .iter()
+        .filter(|l| {
+            !a.pipeline_groups
+                .iter()
+                .any(|pg| pg.name == l.pipeline_name && pg.summary_status == BuildStatus::Running)
+        })
+        .map(|l| l.workflow_name.clone())
+        .collect();
+
     drop(a);
+
+    // Clear stopped_runs for workflows whose linked CP is no longer Running
+    for wf_name in &linked_wf_names {
+        stopped_runs.remove(wf_name);
+    }
 
     let mut correlated_links = Vec::new();
     for pipe_name in &unlinked_running {
@@ -204,8 +229,21 @@ pub fn apply_links(app: &Arc<Mutex<App>>, link_map: &mut LinkMap) {
     for (_pipe_name, wf_name) in &all_links {
         if let Some(wg) = a.workflow_groups.iter_mut().find(|g| g.name == *wf_name) {
             if wg.summary_status == BuildStatus::Running {
+                if let Some(current_run_id) = wg.run_id {
+                    // Already stopped this exact run — no-op
+                    if stopped_runs.get(wf_name.as_str()) == Some(&current_run_id) {
+                        continue;
+                    }
+                    // Different run from what we stopped — new trigger, don't suppress
+                    if stopped_runs.contains_key(wf_name.as_str()) {
+                        continue;
+                    }
+                    // First time seeing this workflow Running while CP runs → stop it
+                    stopped_runs.insert(wf_name.clone(), current_run_id);
+                }
                 tracing::info!(
                     workflow = %wf_name,
+                    run_id = ?wg.run_id,
                     "marking GH workflow as Succeeded (linked CP running)"
                 );
                 wg.summary_status = BuildStatus::Succeeded;
@@ -223,6 +261,7 @@ pub fn apply_links(app: &Arc<Mutex<App>>, link_map: &mut LinkMap) {
 mod tests {
     use super::*;
     use crate::model::{Bar, PipelineGroup, WorkflowGroup};
+    use std::collections::HashMap;
     use std::time::Duration;
 
     // --- s3_keys_match tests ---
@@ -377,6 +416,7 @@ mod tests {
             jobs: vec![job],
             gone: false,
             summary_status: BuildStatus::Running,
+            run_id: Some(100),
         });
         // CP pipeline just started Running
         app.pipeline_groups.push(PipelineGroup {
@@ -400,7 +440,7 @@ mod tests {
     #[test]
     fn apply_links_marks_linked_gh_workflow_succeeded() {
         let (app, mut link_map) = make_app_with_link_scenario();
-        apply_links(&app, &mut link_map);
+        apply_links(&app, &mut link_map, &mut HashMap::new());
 
         let a = app.lock().unwrap();
         assert_eq!(a.workflow_groups[0].summary_status, BuildStatus::Succeeded);
@@ -417,6 +457,7 @@ mod tests {
             jobs: vec![job],
             gone: false,
             summary_status: BuildStatus::Running,
+            run_id: Some(100),
         });
         app.pipeline_groups.push(PipelineGroup {
             name: "deploy-pipe".into(),
@@ -429,7 +470,7 @@ mod tests {
         let mut link_map = LinkMap::new();
         link_map.add_discovered("deploy-pipe".into(), "CI".into(), "b".into(), "k".into());
 
-        apply_links(&app, &mut link_map);
+        apply_links(&app, &mut link_map, &mut HashMap::new());
 
         let a = app.lock().unwrap();
         // GH workflow should still be Running
@@ -447,6 +488,7 @@ mod tests {
             jobs: vec![ci_job],
             gone: false,
             summary_status: BuildStatus::Running,
+            run_id: Some(100),
         });
         let mut lint_job = Bar::new("lint".into());
         lint_job.set_status(BuildStatus::Running);
@@ -455,6 +497,7 @@ mod tests {
             jobs: vec![lint_job],
             gone: false,
             summary_status: BuildStatus::Running,
+            run_id: Some(200),
         });
         app.pipeline_groups.push(PipelineGroup {
             name: "deploy-pipe".into(),
@@ -467,7 +510,7 @@ mod tests {
         let mut link_map = LinkMap::new();
         link_map.add_discovered("deploy-pipe".into(), "CI".into(), "b".into(), "k".into());
 
-        apply_links(&app, &mut link_map);
+        apply_links(&app, &mut link_map, &mut HashMap::new());
 
         let a = app.lock().unwrap();
         // CI should be Succeeded (linked)
@@ -479,7 +522,7 @@ mod tests {
     #[test]
     fn apply_links_multiple_pipelines_multiple_workflows() {
         let mut app = App::new();
-        for name in &["Frontend CI", "Backend CI"] {
+        for (i, name) in ["Frontend CI", "Backend CI"].iter().enumerate() {
             let mut job = Bar::new("build".into());
             job.set_status(BuildStatus::Running);
             app.workflow_groups.push(WorkflowGroup {
@@ -487,6 +530,7 @@ mod tests {
                 jobs: vec![job],
                 gone: false,
                 summary_status: BuildStatus::Running,
+                run_id: Some(100 + i as u64),
             });
         }
         for name in &["frontend-pipe", "backend-pipe"] {
@@ -513,7 +557,7 @@ mod tests {
             "be/".into(),
         );
 
-        apply_links(&app, &mut link_map);
+        apply_links(&app, &mut link_map, &mut HashMap::new());
 
         let a = app.lock().unwrap();
         assert_eq!(a.workflow_groups[0].summary_status, BuildStatus::Succeeded);
@@ -528,6 +572,7 @@ mod tests {
             jobs: vec![],
             gone: false,
             summary_status: BuildStatus::Succeeded, // Already done
+            run_id: Some(100),
         });
         app.pipeline_groups.push(PipelineGroup {
             name: "deploy-pipe".into(),
@@ -540,10 +585,92 @@ mod tests {
         let mut link_map = LinkMap::new();
         link_map.add_discovered("deploy-pipe".into(), "CI".into(), "b".into(), "k".into());
 
-        apply_links(&app, &mut link_map);
+        apply_links(&app, &mut link_map, &mut HashMap::new());
 
         let a = app.lock().unwrap();
         // Should remain Succeeded (no-op)
         assert_eq!(a.workflow_groups[0].summary_status, BuildStatus::Succeeded);
+    }
+
+    #[test]
+    fn apply_links_does_not_suppress_new_run_id() {
+        // CP running, workflow was stopped (run 100), now a new run (200) appears
+        let mut app = App::new();
+        let mut job = Bar::new("build".into());
+        job.set_status(BuildStatus::Running);
+        app.workflow_groups.push(WorkflowGroup {
+            name: "CI".into(),
+            jobs: vec![job],
+            gone: false,
+            summary_status: BuildStatus::Running,
+            run_id: Some(200), // new run
+        });
+        app.pipeline_groups.push(PipelineGroup {
+            name: "deploy-pipe".into(),
+            stages: vec![],
+            gone: false,
+            summary_status: BuildStatus::Running,
+        });
+
+        let app = Arc::new(Mutex::new(app));
+        let mut link_map = LinkMap::new();
+        link_map.add_discovered("deploy-pipe".into(), "CI".into(), "b".into(), "k".into());
+
+        // Simulate that run 100 was already stopped
+        let mut stopped_runs = HashMap::new();
+        stopped_runs.insert("CI".to_string(), 100);
+
+        apply_links(&app, &mut link_map, &mut stopped_runs);
+
+        let a = app.lock().unwrap();
+        // New run (200) should NOT be suppressed
+        assert_eq!(a.workflow_groups[0].summary_status, BuildStatus::Running);
+    }
+
+    #[test]
+    fn apply_links_suppresses_same_run_id_only_once() {
+        let (app, mut link_map) = make_app_with_link_scenario();
+        let mut stopped_runs = HashMap::new();
+
+        // First call: suppresses run 100
+        apply_links(&app, &mut link_map, &mut stopped_runs);
+        assert_eq!(stopped_runs.get("CI"), Some(&100));
+        {
+            let a = app.lock().unwrap();
+            assert_eq!(a.workflow_groups[0].summary_status, BuildStatus::Succeeded);
+        }
+
+        // Simulate next poll: GH API still reports run 100 as Running
+        {
+            let mut a = app.lock().unwrap();
+            a.workflow_groups[0].summary_status = BuildStatus::Running;
+        }
+
+        // Second call with same run_id: should be no-op (already stopped)
+        apply_links(&app, &mut link_map, &mut stopped_runs);
+        let a = app.lock().unwrap();
+        // stays Running because apply_links skips already-stopped run_id
+        assert_eq!(a.workflow_groups[0].summary_status, BuildStatus::Running);
+    }
+
+    #[test]
+    fn apply_links_clears_stopped_when_cp_finishes() {
+        let (app, mut link_map) = make_app_with_link_scenario();
+        let mut stopped_runs = HashMap::new();
+
+        // First call: suppresses run 100
+        apply_links(&app, &mut link_map, &mut stopped_runs);
+        assert!(stopped_runs.contains_key("CI"));
+
+        // CP finishes
+        {
+            let mut a = app.lock().unwrap();
+            a.pipeline_groups[0].summary_status = BuildStatus::Succeeded;
+        }
+
+        apply_links(&app, &mut link_map, &mut stopped_runs);
+
+        // stopped_runs should be cleared for "CI"
+        assert!(!stopped_runs.contains_key("CI"));
     }
 }

@@ -58,9 +58,9 @@ impl Bar {
                 if self.status != status {
                     tracing::debug!(bar = %self.name, from = ?self.status, to = ?status, "status change");
                 }
-                // Only guarantee minimum fill for Running→Succeeded/Failed
-                // (fast-completing stage). Idle→Succeeded at startup stays empty.
-                if self.status == BuildStatus::Running && self.fill == 0 {
+                // Guarantee minimum 1-bar fill for any terminal transition,
+                // including Idle→Succeeded (fast stages like Source).
+                if self.fill == 0 {
                     self.fill = 1;
                     self.write_pos = 1;
                 }
@@ -99,6 +99,8 @@ pub struct WorkflowGroup {
     pub gone: bool,
     /// Workflow-level status from runs API; shown as dot before jobs load.
     pub summary_status: BuildStatus,
+    /// The GH Actions run_id currently represented by this group.
+    pub run_id: Option<u64>,
 }
 
 #[derive(Debug, Clone)]
@@ -208,24 +210,24 @@ mod tests {
     }
 
     #[test]
-    fn set_status_succeeded_from_idle_stays_empty() {
+    fn set_status_succeeded_from_idle_gets_minimum_fill() {
         let mut bar = make_bar();
-        // Startup: poll discovers already-completed pipeline (Idle → Succeeded)
+        // Fast-completing stage: never seen as Running (e.g. Source in CodePipeline)
         assert_eq!(bar.status, BuildStatus::Idle);
         bar.set_status(BuildStatus::Succeeded);
         assert_eq!(bar.status, BuildStatus::Succeeded);
-        assert_eq!(bar.fill, 0);
-        assert_eq!(bar.write_pos, 0);
+        assert_eq!(bar.fill, 1);
+        assert_eq!(bar.write_pos, 1);
     }
 
     #[test]
-    fn set_status_failed_from_idle_stays_empty() {
+    fn set_status_failed_from_idle_gets_minimum_fill() {
         let mut bar = make_bar();
         assert_eq!(bar.status, BuildStatus::Idle);
         bar.set_status(BuildStatus::Failed);
         assert_eq!(bar.status, BuildStatus::Failed);
-        assert_eq!(bar.fill, 0);
-        assert_eq!(bar.write_pos, 0);
+        assert_eq!(bar.fill, 1);
+        assert_eq!(bar.write_pos, 1);
     }
 
     #[test]
@@ -341,6 +343,7 @@ mod tests {
             jobs: vec![],
             gone: false,
             summary_status: BuildStatus::Idle,
+            run_id: None,
         };
         assert_eq!(group.name, "CI");
         assert!(group.jobs.is_empty());
@@ -354,6 +357,7 @@ mod tests {
             jobs: vec![Bar::new("build".to_string()), Bar::new("test".to_string())],
             gone: false,
             summary_status: BuildStatus::Running,
+            run_id: None,
         };
         assert_eq!(group.jobs.len(), 2);
         assert_eq!(group.jobs[0].name, "build");
@@ -367,6 +371,7 @@ mod tests {
             jobs: vec![],
             gone: false,
             summary_status: BuildStatus::Idle,
+            run_id: None,
         };
         group.gone = true;
         assert!(group.gone);

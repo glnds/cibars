@@ -239,16 +239,23 @@ fn reconcile_bars(bars: &mut Vec<Bar>, updates: Vec<(String, BuildStatus)>) {
             bar.gone = true;
         }
     }
-    for (name, status) in updates {
-        if let Some(bar) = bars.iter_mut().find(|b| b.name == name) {
+    for (name, status) in &updates {
+        if let Some(bar) = bars.iter_mut().find(|b| b.name == *name) {
             bar.gone = false;
-            bar.set_status(status);
+            bar.set_status(*status);
         } else {
-            let mut bar = Bar::new(name);
-            bar.set_status(status);
+            let mut bar = Bar::new(name.clone());
+            bar.set_status(*status);
             bars.push(bar);
         }
     }
+    // Reorder bars to match API response order; gone bars go to end.
+    let order: std::collections::HashMap<&str, usize> = updates
+        .iter()
+        .enumerate()
+        .map(|(i, (n, _))| (n.as_str(), i))
+        .collect();
+    bars.sort_by_key(|b| order.get(b.name.as_str()).copied().unwrap_or(usize::MAX));
 }
 
 /// Compute stage-level status from the last action in a stage.
@@ -314,12 +321,14 @@ fn update_workflow_summaries(app: &mut App, summaries: &[WorkflowRunSummary]) {
         {
             g.gone = false;
             g.summary_status = summary.status;
+            g.run_id = Some(summary.run_id);
         } else {
             app.workflow_groups.push(WorkflowGroup {
                 name: summary.workflow_name.clone(),
                 jobs: Vec::new(),
                 gone: false,
                 summary_status: summary.status,
+                run_id: Some(summary.run_id),
             });
         }
     }
@@ -756,6 +765,58 @@ mod tests {
         poll_actions_tick(&app, &client).await;
         let a = app.lock().unwrap();
         assert!(a.rate_limited_until.is_none());
+    }
+
+    #[tokio::test]
+    async fn reconcile_bars_reorders_to_match_api_order() {
+        let app = Arc::new(Mutex::new(App::new()));
+        // First poll: stages arrive as Source, Build, Deploy
+        let pipes = MockPipelineClient {
+            pipelines: vec![mock_pipeline(
+                "my-pipe",
+                BuildStatus::Running,
+                vec![
+                    mock_stage("Source", vec![("checkout", BuildStatus::Succeeded)]),
+                    mock_stage("Build", vec![("compile", BuildStatus::Running)]),
+                    mock_stage("Deploy", vec![("deploy", BuildStatus::Idle)]),
+                ],
+            )],
+        };
+        let actions = MockActionsClient { runs: vec![] };
+        poll_once(&app, &pipes, &actions).await;
+
+        {
+            let a = app.lock().unwrap();
+            let stages: Vec<&str> = a.pipeline_groups[0]
+                .stages
+                .iter()
+                .map(|s| s.name.as_str())
+                .collect();
+            assert_eq!(stages, vec!["Source", "Build", "Deploy"]);
+        }
+
+        // Second poll: API returns stages in different order (e.g. Deploy, Source, Build)
+        let pipes = MockPipelineClient {
+            pipelines: vec![mock_pipeline(
+                "my-pipe",
+                BuildStatus::Running,
+                vec![
+                    mock_stage("Deploy", vec![("deploy", BuildStatus::Running)]),
+                    mock_stage("Source", vec![("checkout", BuildStatus::Succeeded)]),
+                    mock_stage("Build", vec![("compile", BuildStatus::Succeeded)]),
+                ],
+            )],
+        };
+        poll_once(&app, &pipes, &actions).await;
+
+        let a = app.lock().unwrap();
+        let stages: Vec<&str> = a.pipeline_groups[0]
+            .stages
+            .iter()
+            .map(|s| s.name.as_str())
+            .collect();
+        // Stages should follow the API response order
+        assert_eq!(stages, vec!["Deploy", "Source", "Build"]);
     }
 
     #[tokio::test]

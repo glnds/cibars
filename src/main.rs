@@ -125,6 +125,7 @@ async fn run_poll_orchestrator(
     let mut aws_client: Option<poller::aws::AwsPipelineClient> = None;
     let mut scheduler = PollScheduler::new();
     let mut link_map = LinkMap::new();
+    let mut stopped_runs = std::collections::HashMap::new();
 
     loop {
         let need_aws = scheduler.should_poll_aws();
@@ -148,7 +149,7 @@ async fn run_poll_orchestrator(
         }
 
         // Apply linkage: mark GH workflows as Succeeded when linked CP starts Running
-        linkage::apply_links(&app, &mut link_map);
+        linkage::apply_links(&app, &mut link_map, &mut stopped_runs);
 
         // Transition + update App display state
         let any_running = app.lock().expect("app mutex poisoned").has_any_running();
