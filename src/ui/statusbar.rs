@@ -238,6 +238,33 @@ mod tests {
     }
 
     #[test]
+    fn filled_ticks_cycle_boundary() {
+        // At cycle start (0ms elapsed), bar must be empty — critical for the
+        // fix where last_poll_started resets at top of loop, not after poll.
+        assert_eq!(filled_ticks(Duration::ZERO, &PollState::Active), 0);
+        assert_eq!(filled_ticks(Duration::ZERO, &PollState::Idle), 0);
+        assert_eq!(filled_ticks(Duration::ZERO, &PollState::LongIdle), 0);
+
+        // At exactly the interval, bar must be full (poll is due).
+        assert_eq!(
+            filled_ticks(Duration::from_secs(5), &PollState::Active),
+            NUM_TICKS as usize
+        );
+        assert_eq!(
+            filled_ticks(Duration::from_secs(30), &PollState::Idle),
+            NUM_TICKS as usize
+        );
+        assert_eq!(
+            filled_ticks(Duration::from_secs(300), &PollState::LongIdle),
+            NUM_TICKS as usize
+        );
+
+        // Just before the interval, bar must NOT be full.
+        assert!(filled_ticks(Duration::from_millis(4999), &PollState::Active) < NUM_TICKS as usize);
+        assert!(filled_ticks(Duration::from_millis(29999), &PollState::Idle) < NUM_TICKS as usize);
+    }
+
+    #[test]
     fn tick_bar_formatting() {
         assert_eq!(tick_bar(0), "-----");
         assert_eq!(tick_bar(3), "===--");

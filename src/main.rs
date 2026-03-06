@@ -128,6 +128,11 @@ async fn run_poll_orchestrator(
     let mut stopped_runs = std::collections::HashMap::new();
 
     loop {
+        let cycle_start = Instant::now();
+        // Reset tick bar immediately so the UI shows progress from cycle start,
+        // not delayed until after slow API calls complete.
+        app.lock().expect("app mutex poisoned").last_poll_started = Some(cycle_start);
+
         let need_aws = scheduler.should_poll_aws();
 
         // Lazy-init AWS on first need + run link discovery
@@ -158,9 +163,6 @@ async fn run_poll_orchestrator(
             let mut a = app.lock().expect("app mutex poisoned");
             a.poll_state = scheduler.state();
             a.cooldown_remaining = scheduler.cooldown_remaining();
-            // Reset tick bar after poll completes (not before),
-            // so elapsed only measures sleep time, not poll duration.
-            a.last_poll_started = Some(Instant::now());
         }
 
         tracing::debug!(
@@ -170,10 +172,10 @@ async fn run_poll_orchestrator(
             "poll cycle complete"
         );
 
-        // Sleep, interruptible by boost key or SIGUSR1
-        let interval = scheduler.interval();
+        // Sleep only the remaining interval after poll duration
+        let remaining = scheduler.interval().saturating_sub(cycle_start.elapsed());
         tokio::select! {
-            _ = tokio::time::sleep(interval) => {}
+            _ = tokio::time::sleep(remaining) => {}
             _ = boost_notify.notified() => {
                 scheduler.boost();
             }
