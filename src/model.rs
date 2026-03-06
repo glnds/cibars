@@ -58,8 +58,9 @@ impl Bar {
                 if self.status != status {
                     tracing::debug!(bar = %self.name, from = ?self.status, to = ?status, "status change");
                 }
-                // Guarantee at least one bar segment for fast-completing stages
-                if self.fill == 0 {
+                // Only guarantee minimum fill for Running→Succeeded/Failed
+                // (fast-completing stage). Idle→Succeeded at startup stays empty.
+                if self.status == BuildStatus::Running && self.fill == 0 {
                     self.fill = 1;
                     self.write_pos = 1;
                 }
@@ -204,6 +205,27 @@ mod tests {
         assert_eq!(bar.status, BuildStatus::Failed);
         assert_eq!(bar.fill, 1);
         assert_eq!(bar.write_pos, 1);
+    }
+
+    #[test]
+    fn set_status_succeeded_from_idle_stays_empty() {
+        let mut bar = make_bar();
+        // Startup: poll discovers already-completed pipeline (Idle → Succeeded)
+        assert_eq!(bar.status, BuildStatus::Idle);
+        bar.set_status(BuildStatus::Succeeded);
+        assert_eq!(bar.status, BuildStatus::Succeeded);
+        assert_eq!(bar.fill, 0);
+        assert_eq!(bar.write_pos, 0);
+    }
+
+    #[test]
+    fn set_status_failed_from_idle_stays_empty() {
+        let mut bar = make_bar();
+        assert_eq!(bar.status, BuildStatus::Idle);
+        bar.set_status(BuildStatus::Failed);
+        assert_eq!(bar.status, BuildStatus::Failed);
+        assert_eq!(bar.fill, 0);
+        assert_eq!(bar.write_pos, 0);
     }
 
     #[test]
