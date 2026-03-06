@@ -10,7 +10,7 @@ use async_trait::async_trait;
 use chrono::Utc;
 
 use crate::app::App;
-use crate::model::{Bar, BuildStatus, PipelineGroup, StageInfo, WorkflowGroup};
+use crate::model::{Bar, BuildStatus, PipelineGroup, WorkflowGroup};
 
 /// How long to back off when GitHub rate limit is hit.
 const RATE_LIMIT_BACKOFF_SECS: u64 = 60;
@@ -28,7 +28,6 @@ pub struct StageState {
 }
 
 pub struct ActionState {
-    pub name: String,
     pub status: BuildStatus,
 }
 
@@ -226,6 +225,14 @@ fn reconcile_bars(bars: &mut Vec<Bar>, updates: Vec<(String, BuildStatus)>) {
     }
 }
 
+/// Compute stage-level status from the last action in a stage.
+fn stage_status_from_actions(actions: &[ActionState]) -> BuildStatus {
+    actions
+        .last()
+        .map(|a| a.status)
+        .unwrap_or(BuildStatus::Idle)
+}
+
 fn update_pipeline_groups(app: &mut App, states: Vec<PipelineState>) {
     let seen: HashSet<&str> = states.iter().map(|s| s.name.as_str()).collect();
 
@@ -236,21 +243,10 @@ fn update_pipeline_groups(app: &mut App, states: Vec<PipelineState>) {
     }
 
     for state in states {
-        let stages: Vec<StageInfo> = state
+        let stage_updates: Vec<(String, BuildStatus)> = state
             .stages
-            .into_iter()
-            .map(|s| StageInfo {
-                name: s.name,
-                actions: s
-                    .actions
-                    .into_iter()
-                    .map(|a| {
-                        let mut bar = Bar::new(a.name);
-                        bar.set_status(a.status);
-                        bar
-                    })
-                    .collect(),
-            })
+            .iter()
+            .map(|s| (s.name.clone(), stage_status_from_actions(&s.actions)))
             .collect();
 
         if let Some(g) = app
@@ -260,36 +256,16 @@ fn update_pipeline_groups(app: &mut App, states: Vec<PipelineState>) {
         {
             g.gone = false;
             g.summary_status = state.status;
-            // Reconcile actions within each stage
-            for new_stage in &stages {
-                if let Some(existing_stage) = g.stages.iter_mut().find(|s| s.name == new_stage.name)
-                {
-                    let updates: Vec<_> = new_stage
-                        .actions
-                        .iter()
-                        .map(|a| (a.name.clone(), a.status))
-                        .collect();
-                    reconcile_bars(&mut existing_stage.actions, updates);
-                } else {
-                    g.stages.push(new_stage.clone());
-                }
-            }
-            // Mark gone stages
-            let seen_stages: HashSet<&str> = stages.iter().map(|s| s.name.as_str()).collect();
-            for stage in &mut g.stages {
-                if !seen_stages.contains(stage.name.as_str()) {
-                    for action in &mut stage.actions {
-                        action.gone = true;
-                    }
-                }
-            }
+            reconcile_bars(&mut g.stages, stage_updates);
         } else {
-            app.pipeline_groups.push(PipelineGroup {
+            let mut group = PipelineGroup {
                 name: state.name,
-                stages,
+                stages: Vec::new(),
                 gone: false,
                 summary_status: state.status,
-            });
+            };
+            reconcile_bars(&mut group.stages, stage_updates);
+            app.pipeline_groups.push(group);
         }
     }
 }
@@ -367,10 +343,7 @@ mod tests {
                             actions: s
                                 .actions
                                 .iter()
-                                .map(|a| ActionState {
-                                    name: a.name.clone(),
-                                    status: a.status,
-                                })
+                                .map(|a| ActionState { status: a.status })
                                 .collect(),
                         })
                         .collect(),
@@ -428,10 +401,7 @@ mod tests {
             name: name.to_string(),
             actions: actions
                 .into_iter()
-                .map(|(n, s)| ActionState {
-                    name: n.to_string(),
-                    status: s,
-                })
+                .map(|(_n, s)| ActionState { status: s })
                 .collect(),
         }
     }
@@ -469,8 +439,10 @@ mod tests {
         assert_eq!(app.pipeline_groups[0].summary_status, BuildStatus::Running);
         assert_eq!(app.pipeline_groups[0].stages.len(), 1);
         assert_eq!(app.pipeline_groups[0].stages[0].name, "Build");
-        assert_eq!(app.pipeline_groups[0].stages[0].actions.len(), 1);
-        assert_eq!(app.pipeline_groups[0].stages[0].actions[0].name, "compile");
+        assert_eq!(
+            app.pipeline_groups[0].stages[0].status,
+            BuildStatus::Succeeded
+        );
         assert_eq!(app.workflow_groups.len(), 1);
         assert_eq!(app.workflow_groups[0].name, "ci");
         assert!(app.last_poll.is_some());
@@ -512,7 +484,7 @@ mod tests {
         let app = app.lock().unwrap();
         assert_eq!(app.pipeline_groups.len(), 1);
         assert_eq!(
-            app.pipeline_groups[0].stages[0].actions[0].status,
+            app.pipeline_groups[0].stages[0].status,
             BuildStatus::Running
         );
     }
@@ -543,7 +515,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn poll_creates_pipeline_with_multi_stage_actions() {
+    async fn poll_creates_pipeline_with_multi_stage_status_from_last_action() {
         let app = Arc::new(Mutex::new(App::new()));
         let pipes = MockPipelineClient {
             pipelines: vec![mock_pipeline(
@@ -567,10 +539,11 @@ mod tests {
         let app = app.lock().unwrap();
         let group = &app.pipeline_groups[0];
         assert_eq!(group.stages.len(), 2);
-        assert_eq!(group.stages[0].actions.len(), 1);
-        assert_eq!(group.stages[1].actions.len(), 2);
-        assert_eq!(group.stages[1].actions[1].name, "test");
-        assert_eq!(group.stages[1].actions[1].status, BuildStatus::Running);
+        assert_eq!(group.stages[0].name, "Source");
+        assert_eq!(group.stages[0].status, BuildStatus::Succeeded);
+        assert_eq!(group.stages[1].name, "Build");
+        // Last action ("test") determines stage status
+        assert_eq!(group.stages[1].status, BuildStatus::Running);
     }
 
     #[tokio::test]

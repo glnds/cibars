@@ -98,15 +98,9 @@ pub struct WorkflowGroup {
 #[derive(Debug, Clone)]
 pub struct PipelineGroup {
     pub name: String,
-    pub stages: Vec<StageInfo>,
+    pub stages: Vec<Bar>,
     pub gone: bool,
     pub summary_status: BuildStatus,
-}
-
-#[derive(Debug, Clone)]
-pub struct StageInfo {
-    pub name: String,
-    pub actions: Vec<Bar>,
 }
 
 #[cfg(test)]
@@ -333,31 +327,19 @@ mod tests {
     }
 
     #[test]
-    fn pipeline_group_with_stages_and_actions() {
+    fn pipeline_group_with_stages() {
         let group = PipelineGroup {
             name: "my-pipeline".to_string(),
             stages: vec![
-                StageInfo {
-                    name: "Source".to_string(),
-                    actions: vec![Bar::new("checkout".to_string())],
-                },
-                StageInfo {
-                    name: "Build".to_string(),
-                    actions: vec![
-                        Bar::new("compile".to_string()),
-                        Bar::new("test".to_string()),
-                    ],
-                },
+                Bar::new("Source".to_string()),
+                Bar::new("Build".to_string()),
             ],
             gone: false,
             summary_status: BuildStatus::Running,
         };
         assert_eq!(group.stages.len(), 2);
         assert_eq!(group.stages[0].name, "Source");
-        assert_eq!(group.stages[0].actions.len(), 1);
         assert_eq!(group.stages[1].name, "Build");
-        assert_eq!(group.stages[1].actions.len(), 2);
-        assert_eq!(group.stages[1].actions[1].name, "test");
     }
 
     #[test]

@@ -63,9 +63,7 @@ impl App {
     pub fn has_any_running(&self) -> bool {
         self.pipeline_groups.iter().any(|g| {
             g.summary_status == BuildStatus::Running
-                || g.stages
-                    .iter()
-                    .any(|s| s.actions.iter().any(|a| a.status == BuildStatus::Running))
+                || g.stages.iter().any(|s| s.status == BuildStatus::Running)
         }) || self.workflow_groups.iter().any(|g| {
             g.summary_status == BuildStatus::Running
                 || g.jobs.iter().any(|j| j.status == BuildStatus::Running)
@@ -82,7 +80,7 @@ impl Default for App {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{Bar, StageInfo, WorkflowGroup};
+    use crate::model::{Bar, WorkflowGroup};
 
     #[test]
     fn app_starts_with_loading_flags() {
@@ -110,16 +108,13 @@ mod tests {
     }
 
     #[test]
-    fn has_any_running_pipeline_action_running() {
+    fn has_any_running_pipeline_stage_running() {
         let mut app = App::new();
-        let mut action = Bar::new("compile".into());
-        action.set_status(BuildStatus::Running);
+        let mut stage = Bar::new("Build".into());
+        stage.set_status(BuildStatus::Running);
         app.pipeline_groups.push(PipelineGroup {
             name: "deploy".into(),
-            stages: vec![StageInfo {
-                name: "Build".into(),
-                actions: vec![action],
-            }],
+            stages: vec![stage],
             gone: false,
             summary_status: BuildStatus::Succeeded,
         });

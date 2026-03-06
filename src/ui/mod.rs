@@ -37,31 +37,25 @@ fn all_jobs_name_width(groups: &[WorkflowGroup]) -> usize {
     (max_job + 2).min(bar::MAX_NAME_WIDTH)
 }
 
-/// Compute name width across all non-gone actions in all pipeline groups (+ 2 for indent)
-fn all_pipeline_actions_name_width(groups: &[PipelineGroup]) -> usize {
-    let max_action = groups
+/// Compute name width across all non-gone stages in all pipeline groups
+/// +4 for indent (2 for group + 2 for stage within group)
+fn all_pipeline_stages_name_width(groups: &[PipelineGroup]) -> usize {
+    let max_stage = groups
         .iter()
         .flat_map(|g| g.stages.iter())
-        .flat_map(|s| s.actions.iter())
-        .filter(|a| !a.gone)
-        .map(|a| a.name.len())
+        .filter(|s| !s.gone)
+        .map(|s| s.name.len())
         .max()
         .unwrap_or(10);
-    (max_action + 2).min(bar::MAX_NAME_WIDTH)
+    (max_stage + 4).min(bar::MAX_NAME_WIDTH)
 }
 
-/// Sort pipeline groups: those with running actions first, then alphabetical
+/// Sort pipeline groups: those with running stages first, then alphabetical
 fn sorted_pipeline_groups(groups: &[PipelineGroup]) -> Vec<&PipelineGroup> {
     let mut sorted: Vec<&PipelineGroup> = groups.iter().collect();
     sorted.sort_by(|a, b| {
-        let a_running = a
-            .stages
-            .iter()
-            .any(|s| s.actions.iter().any(|a| a.status == BuildStatus::Running));
-        let b_running = b
-            .stages
-            .iter()
-            .any(|s| s.actions.iter().any(|a| a.status == BuildStatus::Running));
+        let a_running = a.stages.iter().any(|s| s.status == BuildStatus::Running);
+        let b_running = b.stages.iter().any(|s| s.status == BuildStatus::Running);
         b_running.cmp(&a_running).then(a.name.cmp(&b.name))
     });
     sorted
@@ -166,14 +160,19 @@ pub fn run_ui(
                 0
             };
 
-            // Count pipeline action rows: non-gone actions across all stages
-            let pipe_action_rows: usize = if app.pipelines_expanded {
+            // Count pipeline rows: pipeline name headers + non-gone stages
+            let pipe_rows: usize = if app.pipelines_expanded {
                 sorted_pipe_groups
                     .iter()
-                    .flat_map(|g| g.stages.iter())
-                    .flat_map(|s| s.actions.iter())
-                    .filter(|a| !a.gone)
-                    .count()
+                    .map(|g| {
+                        let stage_count = g.stages.iter().filter(|s| !s.gone).count();
+                        if stage_count > 0 {
+                            1 + stage_count
+                        } else {
+                            0
+                        }
+                    })
+                    .sum()
             } else {
                 0
             };
@@ -185,7 +184,7 @@ pub fn run_ui(
                 constraints.push(Constraint::Length(1));
             }
             constraints.push(Constraint::Length(1)); // pipelines title
-            for _ in 0..pipe_action_rows {
+            for _ in 0..pipe_rows {
                 constraints.push(Constraint::Length(1));
             }
             constraints.push(Constraint::Fill(1)); // remaining space
@@ -252,19 +251,34 @@ pub fn run_ui(
             }
             idx += 1;
 
-            // Pipeline action bars (when expanded)
+            // Pipeline stage bars (when expanded)
             if app.pipelines_expanded {
-                let action_name_width = all_pipeline_actions_name_width(&app.pipeline_groups);
+                let stage_name_width = all_pipeline_stages_name_width(&app.pipeline_groups);
                 for group in &sorted_pipe_groups {
-                    for stage in &group.stages {
-                        for bar in stage.actions.iter().filter(|a| !a.gone) {
-                            let bar_dim = dim || group.gone;
-                            frame.render_widget(
-                                BarWidget::new(bar, action_name_width, bar_dim),
-                                areas[idx],
-                            );
-                            idx += 1;
-                        }
+                    let visible_stages: Vec<_> = group.stages.iter().filter(|s| !s.gone).collect();
+                    if visible_stages.is_empty() {
+                        continue;
+                    }
+                    // Pipeline name header
+                    let name_color = if group.gone {
+                        Color::DarkGray
+                    } else {
+                        group.summary_status.color()
+                    };
+                    let header_line = ratatui::text::Line::from(vec![
+                        ratatui::text::Span::raw("  "),
+                        ratatui::text::Span::styled(&group.name, Style::default().fg(name_color)),
+                    ]);
+                    frame.render_widget(header_line, areas[idx]);
+                    idx += 1;
+                    // Stage bars
+                    for bar in &visible_stages {
+                        let bar_dim = dim || group.gone;
+                        frame.render_widget(
+                            BarWidget::new(bar, stage_name_width, bar_dim),
+                            areas[idx],
+                        );
+                        idx += 1;
                     }
                 }
             }
@@ -297,13 +311,11 @@ pub fn run_ui(
             if let Ok(mut a) = app.lock() {
                 let width = a.terminal_width as usize;
 
-                let pipe_action_name_width = all_pipeline_actions_name_width(&a.pipeline_groups);
-                let pipe_fill_width = width.saturating_sub(pipe_action_name_width + 4);
+                let pipe_stage_name_width = all_pipeline_stages_name_width(&a.pipeline_groups);
+                let pipe_fill_width = width.saturating_sub(pipe_stage_name_width + 4);
                 for group in &mut a.pipeline_groups {
                     for stage in &mut group.stages {
-                        for action in &mut stage.actions {
-                            action.tick(pipe_fill_width);
-                        }
+                        stage.tick(pipe_fill_width);
                     }
                 }
 
@@ -481,10 +493,7 @@ mod tests {
             },
             PipelineGroup {
                 name: "aaa-running".to_string(),
-                stages: vec![crate::model::StageInfo {
-                    name: "Build".to_string(),
-                    actions: vec![make_test_bar("compile", BuildStatus::Running)],
-                }],
+                stages: vec![make_test_bar("Build", BuildStatus::Running)],
                 gone: false,
                 summary_status: BuildStatus::Running,
             },

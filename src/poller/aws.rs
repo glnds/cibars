@@ -90,16 +90,12 @@ impl PipelineClient for AwsPipelineClient {
                     .action_states()
                     .iter()
                     .map(|a| {
-                        let action_name = a.action_name().unwrap_or("unknown").to_string();
                         let status = a
                             .latest_execution()
                             .and_then(|e| e.status())
                             .map(|s| map_action_status(s.as_str()))
                             .unwrap_or(BuildStatus::Idle);
-                        ActionState {
-                            name: action_name,
-                            status,
-                        }
+                        ActionState { status }
                     })
                     .collect();
                 StageState {
