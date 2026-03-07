@@ -31,8 +31,8 @@ fn filled_ticks(elapsed: Duration, state: &PollState) -> usize {
     if elapsed_ms >= interval_ms {
         return NUM_TICKS as usize;
     }
-    let tick_duration_ms = interval_ms / NUM_TICKS;
-    (elapsed_ms / tick_duration_ms) as usize
+    let tick_duration_ms = interval_ms / (NUM_TICKS + 1);
+    (elapsed_ms / tick_duration_ms).min(NUM_TICKS) as usize
 }
 
 /// Build the tick bar string: filled '=' + remaining '-'.
@@ -141,8 +141,8 @@ mod tests {
 
     #[test]
     fn idle_near_interval_shows_most_filled() {
-        // At 29s (just before 30s interval), 29000/6000 = 4 ticks filled
-        let content = render_bar(&PollState::Idle, Duration::from_secs(29), None);
+        // At 20s, 20000/5000 = 4 ticks filled (tick_duration = 30000/6 = 5000ms)
+        let content = render_bar(&PollState::Idle, Duration::from_secs(20), None);
         assert!(content.contains("====-"), "got: {content}");
     }
 
@@ -258,10 +258,25 @@ mod tests {
             filled_ticks(Duration::from_secs(300), &PollState::LongIdle),
             NUM_TICKS as usize
         );
+    }
 
-        // Just before the interval, bar must NOT be full.
-        assert!(filled_ticks(Duration::from_millis(4999), &PollState::Active) < NUM_TICKS as usize);
-        assert!(filled_ticks(Duration::from_millis(29999), &PollState::Idle) < NUM_TICKS as usize);
+    #[test]
+    fn filled_ticks_full_before_interval() {
+        // Bar must show full "=====" BEFORE the interval expires,
+        // so the UI can actually display it before the reset.
+        // At ~83% of interval, all 5 ticks should be filled.
+        assert_eq!(
+            filled_ticks(Duration::from_millis(4500), &PollState::Active),
+            NUM_TICKS as usize
+        );
+        assert_eq!(
+            filled_ticks(Duration::from_secs(26), &PollState::Idle),
+            NUM_TICKS as usize
+        );
+        assert_eq!(
+            filled_ticks(Duration::from_secs(260), &PollState::LongIdle),
+            NUM_TICKS as usize
+        );
     }
 
     #[test]
