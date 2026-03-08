@@ -30,6 +30,7 @@ pub fn map_run_status(status: &str, conclusion: Option<&str>) -> BuildStatus {
         "in_progress" | "queued" | "waiting" | "pending" => BuildStatus::Running,
         "completed" => match conclusion {
             Some("success") => BuildStatus::Succeeded,
+            Some("skipped") => BuildStatus::Idle,
             Some("failure") | Some("cancelled") | Some("timed_out") => BuildStatus::Failed,
             _ => BuildStatus::Failed,
         },
@@ -232,10 +233,15 @@ fn parse_workflow_runs(
                     continue;
                 }
             };
-            let name = run["name"].as_str().unwrap_or("unknown").to_string();
             let status = run["status"].as_str().unwrap_or("unknown");
             let conclusion = run["conclusion"].as_str();
 
+            // Skip completed+skipped runs (e.g. conditional workflows like "Claude Code")
+            if status == "completed" && conclusion == Some("skipped") {
+                continue;
+            }
+
+            let name = run["name"].as_str().unwrap_or("unknown").to_string();
             latest
                 .entry(name)
                 .or_insert((run_id, map_run_status(status, conclusion)));
@@ -463,6 +469,57 @@ jobs:
     #[test]
     fn maps_pending_to_running() {
         assert_eq!(map_run_status("pending", None), BuildStatus::Running);
+    }
+
+    #[test]
+    fn maps_completed_skipped_to_idle() {
+        assert_eq!(
+            map_run_status("completed", Some("skipped")),
+            BuildStatus::Idle
+        );
+    }
+
+    #[test]
+    fn parse_excludes_skipped_run() {
+        let resp = serde_json::json!({
+            "workflow_runs": [
+                {"name": "Claude Code", "id": 100, "status": "completed", "conclusion": "skipped"},
+                {"name": "CI", "id": 101, "status": "completed", "conclusion": "success"}
+            ]
+        });
+        let mut latest = std::collections::HashMap::new();
+        parse_workflow_runs(&resp, &mut latest);
+        assert_eq!(latest.len(), 1);
+        assert!(latest.contains_key("CI"));
+        assert!(!latest.contains_key("Claude Code"));
+    }
+
+    #[test]
+    fn parse_skips_skipped_keeps_next_non_skipped() {
+        let resp = serde_json::json!({
+            "workflow_runs": [
+                {"name": "CI", "id": 50, "status": "completed", "conclusion": "skipped"},
+                {"name": "CI", "id": 49, "status": "completed", "conclusion": "success"}
+            ]
+        });
+        let mut latest = std::collections::HashMap::new();
+        parse_workflow_runs(&resp, &mut latest);
+        assert_eq!(latest.len(), 1);
+        assert_eq!(latest["CI"].0, 49);
+        assert_eq!(latest["CI"].1, BuildStatus::Succeeded);
+    }
+
+    #[test]
+    fn parse_all_skipped_produces_empty_map() {
+        let resp = serde_json::json!({
+            "workflow_runs": [
+                {"name": "Claude Code", "id": 10, "status": "completed", "conclusion": "skipped"},
+                {"name": "Claude Code", "id": 9, "status": "completed", "conclusion": "skipped"}
+            ]
+        });
+        let mut latest = std::collections::HashMap::new();
+        parse_workflow_runs(&resp, &mut latest);
+        assert!(latest.is_empty());
     }
 
     #[test]
