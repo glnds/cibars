@@ -4,3 +4,6 @@
 aws_profile = "your-aws-profile"   # AWS CLI profile name
 region = "eu-west-1"               # AWS region
 github_repo = "owner/repo"         # GitHub repo (owner/name)
+
+# [workflow_categories]
+# review = ["Claude Code Review"]

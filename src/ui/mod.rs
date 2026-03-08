@@ -17,7 +17,7 @@ use ratatui::DefaultTerminal;
 
 use crate::app::App;
 use crate::config::HookStatus;
-use crate::model::{BuildStatus, PipelineGroup, WorkflowGroup};
+use crate::model::{BuildStatus, PipelineGroup, WorkflowCategory, WorkflowGroup};
 use crate::poll_scheduler::PollState;
 
 use bar::{ActionsTitle, BarWidget, PipelinesTitle};
@@ -61,13 +61,16 @@ fn sorted_pipeline_groups(groups: &[PipelineGroup]) -> Vec<&PipelineGroup> {
     sorted
 }
 
-/// Sort workflow groups: those with running jobs first, then alphabetical
+/// Sort workflow groups: CI before Review, running first within each category, then alphabetical
 fn sorted_workflow_groups(groups: &[WorkflowGroup]) -> Vec<&WorkflowGroup> {
     let mut sorted: Vec<&WorkflowGroup> = groups.iter().collect();
     sorted.sort_by(|a, b| {
+        let cat_ord = (a.category as u8).cmp(&(b.category as u8));
         let a_running = a.jobs.iter().any(|j| j.status == BuildStatus::Running);
         let b_running = b.jobs.iter().any(|j| j.status == BuildStatus::Running);
-        b_running.cmp(&a_running).then(a.name.cmp(&b.name))
+        cat_ord
+            .then(b_running.cmp(&a_running))
+            .then(a.name.cmp(&b.name))
     });
     sorted
 }
@@ -158,13 +161,22 @@ pub fn run_ui(
             let has_actions = !sorted_wf_groups.is_empty();
             let has_pipelines = !sorted_pipe_groups.is_empty();
 
-            // Count action rows: just non-gone jobs (no per-workflow headers)
+            // Count action rows: CI jobs + separator (if review present) + review jobs
             let action_rows: usize = if app.actions_expanded {
-                sorted_wf_groups
+                let ci_jobs: usize = sorted_wf_groups
                     .iter()
+                    .filter(|g| g.category == WorkflowCategory::CI)
                     .flat_map(|g| g.jobs.iter())
                     .filter(|j| !j.gone)
-                    .count()
+                    .count();
+                let review_jobs: usize = sorted_wf_groups
+                    .iter()
+                    .filter(|g| g.category == WorkflowCategory::Review)
+                    .flat_map(|g| g.jobs.iter())
+                    .filter(|j| !j.gone)
+                    .count();
+                let separator = if review_jobs > 0 { 1 } else { 0 };
+                ci_jobs + separator + review_jobs
             } else {
                 0
             };
@@ -232,7 +244,12 @@ pub fn run_ui(
             // Action job bars (when expanded)
             if app.actions_expanded {
                 let job_name_width = all_jobs_name_width(&app.workflow_groups);
-                for group in &sorted_wf_groups {
+
+                // CI workflows first
+                for group in sorted_wf_groups
+                    .iter()
+                    .filter(|g| g.category == WorkflowCategory::CI)
+                {
                     for bar in group.jobs.iter().filter(|j| !j.gone) {
                         let bar_dim = dim || group.gone;
                         frame.render_widget(
@@ -240,6 +257,41 @@ pub fn run_ui(
                             areas[idx],
                         );
                         idx += 1;
+                    }
+                }
+
+                // Separator + Review workflows
+                let has_review_jobs = sorted_wf_groups
+                    .iter()
+                    .filter(|g| g.category == WorkflowCategory::Review)
+                    .any(|g| g.jobs.iter().any(|j| !j.gone));
+
+                if has_review_jobs {
+                    // Render separator line
+                    let sep_width = areas[idx].width as usize;
+                    let label = " reviews ";
+                    let pad_len = sep_width.saturating_sub(label.len() + 2);
+                    let pad = "\u{2500}".repeat(pad_len);
+                    let sep_text = format!("\u{2500}\u{2500}{label}{pad}");
+                    let sep_line = ratatui::text::Line::from(ratatui::text::Span::styled(
+                        sep_text,
+                        Style::default().fg(Color::DarkGray),
+                    ));
+                    frame.render_widget(sep_line, areas[idx]);
+                    idx += 1;
+
+                    // Review workflow bars (dimmed)
+                    for group in sorted_wf_groups
+                        .iter()
+                        .filter(|g| g.category == WorkflowCategory::Review)
+                    {
+                        for bar in group.jobs.iter().filter(|j| !j.gone) {
+                            frame.render_widget(
+                                BarWidget::new(bar, job_name_width, true),
+                                areas[idx],
+                            );
+                            idx += 1;
+                        }
                     }
                 }
             }
@@ -500,6 +552,7 @@ mod tests {
                 gone: false,
                 summary_status: BuildStatus::Running,
                 run_id: None,
+                category: WorkflowCategory::default(),
             },
             WorkflowGroup {
                 name: "Deploy".to_string(),
@@ -507,6 +560,7 @@ mod tests {
                 gone: true,
                 summary_status: BuildStatus::Succeeded,
                 run_id: None,
+                category: WorkflowCategory::default(),
             },
         ];
 
@@ -532,6 +586,7 @@ mod tests {
                 gone: false,
                 summary_status: BuildStatus::Idle,
                 run_id: None,
+                category: WorkflowCategory::default(),
             },
             WorkflowGroup {
                 name: "wf2".to_string(),
@@ -539,6 +594,7 @@ mod tests {
                 gone: false,
                 summary_status: BuildStatus::Idle,
                 run_id: None,
+                category: WorkflowCategory::default(),
             },
         ];
         assert_eq!(all_jobs_name_width(&groups), 18); // 16 + 2
@@ -563,6 +619,130 @@ mod tests {
         assert_eq!(all_pipeline_stages_name_width(&groups), 10); // 6 + 4
     }
 
+    /// Count action rows including separator when Review workflows present
+    fn count_action_rows(groups: &[&WorkflowGroup]) -> usize {
+        let ci_jobs: usize = groups
+            .iter()
+            .filter(|g| g.category == WorkflowCategory::CI)
+            .flat_map(|g| g.jobs.iter())
+            .filter(|j| !j.gone)
+            .count();
+        let review_jobs: usize = groups
+            .iter()
+            .filter(|g| g.category == WorkflowCategory::Review)
+            .flat_map(|g| g.jobs.iter())
+            .filter(|j| !j.gone)
+            .count();
+        let separator = if review_jobs > 0 { 1 } else { 0 };
+        ci_jobs + separator + review_jobs
+    }
+
+    #[test]
+    fn action_rows_includes_separator_when_review_present() {
+        let ci = WorkflowGroup {
+            name: "CI".to_string(),
+            jobs: vec![make_test_bar("build", BuildStatus::Idle)],
+            gone: false,
+            summary_status: BuildStatus::Idle,
+            run_id: None,
+            category: WorkflowCategory::CI,
+        };
+        let review = WorkflowGroup {
+            name: "Claude Code Review".to_string(),
+            jobs: vec![make_test_bar("review", BuildStatus::Idle)],
+            gone: false,
+            summary_status: BuildStatus::Idle,
+            run_id: None,
+            category: WorkflowCategory::Review,
+        };
+        let groups = vec![&ci, &review];
+        // 1 CI job + 1 separator + 1 review job = 3
+        assert_eq!(count_action_rows(&groups), 3);
+    }
+
+    #[test]
+    fn action_rows_no_separator_without_review() {
+        let ci = WorkflowGroup {
+            name: "CI".to_string(),
+            jobs: vec![make_test_bar("build", BuildStatus::Idle)],
+            gone: false,
+            summary_status: BuildStatus::Idle,
+            run_id: None,
+            category: WorkflowCategory::CI,
+        };
+        let groups = vec![&ci];
+        assert_eq!(count_action_rows(&groups), 1);
+    }
+
+    #[test]
+    fn sorted_workflow_groups_ci_before_review() {
+        let groups = vec![
+            WorkflowGroup {
+                name: "Claude Code Review".to_string(),
+                jobs: vec![],
+                gone: false,
+                summary_status: BuildStatus::Succeeded,
+                run_id: None,
+                category: WorkflowCategory::Review,
+            },
+            WorkflowGroup {
+                name: "CI".to_string(),
+                jobs: vec![make_test_bar("build", BuildStatus::Idle)],
+                gone: false,
+                summary_status: BuildStatus::Idle,
+                run_id: None,
+                category: WorkflowCategory::CI,
+            },
+        ];
+        let sorted = sorted_workflow_groups(&groups);
+        assert_eq!(sorted[0].name, "CI");
+        assert_eq!(sorted[1].name, "Claude Code Review");
+    }
+
+    #[test]
+    fn sorted_workflow_groups_running_first_within_category() {
+        let groups = vec![
+            WorkflowGroup {
+                name: "zzz-idle".to_string(),
+                jobs: vec![],
+                gone: false,
+                summary_status: BuildStatus::Idle,
+                run_id: None,
+                category: WorkflowCategory::CI,
+            },
+            WorkflowGroup {
+                name: "aaa-running".to_string(),
+                jobs: vec![make_test_bar("build", BuildStatus::Running)],
+                gone: false,
+                summary_status: BuildStatus::Running,
+                run_id: None,
+                category: WorkflowCategory::CI,
+            },
+            WorkflowGroup {
+                name: "review-running".to_string(),
+                jobs: vec![make_test_bar("job", BuildStatus::Running)],
+                gone: false,
+                summary_status: BuildStatus::Running,
+                run_id: None,
+                category: WorkflowCategory::Review,
+            },
+            WorkflowGroup {
+                name: "review-idle".to_string(),
+                jobs: vec![],
+                gone: false,
+                summary_status: BuildStatus::Idle,
+                run_id: None,
+                category: WorkflowCategory::Review,
+            },
+        ];
+        let sorted = sorted_workflow_groups(&groups);
+        // CI first (running before idle), then Review (running before idle)
+        assert_eq!(sorted[0].name, "aaa-running");
+        assert_eq!(sorted[1].name, "zzz-idle");
+        assert_eq!(sorted[2].name, "review-running");
+        assert_eq!(sorted[3].name, "review-idle");
+    }
+
     #[test]
     fn sorted_workflow_groups_running_first() {
         let groups = vec![
@@ -572,6 +752,7 @@ mod tests {
                 gone: false,
                 summary_status: BuildStatus::Idle,
                 run_id: None,
+                category: WorkflowCategory::default(),
             },
             WorkflowGroup {
                 name: "aaa-running".to_string(),
@@ -579,6 +760,7 @@ mod tests {
                 gone: false,
                 summary_status: BuildStatus::Running,
                 run_id: None,
+                category: WorkflowCategory::default(),
             },
         ];
         let sorted = sorted_workflow_groups(&groups);

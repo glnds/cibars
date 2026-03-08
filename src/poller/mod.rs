@@ -10,7 +10,8 @@ use async_trait::async_trait;
 use chrono::Utc;
 
 use crate::app::App;
-use crate::model::{Bar, BuildStatus, PipelineGroup, WorkflowGroup};
+use crate::config::Config;
+use crate::model::{Bar, BuildStatus, PipelineGroup, WorkflowCategory, WorkflowGroup};
 
 /// How long to back off when GitHub rate limit is hit.
 const RATE_LIMIT_BACKOFF_SECS: u64 = 60;
@@ -329,8 +330,16 @@ fn update_workflow_summaries(app: &mut App, summaries: &[WorkflowRunSummary]) {
                 gone: false,
                 summary_status: summary.status,
                 run_id: Some(summary.run_id),
+                category: WorkflowCategory::default(),
             });
         }
+    }
+}
+
+/// Apply workflow category classification from config.
+pub fn classify_workflows(app: &mut App, config: &Config) {
+    for group in &mut app.workflow_groups {
+        group.category = config.classify_workflow(&group.name);
     }
 }
 
@@ -999,6 +1008,42 @@ mod tests {
             build.fill, 0,
             "new bar should start with fill=0, not minimum-fill=1"
         );
+    }
+
+    #[test]
+    fn classify_workflows_sets_categories() {
+        let mut app = App::new();
+        app.workflow_groups.push(WorkflowGroup {
+            name: "CI".into(),
+            jobs: vec![],
+            gone: false,
+            summary_status: BuildStatus::Idle,
+            run_id: None,
+            category: WorkflowCategory::default(),
+        });
+        app.workflow_groups.push(WorkflowGroup {
+            name: "Claude Code Review".into(),
+            jobs: vec![],
+            gone: false,
+            summary_status: BuildStatus::Idle,
+            run_id: None,
+            category: WorkflowCategory::default(),
+        });
+
+        let config = Config::try_from_args(&[
+            "cibars",
+            "--aws-profile",
+            "p",
+            "--region",
+            "r",
+            "--github-repo",
+            "o/r",
+        ])
+        .unwrap();
+        classify_workflows(&mut app, &config);
+
+        assert_eq!(app.workflow_groups[0].category, WorkflowCategory::CI);
+        assert_eq!(app.workflow_groups[1].category, WorkflowCategory::Review);
     }
 
     #[test]

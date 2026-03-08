@@ -5,11 +5,19 @@ use anyhow::{ensure, Context, Result};
 use clap::Parser;
 use serde::Deserialize;
 
+use crate::model::WorkflowCategory;
+
+#[derive(Deserialize, Debug, Default)]
+pub struct WorkflowCategoryConfig {
+    pub review: Option<Vec<String>>,
+}
+
 #[derive(Deserialize, Debug, Default)]
 pub struct FileConfig {
     pub aws_profile: Option<String>,
     pub region: Option<String>,
     pub github_repo: Option<String>,
+    pub workflow_categories: Option<WorkflowCategoryConfig>,
 }
 
 #[derive(Parser, Debug, Clone)]
@@ -33,6 +41,8 @@ pub struct Config {
     pub aws_profile: String,
     pub region: String,
     pub github_repo: String,
+    /// Explicit workflow names classified as Review (from config file).
+    pub review_workflows: Vec<String>,
 }
 
 impl Config {
@@ -63,11 +73,38 @@ impl Config {
             "github-repo must be in owner/repo format"
         );
 
+        let review_workflows = file
+            .workflow_categories
+            .and_then(|c| c.review)
+            .unwrap_or_default();
+
         Ok(Config {
             aws_profile,
             region,
             github_repo,
+            review_workflows,
         })
+    }
+
+    /// Classify a workflow name as CI or Review.
+    /// Config overrides take precedence over heuristics.
+    pub fn classify_workflow(&self, name: &str) -> WorkflowCategory {
+        // Config override: exact match (case-sensitive)
+        if self.review_workflows.iter().any(|r| r == name) {
+            return WorkflowCategory::Review;
+        }
+
+        // Auto-detect heuristics (case-insensitive)
+        let lower = name.to_lowercase();
+        if lower.contains("review")
+            || lower.contains("dependabot")
+            || lower.contains("labeler")
+            || lower.contains("stale")
+        {
+            return WorkflowCategory::Review;
+        }
+
+        WorkflowCategory::CI
     }
 
     #[cfg(test)]
@@ -189,6 +226,7 @@ fn load_file_config(dir: &Path) -> FileConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::WorkflowCategory;
 
     #[test]
     fn valid_args_parse() {
@@ -309,6 +347,7 @@ aws_profile = "staging"
             aws_profile: Some("from-file".into()),
             region: Some("eu-west-1".into()),
             github_repo: Some("org/repo".into()),
+            workflow_categories: None,
         };
         let config = Config::merge(&["cibars", "--aws-profile", "from-cli"], file).unwrap();
         assert_eq!(config.aws_profile, "from-cli");
@@ -322,6 +361,7 @@ aws_profile = "staging"
             aws_profile: Some("staging".into()),
             region: Some("eu-west-1".into()),
             github_repo: Some("acme/backend".into()),
+            workflow_categories: None,
         };
         let config = Config::merge(&["cibars"], file).unwrap();
         assert_eq!(config.aws_profile, "staging");
@@ -356,6 +396,7 @@ aws_profile = "staging"
             aws_profile: Some("staging".into()),
             region: None,
             github_repo: None,
+            workflow_categories: None,
         };
         let result = Config::merge(&["cibars"], file);
         assert!(result.is_err());
@@ -474,6 +515,151 @@ aws_profile = "staging"
             .unwrap()
             .permissions();
         assert!(perms.mode() & 0o111 != 0, "hook should be executable");
+    }
+
+    // --- classify_workflow tests ---
+
+    #[test]
+    fn classify_auto_review_pattern() {
+        let config = Config::try_from_args(&[
+            "cibars",
+            "--aws-profile",
+            "p",
+            "--region",
+            "r",
+            "--github-repo",
+            "o/r",
+        ])
+        .unwrap();
+        assert_eq!(
+            config.classify_workflow("Claude Code Review"),
+            WorkflowCategory::Review
+        );
+    }
+
+    #[test]
+    fn classify_auto_ci_pattern() {
+        let config = Config::try_from_args(&[
+            "cibars",
+            "--aws-profile",
+            "p",
+            "--region",
+            "r",
+            "--github-repo",
+            "o/r",
+        ])
+        .unwrap();
+        assert_eq!(config.classify_workflow("CI"), WorkflowCategory::CI);
+        assert_eq!(
+            config.classify_workflow("Security Audit"),
+            WorkflowCategory::CI
+        );
+    }
+
+    #[test]
+    fn classify_auto_dependabot() {
+        let config = Config::try_from_args(&[
+            "cibars",
+            "--aws-profile",
+            "p",
+            "--region",
+            "r",
+            "--github-repo",
+            "o/r",
+        ])
+        .unwrap();
+        assert_eq!(
+            config.classify_workflow("dependabot"),
+            WorkflowCategory::Review
+        );
+    }
+
+    #[test]
+    fn classify_auto_labeler() {
+        let config = Config::try_from_args(&[
+            "cibars",
+            "--aws-profile",
+            "p",
+            "--region",
+            "r",
+            "--github-repo",
+            "o/r",
+        ])
+        .unwrap();
+        assert_eq!(
+            config.classify_workflow("PR Labeler"),
+            WorkflowCategory::Review
+        );
+    }
+
+    #[test]
+    fn classify_auto_stale() {
+        let config = Config::try_from_args(&[
+            "cibars",
+            "--aws-profile",
+            "p",
+            "--region",
+            "r",
+            "--github-repo",
+            "o/r",
+        ])
+        .unwrap();
+        assert_eq!(
+            config.classify_workflow("Mark stale issues"),
+            WorkflowCategory::Review
+        );
+    }
+
+    #[test]
+    fn classify_config_override_takes_precedence() {
+        let file = FileConfig {
+            aws_profile: Some("p".into()),
+            region: Some("r".into()),
+            github_repo: Some("o/r".into()),
+            workflow_categories: Some(WorkflowCategoryConfig {
+                review: Some(vec!["My Custom Workflow".into()]),
+            }),
+        };
+        let config = Config::merge(&["cibars"], file).unwrap();
+        assert_eq!(
+            config.classify_workflow("My Custom Workflow"),
+            WorkflowCategory::Review
+        );
+    }
+
+    #[test]
+    fn classify_no_workflow_categories_section() {
+        let file = FileConfig {
+            aws_profile: Some("p".into()),
+            region: Some("r".into()),
+            github_repo: Some("o/r".into()),
+            workflow_categories: None,
+        };
+        let config = Config::merge(&["cibars"], file).unwrap();
+        assert_eq!(config.classify_workflow("CI"), WorkflowCategory::CI);
+        assert_eq!(
+            config.classify_workflow("Claude Code Review"),
+            WorkflowCategory::Review
+        );
+    }
+
+    #[test]
+    fn classify_config_toml_parses_workflow_categories() {
+        let toml_str = r#"
+aws_profile = "p"
+region = "r"
+github_repo = "o/r"
+
+[workflow_categories]
+review = ["Claude Code Review", "dependabot"]
+"#;
+        let fc: FileConfig = toml::from_str(toml_str).unwrap();
+        assert!(fc.workflow_categories.is_some());
+        let cats = fc.workflow_categories.unwrap();
+        assert_eq!(
+            cats.review.unwrap(),
+            vec!["Claude Code Review", "dependabot"]
+        );
     }
 
     #[test]

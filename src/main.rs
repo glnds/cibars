@@ -153,6 +153,12 @@ async fn run_poll_orchestrator(
             poller::poll_actions_tick(&app, &gh_client).await;
         }
 
+        // Classify workflows by category (CI vs Review)
+        {
+            let mut a = app.lock().expect("app mutex poisoned");
+            poller::classify_workflows(&mut a, &config);
+        }
+
         // Apply linkage: mark GH workflows as Succeeded when linked CP starts Running
         linkage::apply_links(&app, &mut link_map, &mut stopped_runs);
 

@@ -4,7 +4,7 @@ use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Widget;
 
-use crate::model::{Bar, PipelineGroup, WorkflowGroup};
+use crate::model::{Bar, PipelineGroup, WorkflowCategory, WorkflowGroup};
 
 /// Max chars for the name column
 pub const MAX_NAME_WIDTH: usize = 30;
@@ -102,10 +102,11 @@ impl Widget for ActionsTitle<'_> {
         )];
 
         for group in self.groups {
+            let is_review = group.category == WorkflowCategory::Review;
             let visible_jobs: Vec<_> = group.jobs.iter().filter(|j| !j.gone).collect();
             if visible_jobs.is_empty() {
                 // Jobs not loaded yet; show one dot per workflow using summary status
-                let color = if self.dim || group.gone {
+                let color = if self.dim || group.gone || is_review {
                     Color::DarkGray
                 } else {
                     group.summary_status.color()
@@ -113,7 +114,7 @@ impl Widget for ActionsTitle<'_> {
                 spans.push(Span::styled("\u{25CF} ", Style::default().fg(color)));
             } else {
                 for job in visible_jobs {
-                    let color = if self.dim || group.gone {
+                    let color = if self.dim || group.gone || is_review {
                         Color::DarkGray
                     } else {
                         job.status.color()
@@ -289,6 +290,7 @@ mod tests {
             gone: false,
             summary_status: BuildStatus::Running,
             run_id: None,
+            category: WorkflowCategory::CI,
         }
     }
 
@@ -607,6 +609,29 @@ mod tests {
             .collect();
         assert_eq!(dots.len(), 1);
         assert_eq!(dots[0].fg, Color::Green);
+    }
+
+    #[test]
+    fn actions_title_review_dots_dimmed() {
+        let ci_group = make_group("CI", &[BuildStatus::Succeeded]);
+        let mut review_group = make_group("Review", &[BuildStatus::Running]);
+        review_group.category = WorkflowCategory::Review;
+        let groups = vec![&ci_group, &review_group];
+        let widget = ActionsTitle::new(&groups, false);
+        let area = Rect::new(0, 0, 40, 1);
+        let mut buf = Buffer::empty(area);
+        widget.render(area, &mut buf);
+
+        let dots: Vec<_> = buf
+            .content()
+            .iter()
+            .filter(|c| c.symbol() == "\u{25CF}")
+            .collect();
+        assert_eq!(dots.len(), 2);
+        // CI dot: full color (Green for Succeeded)
+        assert_eq!(dots[0].fg, Color::Green);
+        // Review dot: dimmed (DarkGray regardless of status)
+        assert_eq!(dots[1].fg, Color::DarkGray);
     }
 
     #[test]

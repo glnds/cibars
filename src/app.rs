@@ -80,7 +80,7 @@ impl Default for App {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{Bar, WorkflowGroup};
+    use crate::model::{Bar, WorkflowCategory, WorkflowGroup};
 
     #[test]
     fn app_starts_with_loading_flags() {
@@ -130,6 +130,7 @@ mod tests {
             gone: false,
             summary_status: BuildStatus::Running,
             run_id: None,
+            category: WorkflowCategory::default(),
         });
         assert!(app.has_any_running());
     }
@@ -145,6 +146,7 @@ mod tests {
             gone: false,
             summary_status: BuildStatus::Succeeded,
             run_id: None,
+            category: WorkflowCategory::default(),
         });
         assert!(app.has_any_running());
     }
@@ -175,6 +177,7 @@ mod tests {
             gone: false,
             summary_status: BuildStatus::Succeeded,
             run_id: None,
+            category: WorkflowCategory::default(),
         });
         assert!(!app.has_any_running());
     }

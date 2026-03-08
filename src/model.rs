@@ -93,6 +93,13 @@ impl Bar {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum WorkflowCategory {
+    #[default]
+    CI,
+    Review,
+}
+
 #[derive(Debug, Clone)]
 pub struct WorkflowGroup {
     pub name: String,
@@ -102,6 +109,7 @@ pub struct WorkflowGroup {
     pub summary_status: BuildStatus,
     /// The GH Actions run_id currently represented by this group.
     pub run_id: Option<u64>,
+    pub category: WorkflowCategory,
 }
 
 #[derive(Debug, Clone)]
@@ -383,6 +391,13 @@ mod tests {
         assert_eq!(bar.write_pos, 0);
     }
 
+    // --- WorkflowCategory tests ---
+
+    #[test]
+    fn workflow_category_default_is_ci() {
+        assert_eq!(WorkflowCategory::default(), WorkflowCategory::CI);
+    }
+
     // --- WorkflowGroup tests ---
 
     #[test]
@@ -393,10 +408,25 @@ mod tests {
             gone: false,
             summary_status: BuildStatus::Idle,
             run_id: None,
+            category: WorkflowCategory::CI,
         };
         assert_eq!(group.name, "CI");
         assert!(group.jobs.is_empty());
         assert!(!group.gone);
+        assert_eq!(group.category, WorkflowCategory::CI);
+    }
+
+    #[test]
+    fn workflow_group_with_review_category() {
+        let group = WorkflowGroup {
+            name: "Claude Code Review".to_string(),
+            jobs: vec![],
+            gone: false,
+            summary_status: BuildStatus::Idle,
+            run_id: None,
+            category: WorkflowCategory::Review,
+        };
+        assert_eq!(group.category, WorkflowCategory::Review);
     }
 
     #[test]
@@ -407,6 +437,7 @@ mod tests {
             gone: false,
             summary_status: BuildStatus::Running,
             run_id: None,
+            category: WorkflowCategory::CI,
         };
         assert_eq!(group.jobs.len(), 2);
         assert_eq!(group.jobs[0].name, "build");
@@ -421,6 +452,7 @@ mod tests {
             gone: false,
             summary_status: BuildStatus::Idle,
             run_id: None,
+            category: WorkflowCategory::CI,
         };
         group.gone = true;
         assert!(group.gone);
