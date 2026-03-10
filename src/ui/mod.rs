@@ -237,7 +237,7 @@ pub fn run_ui(
                     areas[idx],
                 );
             } else {
-                frame.render_widget(ActionsTitle::new(&sorted_wf_groups, dim), areas[idx]);
+                frame.render_widget(ActionsTitle::new(&sorted_wf_groups), areas[idx]);
             }
             idx += 1;
 
@@ -308,7 +308,7 @@ pub fn run_ui(
                     areas[idx],
                 );
             } else {
-                frame.render_widget(PipelinesTitle::new(&sorted_pipe_groups, dim), areas[idx]);
+                frame.render_widget(PipelinesTitle::new(&sorted_pipe_groups), areas[idx]);
             }
             idx += 1;
 
