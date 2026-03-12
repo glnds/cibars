@@ -79,14 +79,14 @@ pub fn compute_name_width(bars: &[Bar]) -> usize {
 }
 
 /// "GitHub Actions" title with inline status dots for all jobs across groups.
+/// Dots always retain their status color — they are never dimmed by poll state.
 pub struct ActionsTitle<'a> {
     groups: &'a [&'a WorkflowGroup],
-    dim: bool,
 }
 
 impl<'a> ActionsTitle<'a> {
-    pub fn new(groups: &'a [&'a WorkflowGroup], dim: bool) -> Self {
-        Self { groups, dim }
+    pub fn new(groups: &'a [&'a WorkflowGroup]) -> Self {
+        Self { groups }
     }
 }
 
@@ -106,7 +106,7 @@ impl Widget for ActionsTitle<'_> {
             let visible_jobs: Vec<_> = group.jobs.iter().filter(|j| !j.gone).collect();
             if visible_jobs.is_empty() {
                 // Jobs not loaded yet; show one dot per workflow using summary status
-                let color = if self.dim || group.gone || is_review {
+                let color = if group.gone || is_review {
                     Color::DarkGray
                 } else {
                     group.summary_status.color()
@@ -114,7 +114,7 @@ impl Widget for ActionsTitle<'_> {
                 spans.push(Span::styled("\u{25CF} ", Style::default().fg(color)));
             } else {
                 for job in visible_jobs {
-                    let color = if self.dim || group.gone || is_review {
+                    let color = if group.gone || is_review {
                         Color::DarkGray
                     } else {
                         job.status.color()
@@ -129,14 +129,14 @@ impl Widget for ActionsTitle<'_> {
 }
 
 /// "CodePipelines" title with inline status dots for each pipeline group.
+/// Dots always retain their status color — they are never dimmed by poll state.
 pub struct PipelinesTitle<'a> {
     groups: &'a [&'a PipelineGroup],
-    dim: bool,
 }
 
 impl<'a> PipelinesTitle<'a> {
-    pub fn new(groups: &'a [&'a PipelineGroup], dim: bool) -> Self {
-        Self { groups, dim }
+    pub fn new(groups: &'a [&'a PipelineGroup]) -> Self {
+        Self { groups }
     }
 }
 
@@ -152,7 +152,7 @@ impl Widget for PipelinesTitle<'_> {
         )];
 
         for group in self.groups {
-            let color = if self.dim || group.gone {
+            let color = if group.gone {
                 Color::DarkGray
             } else {
                 group.summary_status.color()
@@ -298,7 +298,7 @@ mod tests {
     fn actions_title_renders_label_and_dots() {
         let group = make_group("CI", &[BuildStatus::Succeeded, BuildStatus::Running]);
         let groups = vec![&group];
-        let widget = ActionsTitle::new(&groups, false);
+        let widget = ActionsTitle::new(&groups);
         let area = Rect::new(0, 0, 40, 1);
         let mut buf = Buffer::empty(area);
         widget.render(area, &mut buf);
@@ -332,7 +332,7 @@ mod tests {
             ],
         );
         let groups = vec![&group];
-        let widget = ActionsTitle::new(&groups, false);
+        let widget = ActionsTitle::new(&groups);
         let area = Rect::new(0, 0, 40, 1);
         let mut buf = Buffer::empty(area);
         widget.render(area, &mut buf);
@@ -363,7 +363,7 @@ mod tests {
         let g1 = make_pipe_group("pipe-a", BuildStatus::Succeeded);
         let g2 = make_pipe_group("pipe-b", BuildStatus::Running);
         let groups = vec![&g1, &g2];
-        let widget = PipelinesTitle::new(&groups, false);
+        let widget = PipelinesTitle::new(&groups);
         let area = Rect::new(0, 0, 40, 1);
         let mut buf = Buffer::empty(area);
         widget.render(area, &mut buf);
@@ -393,7 +393,7 @@ mod tests {
         let g3 = make_pipe_group("p3", BuildStatus::Succeeded);
         let g4 = make_pipe_group("p4", BuildStatus::Running);
         let groups = vec![&g1, &g2, &g3, &g4];
-        let widget = PipelinesTitle::new(&groups, false);
+        let widget = PipelinesTitle::new(&groups);
         let area = Rect::new(0, 0, 40, 1);
         let mut buf = Buffer::empty(area);
         widget.render(area, &mut buf);
@@ -415,7 +415,7 @@ mod tests {
         let mut g = make_pipe_group("pipe", BuildStatus::Running);
         g.gone = true;
         let groups = vec![&g];
-        let widget = PipelinesTitle::new(&groups, false);
+        let widget = PipelinesTitle::new(&groups);
         let area = Rect::new(0, 0, 40, 1);
         let mut buf = Buffer::empty(area);
         widget.render(area, &mut buf);
@@ -430,10 +430,10 @@ mod tests {
     }
 
     #[test]
-    fn actions_title_dim_renders_all_dots_dark_gray() {
+    fn actions_title_dots_stay_colored_when_dim() {
         let group = make_group("CI", &[BuildStatus::Succeeded, BuildStatus::Running]);
         let groups = vec![&group];
-        let widget = ActionsTitle::new(&groups, true);
+        let widget = ActionsTitle::new(&groups);
         let area = Rect::new(0, 0, 40, 1);
         let mut buf = Buffer::empty(area);
         widget.render(area, &mut buf);
@@ -444,16 +444,17 @@ mod tests {
             .filter(|c| c.symbol() == "\u{25CF}")
             .collect();
         assert_eq!(dots.len(), 2);
-        assert_eq!(dots[0].fg, Color::DarkGray);
-        assert_eq!(dots[1].fg, Color::DarkGray);
+        // Dots should retain status colors even when dim=true
+        assert_eq!(dots[0].fg, Color::Green);
+        assert_eq!(dots[1].fg, Color::Yellow);
     }
 
     #[test]
-    fn pipelines_title_dim_renders_all_dots_dark_gray() {
+    fn pipelines_title_dots_stay_colored_when_dim() {
         let g1 = make_pipe_group("pipe-a", BuildStatus::Succeeded);
         let g2 = make_pipe_group("pipe-b", BuildStatus::Running);
         let groups = vec![&g1, &g2];
-        let widget = PipelinesTitle::new(&groups, true);
+        let widget = PipelinesTitle::new(&groups);
         let area = Rect::new(0, 0, 40, 1);
         let mut buf = Buffer::empty(area);
         widget.render(area, &mut buf);
@@ -464,8 +465,9 @@ mod tests {
             .filter(|c| c.symbol() == "\u{25CF}")
             .collect();
         assert_eq!(dots.len(), 2);
-        assert_eq!(dots[0].fg, Color::DarkGray);
-        assert_eq!(dots[1].fg, Color::DarkGray);
+        // Dots should retain status colors even when dim=true
+        assert_eq!(dots[0].fg, Color::Green);
+        assert_eq!(dots[1].fg, Color::Yellow);
     }
 
     #[test]
@@ -491,7 +493,7 @@ mod tests {
         let g1 = make_group("CI", &[BuildStatus::Succeeded]);
         let g2 = make_group("Deploy", &[BuildStatus::Failed, BuildStatus::Running]);
         let groups = vec![&g1, &g2];
-        let widget = ActionsTitle::new(&groups, false);
+        let widget = ActionsTitle::new(&groups);
         let area = Rect::new(0, 0, 40, 1);
         let mut buf = Buffer::empty(area);
         widget.render(area, &mut buf);
@@ -597,7 +599,7 @@ mod tests {
         let mut group = make_group("CI", &[]);
         group.summary_status = BuildStatus::Succeeded;
         let groups = vec![&group];
-        let widget = ActionsTitle::new(&groups, false);
+        let widget = ActionsTitle::new(&groups);
         let area = Rect::new(0, 0, 40, 1);
         let mut buf = Buffer::empty(area);
         widget.render(area, &mut buf);
@@ -617,7 +619,7 @@ mod tests {
         let mut review_group = make_group("Review", &[BuildStatus::Running]);
         review_group.category = WorkflowCategory::Review;
         let groups = vec![&ci_group, &review_group];
-        let widget = ActionsTitle::new(&groups, false);
+        let widget = ActionsTitle::new(&groups);
         let area = Rect::new(0, 0, 40, 1);
         let mut buf = Buffer::empty(area);
         widget.render(area, &mut buf);
@@ -640,7 +642,7 @@ mod tests {
         group.gone = true;
         group.summary_status = BuildStatus::Succeeded;
         let groups = vec![&group];
-        let widget = ActionsTitle::new(&groups, false);
+        let widget = ActionsTitle::new(&groups);
         let area = Rect::new(0, 0, 40, 1);
         let mut buf = Buffer::empty(area);
         widget.render(area, &mut buf);
