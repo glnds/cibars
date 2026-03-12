@@ -75,8 +75,6 @@ fn sorted_workflow_groups(groups: &[WorkflowGroup]) -> Vec<&WorkflowGroup> {
     sorted
 }
 
-const MIN_WIDTH: u16 = 80;
-const MIN_HEIGHT: u16 = 10;
 const TICK_RATE_MS: u64 = 250;
 const ANIMATION_INTERVAL: Duration = Duration::from_secs(1);
 
@@ -141,13 +139,6 @@ pub fn run_ui(
             // Update terminal width for poller to read
             if let Ok(mut a) = app.lock() {
                 a.terminal_width = size.width;
-            }
-
-            if size.width < MIN_WIDTH || size.height < MIN_HEIGHT {
-                let msg =
-                    Paragraph::new("Terminal too small").style(Style::default().fg(Color::Red));
-                frame.render_widget(msg, size);
-                return;
             }
 
             let app = app.lock().expect("app mutex poisoned");
@@ -766,5 +757,25 @@ mod tests {
         let sorted = sorted_workflow_groups(&groups);
         assert_eq!(sorted[0].name, "aaa-running");
         assert_eq!(sorted[1].name, "zzz-idle");
+    }
+
+    #[test]
+    fn no_minimum_terminal_size_enforced() {
+        // The UI should render at any terminal size, letting ratatui clip naturally.
+        // This test prevents reintroduction of a terminal size gate by checking
+        // that the non-test source has no "const MIN_" declarations.
+        let source = include_str!("mod.rs");
+        let prod_source = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("should have code before #[cfg(test)]");
+        assert!(
+            !prod_source.contains("const MIN_WIDTH"),
+            "const MIN_WIDTH should not exist — no terminal size gate"
+        );
+        assert!(
+            !prod_source.contains("const MIN_HEIGHT"),
+            "const MIN_HEIGHT should not exist — no terminal size gate"
+        );
     }
 }
