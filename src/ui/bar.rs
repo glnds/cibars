@@ -13,6 +13,7 @@ pub struct BarWidget<'a> {
     bar: &'a Bar,
     name_width: usize,
     dim: bool,
+    status_dot: Option<Color>,
 }
 
 impl<'a> BarWidget<'a> {
@@ -21,7 +22,13 @@ impl<'a> BarWidget<'a> {
             bar,
             name_width: name_width.min(MAX_NAME_WIDTH),
             dim,
+            status_dot: None,
         }
+    }
+
+    pub fn with_dot(mut self, color: Color) -> Self {
+        self.status_dot = Some(color);
+        self
     }
 
     fn status_color(&self) -> Color {
@@ -39,8 +46,9 @@ impl Widget for BarWidget<'_> {
             return;
         }
 
+        let dot_prefix_len = if self.status_dot.is_some() { 2 } else { 0 };
         let name_col = self.name_width + 2;
-        let overhead = name_col + 2;
+        let overhead = dot_prefix_len + name_col + 2;
         if (area.width as usize) <= overhead {
             return;
         }
@@ -56,15 +64,17 @@ impl Widget for BarWidget<'_> {
         let filled = self.bar.fill.min(fill_width);
         let empty = fill_width - filled;
 
-        let line = Line::from(vec![
-            Span::raw(format!("{name_display}  ")),
-            Span::raw("["),
-            Span::styled("|".repeat(filled), Style::default().fg(color)),
-            Span::raw(" ".repeat(empty)),
-            Span::raw("]"),
-        ]);
+        let mut spans = Vec::new();
+        if let Some(dot_color) = self.status_dot {
+            spans.push(Span::styled("\u{25CF} ", Style::default().fg(dot_color)));
+        }
+        spans.push(Span::raw(format!("{name_display}  ")));
+        spans.push(Span::raw("["));
+        spans.push(Span::styled("|".repeat(filled), Style::default().fg(color)));
+        spans.push(Span::raw(" ".repeat(empty)));
+        spans.push(Span::raw("]"));
 
-        line.render(area, buf);
+        Line::from(spans).render(area, buf);
     }
 }
 
@@ -82,11 +92,12 @@ pub fn compute_name_width(bars: &[Bar]) -> usize {
 /// Dots always retain their status color — they are never dimmed by poll state.
 pub struct ActionsTitle<'a> {
     groups: &'a [&'a WorkflowGroup],
+    expanded: bool,
 }
 
 impl<'a> ActionsTitle<'a> {
-    pub fn new(groups: &'a [&'a WorkflowGroup]) -> Self {
-        Self { groups }
+    pub fn new(groups: &'a [&'a WorkflowGroup], expanded: bool) -> Self {
+        Self { groups, expanded }
     }
 }
 
@@ -101,25 +112,26 @@ impl Widget for ActionsTitle<'_> {
             Style::default().fg(Color::Cyan),
         )];
 
-        for group in self.groups {
-            let is_review = group.category == WorkflowCategory::Review;
-            let visible_jobs: Vec<_> = group.jobs.iter().filter(|j| !j.gone).collect();
-            if visible_jobs.is_empty() {
-                // Jobs not loaded yet; show one dot per workflow using summary status
-                let color = if group.gone || is_review {
-                    Color::DarkGray
-                } else {
-                    group.summary_status.color()
-                };
-                spans.push(Span::styled("\u{25CF} ", Style::default().fg(color)));
-            } else {
-                for job in visible_jobs {
+        if !self.expanded {
+            for group in self.groups {
+                let is_review = group.category == WorkflowCategory::Review;
+                let visible_jobs: Vec<_> = group.jobs.iter().filter(|j| !j.gone).collect();
+                if visible_jobs.is_empty() {
                     let color = if group.gone || is_review {
                         Color::DarkGray
                     } else {
-                        job.status.color()
+                        group.summary_status.color()
                     };
                     spans.push(Span::styled("\u{25CF} ", Style::default().fg(color)));
+                } else {
+                    for job in visible_jobs {
+                        let color = if group.gone || is_review {
+                            Color::DarkGray
+                        } else {
+                            job.status.color()
+                        };
+                        spans.push(Span::styled("\u{25CF} ", Style::default().fg(color)));
+                    }
                 }
             }
         }
@@ -132,11 +144,12 @@ impl Widget for ActionsTitle<'_> {
 /// Dots always retain their status color — they are never dimmed by poll state.
 pub struct PipelinesTitle<'a> {
     groups: &'a [&'a PipelineGroup],
+    expanded: bool,
 }
 
 impl<'a> PipelinesTitle<'a> {
-    pub fn new(groups: &'a [&'a PipelineGroup]) -> Self {
-        Self { groups }
+    pub fn new(groups: &'a [&'a PipelineGroup], expanded: bool) -> Self {
+        Self { groups, expanded }
     }
 }
 
@@ -151,13 +164,15 @@ impl Widget for PipelinesTitle<'_> {
             Style::default().fg(Color::Cyan),
         )];
 
-        for group in self.groups {
-            let color = if group.gone {
-                Color::DarkGray
-            } else {
-                group.summary_status.color()
-            };
-            spans.push(Span::styled("\u{25CF} ", Style::default().fg(color)));
+        if !self.expanded {
+            for group in self.groups {
+                let color = if group.gone {
+                    Color::DarkGray
+                } else {
+                    group.summary_status.color()
+                };
+                spans.push(Span::styled("\u{25CF} ", Style::default().fg(color)));
+            }
         }
 
         Line::from(spans).render(area, buf);
@@ -298,7 +313,7 @@ mod tests {
     fn actions_title_renders_label_and_dots() {
         let group = make_group("CI", &[BuildStatus::Succeeded, BuildStatus::Running]);
         let groups = vec![&group];
-        let widget = ActionsTitle::new(&groups);
+        let widget = ActionsTitle::new(&groups, false);
         let area = Rect::new(0, 0, 40, 1);
         let mut buf = Buffer::empty(area);
         widget.render(area, &mut buf);
@@ -332,7 +347,7 @@ mod tests {
             ],
         );
         let groups = vec![&group];
-        let widget = ActionsTitle::new(&groups);
+        let widget = ActionsTitle::new(&groups, false);
         let area = Rect::new(0, 0, 40, 1);
         let mut buf = Buffer::empty(area);
         widget.render(area, &mut buf);
@@ -363,7 +378,7 @@ mod tests {
         let g1 = make_pipe_group("pipe-a", BuildStatus::Succeeded);
         let g2 = make_pipe_group("pipe-b", BuildStatus::Running);
         let groups = vec![&g1, &g2];
-        let widget = PipelinesTitle::new(&groups);
+        let widget = PipelinesTitle::new(&groups, false);
         let area = Rect::new(0, 0, 40, 1);
         let mut buf = Buffer::empty(area);
         widget.render(area, &mut buf);
@@ -393,7 +408,7 @@ mod tests {
         let g3 = make_pipe_group("p3", BuildStatus::Succeeded);
         let g4 = make_pipe_group("p4", BuildStatus::Running);
         let groups = vec![&g1, &g2, &g3, &g4];
-        let widget = PipelinesTitle::new(&groups);
+        let widget = PipelinesTitle::new(&groups, false);
         let area = Rect::new(0, 0, 40, 1);
         let mut buf = Buffer::empty(area);
         widget.render(area, &mut buf);
@@ -415,7 +430,7 @@ mod tests {
         let mut g = make_pipe_group("pipe", BuildStatus::Running);
         g.gone = true;
         let groups = vec![&g];
-        let widget = PipelinesTitle::new(&groups);
+        let widget = PipelinesTitle::new(&groups, false);
         let area = Rect::new(0, 0, 40, 1);
         let mut buf = Buffer::empty(area);
         widget.render(area, &mut buf);
@@ -433,7 +448,7 @@ mod tests {
     fn actions_title_dots_stay_colored_when_dim() {
         let group = make_group("CI", &[BuildStatus::Succeeded, BuildStatus::Running]);
         let groups = vec![&group];
-        let widget = ActionsTitle::new(&groups);
+        let widget = ActionsTitle::new(&groups, false);
         let area = Rect::new(0, 0, 40, 1);
         let mut buf = Buffer::empty(area);
         widget.render(area, &mut buf);
@@ -454,7 +469,7 @@ mod tests {
         let g1 = make_pipe_group("pipe-a", BuildStatus::Succeeded);
         let g2 = make_pipe_group("pipe-b", BuildStatus::Running);
         let groups = vec![&g1, &g2];
-        let widget = PipelinesTitle::new(&groups);
+        let widget = PipelinesTitle::new(&groups, false);
         let area = Rect::new(0, 0, 40, 1);
         let mut buf = Buffer::empty(area);
         widget.render(area, &mut buf);
@@ -493,7 +508,7 @@ mod tests {
         let g1 = make_group("CI", &[BuildStatus::Succeeded]);
         let g2 = make_group("Deploy", &[BuildStatus::Failed, BuildStatus::Running]);
         let groups = vec![&g1, &g2];
-        let widget = ActionsTitle::new(&groups);
+        let widget = ActionsTitle::new(&groups, false);
         let area = Rect::new(0, 0, 40, 1);
         let mut buf = Buffer::empty(area);
         widget.render(area, &mut buf);
@@ -599,7 +614,7 @@ mod tests {
         let mut group = make_group("CI", &[]);
         group.summary_status = BuildStatus::Succeeded;
         let groups = vec![&group];
-        let widget = ActionsTitle::new(&groups);
+        let widget = ActionsTitle::new(&groups, false);
         let area = Rect::new(0, 0, 40, 1);
         let mut buf = Buffer::empty(area);
         widget.render(area, &mut buf);
@@ -619,7 +634,7 @@ mod tests {
         let mut review_group = make_group("Review", &[BuildStatus::Running]);
         review_group.category = WorkflowCategory::Review;
         let groups = vec![&ci_group, &review_group];
-        let widget = ActionsTitle::new(&groups);
+        let widget = ActionsTitle::new(&groups, false);
         let area = Rect::new(0, 0, 40, 1);
         let mut buf = Buffer::empty(area);
         widget.render(area, &mut buf);
@@ -642,7 +657,7 @@ mod tests {
         group.gone = true;
         group.summary_status = BuildStatus::Succeeded;
         let groups = vec![&group];
-        let widget = ActionsTitle::new(&groups);
+        let widget = ActionsTitle::new(&groups, false);
         let area = Rect::new(0, 0, 40, 1);
         let mut buf = Buffer::empty(area);
         widget.render(area, &mut buf);
@@ -654,5 +669,148 @@ mod tests {
             .collect();
         assert_eq!(dots.len(), 1);
         assert_eq!(dots[0].fg, Color::DarkGray);
+    }
+
+    #[test]
+    fn bar_renders_with_status_dot_prefix() {
+        let bar = make_bar("deploy", BuildStatus::Succeeded, 3);
+        let widget = BarWidget::new(&bar, 10, false).with_dot(Color::Green);
+        let area = Rect::new(0, 0, 30, 1);
+        let mut buf = Buffer::empty(area);
+        widget.render(area, &mut buf);
+
+        let content: String = buf
+            .content()
+            .iter()
+            .map(|c| c.symbol().chars().next().unwrap_or(' '))
+            .collect();
+        // Dot should appear before the name
+        let dot_pos = content.find('\u{25CF}').expect("dot should be present");
+        let name_pos = content.find("deploy").expect("name should be present");
+        assert!(dot_pos < name_pos, "dot should precede name");
+
+        // Dot color should be green (never dimmed)
+        let dot_cell = buf
+            .content()
+            .iter()
+            .find(|c| c.symbol() == "\u{25CF}")
+            .unwrap();
+        assert_eq!(dot_cell.fg, Color::Green);
+    }
+
+    #[test]
+    fn bar_renders_without_dot_when_none() {
+        let bar = make_bar("deploy", BuildStatus::Succeeded, 3);
+        let widget = BarWidget::new(&bar, 10, false);
+        let area = Rect::new(0, 0, 30, 1);
+        let mut buf = Buffer::empty(area);
+        widget.render(area, &mut buf);
+
+        let has_dot = buf.content().iter().any(|c| c.symbol() == "\u{25CF}");
+        assert!(
+            !has_dot,
+            "no dot should be rendered when status_dot is None"
+        );
+    }
+
+    #[test]
+    fn actions_title_no_dots_when_expanded() {
+        let group = make_group("CI", &[BuildStatus::Succeeded, BuildStatus::Running]);
+        let groups = vec![&group];
+        let widget = ActionsTitle::new(&groups, true);
+        let area = Rect::new(0, 0, 40, 1);
+        let mut buf = Buffer::empty(area);
+        widget.render(area, &mut buf);
+
+        let content: String = buf
+            .content()
+            .iter()
+            .map(|c| c.symbol().chars().next().unwrap_or(' '))
+            .collect();
+        assert!(content.contains("GitHub Actions"));
+
+        let dots: Vec<_> = buf
+            .content()
+            .iter()
+            .filter(|c| c.symbol() == "\u{25CF}")
+            .collect();
+        assert_eq!(dots.len(), 0, "expanded title should have no dots");
+    }
+
+    #[test]
+    fn actions_title_dots_when_collapsed() {
+        let group = make_group("CI", &[BuildStatus::Succeeded, BuildStatus::Running]);
+        let groups = vec![&group];
+        let widget = ActionsTitle::new(&groups, false);
+        let area = Rect::new(0, 0, 40, 1);
+        let mut buf = Buffer::empty(area);
+        widget.render(area, &mut buf);
+
+        let dots: Vec<_> = buf
+            .content()
+            .iter()
+            .filter(|c| c.symbol() == "\u{25CF}")
+            .collect();
+        assert_eq!(dots.len(), 2, "collapsed title should show dots");
+    }
+
+    #[test]
+    fn pipelines_title_no_dots_when_expanded() {
+        let g1 = make_pipe_group("pipe-a", BuildStatus::Succeeded);
+        let g2 = make_pipe_group("pipe-b", BuildStatus::Running);
+        let groups = vec![&g1, &g2];
+        let widget = PipelinesTitle::new(&groups, true);
+        let area = Rect::new(0, 0, 40, 1);
+        let mut buf = Buffer::empty(area);
+        widget.render(area, &mut buf);
+
+        let content: String = buf
+            .content()
+            .iter()
+            .map(|c| c.symbol().chars().next().unwrap_or(' '))
+            .collect();
+        assert!(content.contains("CodePipelines"));
+
+        let dots: Vec<_> = buf
+            .content()
+            .iter()
+            .filter(|c| c.symbol() == "\u{25CF}")
+            .collect();
+        assert_eq!(dots.len(), 0, "expanded title should have no dots");
+    }
+
+    #[test]
+    fn pipelines_title_dots_when_collapsed() {
+        let g1 = make_pipe_group("pipe-a", BuildStatus::Succeeded);
+        let g2 = make_pipe_group("pipe-b", BuildStatus::Running);
+        let groups = vec![&g1, &g2];
+        let widget = PipelinesTitle::new(&groups, false);
+        let area = Rect::new(0, 0, 40, 1);
+        let mut buf = Buffer::empty(area);
+        widget.render(area, &mut buf);
+
+        let dots: Vec<_> = buf
+            .content()
+            .iter()
+            .filter(|c| c.symbol() == "\u{25CF}")
+            .collect();
+        assert_eq!(dots.len(), 2, "collapsed title should show dots");
+    }
+
+    #[test]
+    fn bar_dot_never_dimmed() {
+        let bar = make_bar("build", BuildStatus::Running, 3);
+        // dim=true but dot should retain its color
+        let widget = BarWidget::new(&bar, 10, true).with_dot(Color::Yellow);
+        let area = Rect::new(0, 0, 30, 1);
+        let mut buf = Buffer::empty(area);
+        widget.render(area, &mut buf);
+
+        let dot_cell = buf
+            .content()
+            .iter()
+            .find(|c| c.symbol() == "\u{25CF}")
+            .expect("dot should be present");
+        assert_eq!(dot_cell.fg, Color::Yellow, "dot should not be dimmed");
     }
 }

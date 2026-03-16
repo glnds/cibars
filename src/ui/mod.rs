@@ -228,7 +228,10 @@ pub fn run_ui(
                     areas[idx],
                 );
             } else {
-                frame.render_widget(ActionsTitle::new(&sorted_wf_groups), areas[idx]);
+                frame.render_widget(
+                    ActionsTitle::new(&sorted_wf_groups, app.actions_expanded),
+                    areas[idx],
+                );
             }
             idx += 1;
 
@@ -243,8 +246,13 @@ pub fn run_ui(
                 {
                     for bar in group.jobs.iter().filter(|j| !j.gone) {
                         let bar_dim = dim || group.gone;
+                        let dot_color = if group.gone {
+                            Color::DarkGray
+                        } else {
+                            bar.status.color()
+                        };
                         frame.render_widget(
-                            BarWidget::new(bar, job_name_width, bar_dim),
+                            BarWidget::new(bar, job_name_width, bar_dim).with_dot(dot_color),
                             areas[idx],
                         );
                         idx += 1;
@@ -271,14 +279,14 @@ pub fn run_ui(
                     frame.render_widget(sep_line, areas[idx]);
                     idx += 1;
 
-                    // Review workflow bars (dimmed)
+                    // Review workflow bars (dimmed, dots always DarkGray)
                     for group in sorted_wf_groups
                         .iter()
                         .filter(|g| g.category == WorkflowCategory::Review)
                     {
                         for bar in group.jobs.iter().filter(|j| !j.gone) {
                             frame.render_widget(
-                                BarWidget::new(bar, job_name_width, true),
+                                BarWidget::new(bar, job_name_width, true).with_dot(Color::DarkGray),
                                 areas[idx],
                             );
                             idx += 1;
@@ -299,7 +307,10 @@ pub fn run_ui(
                     areas[idx],
                 );
             } else {
-                frame.render_widget(PipelinesTitle::new(&sorted_pipe_groups), areas[idx]);
+                frame.render_widget(
+                    PipelinesTitle::new(&sorted_pipe_groups, app.pipelines_expanded),
+                    areas[idx],
+                );
             }
             idx += 1;
 
@@ -311,15 +322,16 @@ pub fn run_ui(
                     if visible_stages.is_empty() {
                         continue;
                     }
-                    // Pipeline name header
-                    let name_color = if group.gone {
+                    // Pipeline name header with status dot
+                    let dot_color = if group.gone {
                         Color::DarkGray
                     } else {
                         group.summary_status.color()
                     };
                     let header_line = ratatui::text::Line::from(vec![
                         ratatui::text::Span::raw("  "),
-                        ratatui::text::Span::styled(&group.name, Style::default().fg(name_color)),
+                        ratatui::text::Span::styled("\u{25CF} ", Style::default().fg(dot_color)),
+                        ratatui::text::Span::styled(&group.name, Style::default().fg(dot_color)),
                     ]);
                     frame.render_widget(header_line, areas[idx]);
                     idx += 1;
