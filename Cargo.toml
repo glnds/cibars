@@ -14,7 +14,7 @@ clap = { version = "4", features = ["derive"] }
 crossterm = "0.28"
 dirs = "6"
 octocrab = "0.44"
-ratatui = "0.29"
+ratatui = "0.30"
 regex = "1"
 rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs"] }
 serde = { version = "1", features = ["derive"] }
