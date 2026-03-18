@@ -50,7 +50,7 @@ impl Widget for BarWidget<'_> {
             .bar
             .last_finished
             .map(|t| format_finished_time(&t, &chrono::Local));
-        let ts_reserve = if ts_str.is_some() { 6 } else { 0 };
+        let ts_reserve = if ts_str.is_some() { 7 } else { 0 };
 
         let dot_prefix_len = if self.status_dot.is_some() { 2 } else { 0 };
         let name_col = self.name_width + 2;
@@ -81,7 +81,7 @@ impl Widget for BarWidget<'_> {
         spans.push(Span::raw("]"));
         if let Some(ts) = ts_str {
             spans.push(Span::styled(
-                format!(" {ts}"),
+                format!(" {ts} "),
                 Style::default().fg(Color::DarkGray),
             ));
         }
@@ -873,6 +873,35 @@ mod tests {
             .iter()
             .map(|c| c.symbol().chars().next().unwrap_or(' '))
             .collect();
+        let after_bracket = content.split(']').last().unwrap_or("");
+        assert!(
+            after_bracket.contains(':'),
+            "expected HH:MM after bar, got: {content}"
+        );
+    }
+
+    #[test]
+    fn bar_timestamp_has_trailing_space() {
+        use chrono::{TimeZone, Utc};
+        let ts = Utc.with_ymd_and_hms(2026, 3, 18, 14, 28, 0).unwrap();
+        let mut bar = make_bar("build", BuildStatus::Succeeded, 5);
+        bar.last_finished = Some(ts);
+        let widget = BarWidget::new(&bar, 10, false);
+        let area = Rect::new(0, 0, 35, 1);
+        let mut buf = Buffer::empty(area);
+        widget.render(area, &mut buf);
+
+        let content: String = buf
+            .content()
+            .iter()
+            .map(|c| c.symbol().chars().next().unwrap_or(' '))
+            .collect();
+        // Timestamp should end with a trailing space (right margin)
+        assert!(
+            content.ends_with(' '),
+            "expected trailing space after timestamp, got: '{content}'"
+        );
+        // Verify there's still a timestamp present
         let after_bracket = content.split(']').last().unwrap_or("");
         assert!(
             after_bracket.contains(':'),
