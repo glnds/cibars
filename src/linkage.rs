@@ -222,6 +222,9 @@ pub fn apply_links(
         running_links.into_iter().chain(correlated_links).collect();
 
     if all_links.is_empty() {
+        // Still need to set pending_link for linked pipelines
+        let mut a = app.lock().expect("app mutex poisoned");
+        set_pending_links(&mut a, link_map);
         return;
     }
 
@@ -253,6 +256,23 @@ pub fn apply_links(
                     }
                 }
             }
+        }
+    }
+
+    set_pending_links(&mut a, link_map);
+}
+
+/// Set `pending_link` on pipeline groups based on linked workflow state.
+fn set_pending_links(app: &mut App, link_map: &LinkMap) {
+    for pg in &mut app.pipeline_groups {
+        if let Some(wf_name) = link_map.workflow_for_pipeline(&pg.name) {
+            let linked_wf_running = app
+                .workflow_groups
+                .iter()
+                .any(|wg| wg.name == wf_name && wg.summary_status == BuildStatus::Running);
+            pg.pending_link = linked_wf_running && pg.summary_status != BuildStatus::Running;
+        } else {
+            pg.pending_link = false;
         }
     }
 }
@@ -425,6 +445,7 @@ mod tests {
             stages: vec![],
             gone: false,
             summary_status: BuildStatus::Running,
+            pending_link: false,
         });
 
         let mut link_map = LinkMap::new();
@@ -466,6 +487,7 @@ mod tests {
             stages: vec![],
             gone: false,
             summary_status: BuildStatus::Succeeded, // Not Running
+            pending_link: false,
         });
 
         let app = Arc::new(Mutex::new(app));
@@ -508,6 +530,7 @@ mod tests {
             stages: vec![],
             gone: false,
             summary_status: BuildStatus::Running,
+            pending_link: false,
         });
 
         let app = Arc::new(Mutex::new(app));
@@ -544,6 +567,7 @@ mod tests {
                 stages: vec![],
                 gone: false,
                 summary_status: BuildStatus::Running,
+                pending_link: false,
             });
         }
 
@@ -585,6 +609,7 @@ mod tests {
             stages: vec![],
             gone: false,
             summary_status: BuildStatus::Running,
+            pending_link: false,
         });
 
         let app = Arc::new(Mutex::new(app));
@@ -617,6 +642,7 @@ mod tests {
             stages: vec![],
             gone: false,
             summary_status: BuildStatus::Running,
+            pending_link: false,
         });
 
         let app = Arc::new(Mutex::new(app));
@@ -699,6 +725,7 @@ mod tests {
             stages: vec![],
             gone: false,
             summary_status: BuildStatus::Running,
+            pending_link: false,
         });
         let app = Arc::new(Mutex::new(app));
         let mut link_map = LinkMap::new();
@@ -734,6 +761,7 @@ mod tests {
             stages: vec![],
             gone: false,
             summary_status: BuildStatus::Running,
+            pending_link: false,
         });
         let app = Arc::new(Mutex::new(app));
         let mut link_map = LinkMap::new();
@@ -783,5 +811,135 @@ mod tests {
     #[test]
     fn s3_keys_slash_only() {
         assert!(!s3_keys_match("/", "my-app"));
+    }
+
+    // --- pending_link tests ---
+
+    #[test]
+    fn pending_link_set_when_gh_running_cp_idle() {
+        let mut app = App::new();
+        app.workflow_groups.push(WorkflowGroup {
+            name: "CI".into(),
+            jobs: vec![],
+            gone: false,
+            summary_status: BuildStatus::Running,
+            run_id: Some(100),
+            category: WorkflowCategory::default(),
+        });
+        app.pipeline_groups.push(PipelineGroup {
+            name: "deploy-pipe".into(),
+            stages: vec![],
+            gone: false,
+            summary_status: BuildStatus::Idle,
+            pending_link: false,
+        });
+
+        let app = Arc::new(Mutex::new(app));
+        let mut link_map = LinkMap::new();
+        link_map.add_discovered("deploy-pipe".into(), "CI".into(), "b".into(), "k".into());
+
+        apply_links(&app, &mut link_map, &mut HashMap::new());
+
+        let a = app.lock().unwrap();
+        assert!(
+            a.pipeline_groups[0].pending_link,
+            "linked CP should be pending when GH is Running and CP is Idle"
+        );
+    }
+
+    #[test]
+    fn pending_link_cleared_when_cp_running() {
+        let mut app = App::new();
+        let mut job = Bar::new("build".into());
+        job.set_status(BuildStatus::Running);
+        app.workflow_groups.push(WorkflowGroup {
+            name: "CI".into(),
+            jobs: vec![job],
+            gone: false,
+            summary_status: BuildStatus::Running,
+            run_id: Some(100),
+            category: WorkflowCategory::default(),
+        });
+        app.pipeline_groups.push(PipelineGroup {
+            name: "deploy-pipe".into(),
+            stages: vec![],
+            gone: false,
+            summary_status: BuildStatus::Running,
+            pending_link: false,
+        });
+
+        let app = Arc::new(Mutex::new(app));
+        let mut link_map = LinkMap::new();
+        link_map.add_discovered("deploy-pipe".into(), "CI".into(), "b".into(), "k".into());
+
+        apply_links(&app, &mut link_map, &mut HashMap::new());
+
+        let a = app.lock().unwrap();
+        assert!(
+            !a.pipeline_groups[0].pending_link,
+            "pending_link should be false when CP is Running"
+        );
+    }
+
+    #[test]
+    fn pending_link_false_for_unlinked() {
+        let mut app = App::new();
+        app.workflow_groups.push(WorkflowGroup {
+            name: "CI".into(),
+            jobs: vec![],
+            gone: false,
+            summary_status: BuildStatus::Running,
+            run_id: Some(100),
+            category: WorkflowCategory::default(),
+        });
+        app.pipeline_groups.push(PipelineGroup {
+            name: "unlinked-pipe".into(),
+            stages: vec![],
+            gone: false,
+            summary_status: BuildStatus::Idle,
+            pending_link: false,
+        });
+
+        let app = Arc::new(Mutex::new(app));
+        let mut link_map = LinkMap::new(); // no links
+        apply_links(&app, &mut link_map, &mut HashMap::new());
+
+        let a = app.lock().unwrap();
+        assert!(
+            !a.pipeline_groups[0].pending_link,
+            "unlinked pipeline should not have pending_link"
+        );
+    }
+
+    #[test]
+    fn pending_link_false_when_gh_succeeded() {
+        let mut app = App::new();
+        app.workflow_groups.push(WorkflowGroup {
+            name: "CI".into(),
+            jobs: vec![],
+            gone: false,
+            summary_status: BuildStatus::Succeeded,
+            run_id: Some(100),
+            category: WorkflowCategory::default(),
+        });
+        app.pipeline_groups.push(PipelineGroup {
+            name: "deploy-pipe".into(),
+            stages: vec![],
+            gone: false,
+            summary_status: BuildStatus::Idle,
+            pending_link: false,
+        });
+
+        let app = Arc::new(Mutex::new(app));
+        let mut link_map = LinkMap::new();
+        link_map.add_discovered("deploy-pipe".into(), "CI".into(), "b".into(), "k".into());
+
+        apply_links(&app, &mut link_map, &mut HashMap::new());
+
+        let a = app.lock().unwrap();
+        assert!(
+            !a.pipeline_groups[0].pending_link,
+            "pending_link should be false when GH workflow Succeeded"
+        );
     }
 }

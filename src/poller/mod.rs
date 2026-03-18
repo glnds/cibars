@@ -297,6 +297,7 @@ fn update_pipeline_groups(app: &mut App, states: Vec<PipelineState>) {
                 stages: Vec::new(),
                 gone: false,
                 summary_status: state.status,
+                pending_link: false,
             };
             reconcile_bars(&mut group.stages, stage_updates);
             app.pipeline_groups.push(group);
