@@ -33,12 +33,22 @@ No changes to `WorkflowGroup` or `PipelineGroup`.
 
 `reconcile_bars` currently takes `Vec<(String, BuildStatus)>`.
 Change the tuple to `(String, BuildStatus, Option<DateTime<Utc>>)`
-so the timestamp flows from poller data into `Bar`. On update,
-set `bar.last_finished` from the tuple. On new bar creation,
-pass it to `Bar::new()`.
+so the timestamp flows from poller data into `Bar`.
 
-When a bar transitions from completed back to running (new
-execution starts), `last_finished` is cleared to `None`.
+All call sites must be updated:
+
+- `update_pipeline_groups`: `stage_updates` construction passes
+  timestamp from `StageState`
+- `update_workflow_jobs`: `updates` construction passes timestamp
+  from `JobInfo`
+
+Inside `reconcile_bars`, set `bar.last_finished` from the tuple
+value — both for existing bars and new bars. This is the single
+location for setting `last_finished`; no separate clearing logic
+needed. When the poller returns `None` for a running bar, the
+tuple naturally carries `None`, which overwrites any previous
+value. Follow the existing pattern where `Bar::new()` takes only
+a name and fields are set via direct assignment afterward.
 
 ## Poller Changes
 
@@ -54,8 +64,9 @@ jobs, `null` for in-progress jobs. Maps directly to
 Extract `last_status_change` from the last action in the stage
 (the same action that determines stage status via
 `stage_status_from_actions`). Populate `last_finished` only for
-terminal states (Succeeded/Failed/Abandoned). Set `None` for
-InProgress.
+terminal states. Check the mapped `BuildStatus` — both
+`Succeeded` and `Failed` (which includes AWS `Abandoned`)
+are terminal. Set `None` for `Running`/`Idle`.
 
 Convert `aws_smithy_types::DateTime` to `chrono::DateTime<Utc>`
 (e.g., via epoch millis).
@@ -108,7 +119,9 @@ Note: example is schematic, not pixel-accurate.
 ### Unit tests (model)
 
 - `Bar` with `last_finished` set and `None`
-- UTC-to-local formatting logic
+- UTC-to-local formatting: extract formatting into a function
+  that accepts a generic `TimeZone` parameter so tests can use
+  `chrono::FixedOffset` for deterministic output
 
 ### Unit tests (poller mapping)
 
