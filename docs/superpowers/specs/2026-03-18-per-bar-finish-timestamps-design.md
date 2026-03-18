@@ -22,20 +22,43 @@ pub last_finished: Option<DateTime<Utc>>
 
 No changes to `WorkflowGroup` or `PipelineGroup`.
 
+### Intermediate structs
+
+- `JobInfo` (in `poller/mod.rs`) gets
+  `completed_at: Option<DateTime<Utc>>`
+- `ActionState` (in `poller/mod.rs`) gets
+  `last_status_change: Option<DateTime<Utc>>`
+
+### Data flow through `reconcile_bars`
+
+`reconcile_bars` currently takes `Vec<(String, BuildStatus)>`.
+Change the tuple to `(String, BuildStatus, Option<DateTime<Utc>>)`
+so the timestamp flows from poller data into `Bar`. On update,
+set `bar.last_finished` from the tuple. On new bar creation,
+pass it to `Bar::new()`.
+
+When a bar transitions from completed back to running (new
+execution starts), `last_finished` is cleared to `None`.
+
 ## Poller Changes
 
 ### GitHub Actions (`src/poller/github.rs`)
 
-Extract `completed_at` from job response when mapping to `Bar`.
-The GitHub API returns this as ISO 8601 for completed jobs,
-`null` for in-progress jobs. Maps directly to
+Extract `completed_at` from job response when mapping to
+`JobInfo`. The GitHub API returns this as ISO 8601 for completed
+jobs, `null` for in-progress jobs. Maps directly to
 `Option<DateTime<Utc>>`.
 
 ### AWS CodePipeline (`src/poller/aws.rs`)
 
-Extract `last_status_change` from `ActionState::latest_execution`.
-Populate `last_finished` only for terminal states
-(Succeeded/Failed/Abandoned). Set `None` for InProgress.
+Extract `last_status_change` from the last action in the stage
+(the same action that determines stage status via
+`stage_status_from_actions`). Populate `last_finished` only for
+terminal states (Succeeded/Failed/Abandoned). Set `None` for
+InProgress.
+
+Convert `aws_smithy_types::DateTime` to `chrono::DateTime<Utc>`
+(e.g., via epoch millis).
 
 ### Rationale
 
@@ -67,15 +90,18 @@ New layout when `last_finished` is `Some`:
 
 ```text
 GitHub Actions
-  build [||||----] 14:28
-  test  [||------] 14:32
+  build [||||||||] 14:28
+  test  [||||||||] 14:32
 CodePipelines
   * deploy-pipe
-    Source [|||||]  14:25
-    Build  [|||--]
+    Source [|||||||||] 14:25
+    Build  [|||------]
 ```
 
 `Build` has no timestamp because it is still running.
+`build` and `test` are completed so they show finish times.
+
+Note: example is schematic, not pixel-accurate.
 
 ## Testing
 
