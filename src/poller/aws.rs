@@ -95,9 +95,20 @@ impl PipelineClient for AwsPipelineClient {
                             .and_then(|e| e.status())
                             .map(|s| map_action_status(s.as_str()))
                             .unwrap_or(BuildStatus::Idle);
+                        let last_status_change = a
+                            .latest_execution()
+                            .and_then(|e| e.last_status_change())
+                            .and_then(|dt| {
+                                let millis = dt.to_millis().ok()?;
+                                chrono::DateTime::from_timestamp_millis(millis)
+                            });
+                        let last_status_change = match status {
+                            BuildStatus::Succeeded | BuildStatus::Failed => last_status_change,
+                            _ => None,
+                        };
                         ActionState {
                             status,
-                            last_status_change: None,
+                            last_status_change,
                         }
                     })
                     .collect();

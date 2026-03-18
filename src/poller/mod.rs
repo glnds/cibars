@@ -1151,6 +1151,32 @@ mod tests {
     }
 
     #[test]
+    fn stage_status_and_timestamp_for_succeeded() {
+        use chrono::TimeZone;
+        let ts = chrono::Utc
+            .with_ymd_and_hms(2026, 3, 18, 14, 25, 0)
+            .unwrap();
+        let actions = vec![ActionState {
+            status: BuildStatus::Succeeded,
+            last_status_change: Some(ts),
+        }];
+        let (status, timestamp) = stage_status_and_timestamp(&actions);
+        assert_eq!(status, BuildStatus::Succeeded);
+        assert_eq!(timestamp, Some(ts));
+    }
+
+    #[test]
+    fn stage_status_and_timestamp_for_running() {
+        let actions = vec![ActionState {
+            status: BuildStatus::Running,
+            last_status_change: None,
+        }];
+        let (status, timestamp) = stage_status_and_timestamp(&actions);
+        assert_eq!(status, BuildStatus::Running);
+        assert!(timestamp.is_none());
+    }
+
+    #[test]
     fn reconcile_bars_clears_last_finished_on_new_run() {
         use chrono::TimeZone;
         let ts = chrono::Utc
