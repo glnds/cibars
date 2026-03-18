@@ -462,7 +462,7 @@ mod tests {
                         .map(|j| JobInfo {
                             name: j.name.clone(),
                             status: j.status,
-                            completed_at: None,
+                            completed_at: j.completed_at,
                         })
                         .collect()
                 })
@@ -1194,5 +1194,74 @@ mod tests {
             vec![("Build".to_string(), BuildStatus::Running, None)],
         );
         assert!(bars[0].last_finished.is_none());
+    }
+
+    #[tokio::test]
+    async fn poll_preserves_job_timestamp() {
+        use chrono::TimeZone;
+        let ts = chrono::Utc
+            .with_ymd_and_hms(2026, 3, 18, 14, 28, 0)
+            .unwrap();
+        let app = Arc::new(Mutex::new(App::new()));
+        let pipes = MockPipelineClient { pipelines: vec![] };
+        let actions = MockActionsClient {
+            runs: vec![WorkflowRunInfo {
+                workflow_name: "CI".to_string(),
+                run_id: 100,
+                status: BuildStatus::Succeeded,
+                jobs: vec![JobInfo {
+                    name: "build".to_string(),
+                    status: BuildStatus::Succeeded,
+                    completed_at: Some(ts),
+                }],
+            }],
+        };
+        poll_once(&app, &pipes, &actions).await;
+
+        let a = app.lock().unwrap();
+        let job = &a.workflow_groups[0].jobs[0];
+        assert_eq!(job.last_finished, Some(ts));
+    }
+
+    #[tokio::test]
+    async fn poll_clears_timestamp_on_new_run() {
+        use chrono::TimeZone;
+        let ts = chrono::Utc
+            .with_ymd_and_hms(2026, 3, 18, 14, 28, 0)
+            .unwrap();
+        let app = Arc::new(Mutex::new(App::new()));
+        let pipes = MockPipelineClient { pipelines: vec![] };
+
+        let actions = MockActionsClient {
+            runs: vec![WorkflowRunInfo {
+                workflow_name: "CI".to_string(),
+                run_id: 100,
+                status: BuildStatus::Succeeded,
+                jobs: vec![JobInfo {
+                    name: "build".to_string(),
+                    status: BuildStatus::Succeeded,
+                    completed_at: Some(ts),
+                }],
+            }],
+        };
+        poll_once(&app, &pipes, &actions).await;
+
+        let actions = MockActionsClient {
+            runs: vec![WorkflowRunInfo {
+                workflow_name: "CI".to_string(),
+                run_id: 101,
+                status: BuildStatus::Running,
+                jobs: vec![JobInfo {
+                    name: "build".to_string(),
+                    status: BuildStatus::Running,
+                    completed_at: None,
+                }],
+            }],
+        };
+        poll_once(&app, &pipes, &actions).await;
+
+        let a = app.lock().unwrap();
+        let job = &a.workflow_groups[0].jobs[0];
+        assert!(job.last_finished.is_none());
     }
 }
