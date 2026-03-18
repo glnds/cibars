@@ -235,20 +235,25 @@ async fn poll_pipelines(client: &dyn PipelineClient) -> Result<Vec<PipelineState
     futures::future::join_all(futs).await.into_iter().collect()
 }
 
-fn reconcile_bars(bars: &mut Vec<Bar>, updates: Vec<(String, BuildStatus)>) {
-    let seen: HashSet<&str> = updates.iter().map(|(n, _)| n.as_str()).collect();
+fn reconcile_bars(
+    bars: &mut Vec<Bar>,
+    updates: Vec<(String, BuildStatus, Option<chrono::DateTime<chrono::Utc>>)>,
+) {
+    let seen: HashSet<&str> = updates.iter().map(|(n, _, _)| n.as_str()).collect();
     for bar in bars.iter_mut() {
         if !seen.contains(bar.name.as_str()) {
             bar.gone = true;
         }
     }
-    for (name, status) in &updates {
+    for (name, status, finished) in &updates {
         if let Some(bar) = bars.iter_mut().find(|b| b.name == *name) {
             bar.gone = false;
             bar.set_status(*status);
+            bar.last_finished = *finished;
         } else {
             let mut bar = Bar::new(name.clone());
             bar.status = *status;
+            bar.last_finished = *finished;
             bars.push(bar);
         }
     }
@@ -256,17 +261,31 @@ fn reconcile_bars(bars: &mut Vec<Bar>, updates: Vec<(String, BuildStatus)>) {
     let order: std::collections::HashMap<&str, usize> = updates
         .iter()
         .enumerate()
-        .map(|(i, (n, _))| (n.as_str(), i))
+        .map(|(i, (n, _, _))| (n.as_str(), i))
         .collect();
     bars.sort_by_key(|b| order.get(b.name.as_str()).copied().unwrap_or(usize::MAX));
 }
 
 /// Compute stage-level status from the last action in a stage.
+#[allow(dead_code)]
 fn stage_status_from_actions(actions: &[ActionState]) -> BuildStatus {
     actions
         .last()
         .map(|a| a.status)
         .unwrap_or(BuildStatus::Idle)
+}
+
+/// Compute stage-level status and finished timestamp from the last action.
+fn stage_status_and_timestamp(
+    actions: &[ActionState],
+) -> (BuildStatus, Option<chrono::DateTime<chrono::Utc>>) {
+    let last = actions.last();
+    let status = last.map(|a| a.status).unwrap_or(BuildStatus::Idle);
+    let timestamp = match status {
+        BuildStatus::Succeeded | BuildStatus::Failed => last.and_then(|a| a.last_status_change),
+        _ => None,
+    };
+    (status, timestamp)
 }
 
 fn update_pipeline_groups(app: &mut App, states: Vec<PipelineState>) {
@@ -279,10 +298,13 @@ fn update_pipeline_groups(app: &mut App, states: Vec<PipelineState>) {
     }
 
     for state in states {
-        let stage_updates: Vec<(String, BuildStatus)> = state
+        let stage_updates: Vec<_> = state
             .stages
             .iter()
-            .map(|s| (s.name.clone(), stage_status_from_actions(&s.actions)))
+            .map(|s| {
+                let (status, ts) = stage_status_and_timestamp(&s.actions);
+                (s.name.clone(), status, ts)
+            })
             .collect();
 
         if let Some(g) = app
@@ -357,7 +379,10 @@ fn update_workflow_jobs(app: &mut App, workflow_name: &str, jobs: Vec<JobInfo>) 
         None => return,
     };
 
-    let updates: Vec<_> = jobs.into_iter().map(|j| (j.name, j.status)).collect();
+    let updates: Vec<_> = jobs
+        .into_iter()
+        .map(|j| (j.name, j.status, j.completed_at))
+        .collect();
     reconcile_bars(&mut group.jobs, updates);
 }
 
@@ -1007,8 +1032,8 @@ mod tests {
     fn reconcile_bars_new_bar_with_terminal_status_has_zero_fill() {
         let mut bars: Vec<Bar> = vec![];
         let updates = vec![
-            ("Source".to_string(), BuildStatus::Succeeded),
-            ("Build".to_string(), BuildStatus::Failed),
+            ("Source".to_string(), BuildStatus::Succeeded, None),
+            ("Build".to_string(), BuildStatus::Failed, None),
         ];
         reconcile_bars(&mut bars, updates);
 
@@ -1097,12 +1122,51 @@ mod tests {
         bars[1].set_status(BuildStatus::Running);
 
         // Update only contains "alpha"; "beta" should be marked gone
-        let updates = vec![("alpha".to_string(), BuildStatus::Succeeded)];
+        let updates = vec![("alpha".to_string(), BuildStatus::Succeeded, None)];
         reconcile_bars(&mut bars, updates);
 
         let alpha = bars.iter().find(|b| b.name == "alpha").unwrap();
         assert!(!alpha.gone);
         let beta = bars.iter().find(|b| b.name == "beta").unwrap();
         assert!(beta.gone);
+    }
+
+    #[test]
+    fn reconcile_bars_sets_last_finished_from_tuple() {
+        use chrono::TimeZone;
+        let mut bars: Vec<Bar> = vec![];
+        let ts = chrono::Utc
+            .with_ymd_and_hms(2026, 3, 18, 14, 28, 0)
+            .unwrap();
+        let updates = vec![
+            ("Source".to_string(), BuildStatus::Succeeded, Some(ts)),
+            ("Build".to_string(), BuildStatus::Running, None),
+        ];
+        reconcile_bars(&mut bars, updates);
+
+        let source = bars.iter().find(|b| b.name == "Source").unwrap();
+        assert_eq!(source.last_finished, Some(ts));
+        let build = bars.iter().find(|b| b.name == "Build").unwrap();
+        assert!(build.last_finished.is_none());
+    }
+
+    #[test]
+    fn reconcile_bars_clears_last_finished_on_new_run() {
+        use chrono::TimeZone;
+        let ts = chrono::Utc
+            .with_ymd_and_hms(2026, 3, 18, 14, 28, 0)
+            .unwrap();
+        let mut bars: Vec<Bar> = vec![];
+        reconcile_bars(
+            &mut bars,
+            vec![("Build".to_string(), BuildStatus::Succeeded, Some(ts))],
+        );
+        assert_eq!(bars[0].last_finished, Some(ts));
+
+        reconcile_bars(
+            &mut bars,
+            vec![("Build".to_string(), BuildStatus::Running, None)],
+        );
+        assert!(bars[0].last_finished.is_none());
     }
 }
