@@ -1,3 +1,12 @@
+use chrono::{DateTime, TimeZone, Utc};
+
+pub fn format_finished_time<Tz: TimeZone>(time: &DateTime<Utc>, tz: &Tz) -> String
+where
+    Tz::Offset: std::fmt::Display,
+{
+    time.with_timezone(tz).format("%H:%M").to_string()
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BuildStatus {
     Running,
@@ -29,7 +38,7 @@ pub struct Bar {
     /// Pipeline/workflow disappeared from API
     pub gone: bool,
     /// When the last execution finished (Succeeded or Failed)
-    pub last_finished: Option<chrono::DateTime<chrono::Utc>>,
+    pub last_finished: Option<DateTime<Utc>>,
 }
 
 impl Bar {
@@ -543,6 +552,24 @@ mod tests {
         assert_eq!(BuildStatus::Succeeded.color(), Color::Green);
         assert_eq!(BuildStatus::Failed.color(), Color::Red);
         assert_eq!(BuildStatus::Idle.color(), Color::DarkGray);
+    }
+
+    #[test]
+    fn format_finished_time_renders_hh_mm() {
+        use chrono::{FixedOffset, TimeZone as _};
+        let utc_time = Utc.with_ymd_and_hms(2026, 3, 18, 13, 28, 0).unwrap();
+        let offset = FixedOffset::east_opt(3600).unwrap(); // UTC+1
+        let result = format_finished_time(&utc_time, &offset);
+        assert_eq!(result, "14:28");
+    }
+
+    #[test]
+    fn format_finished_time_zero_padded() {
+        use chrono::{FixedOffset, TimeZone as _};
+        let utc_time = Utc.with_ymd_and_hms(2026, 1, 1, 1, 5, 0).unwrap();
+        let offset = FixedOffset::east_opt(0).unwrap(); // UTC
+        let result = format_finished_time(&utc_time, &offset);
+        assert_eq!(result, "01:05");
     }
 
     #[test]
