@@ -109,7 +109,7 @@ impl ActionsClient for GitHubActionsClient {
                 jobs.push(JobInfo {
                     name,
                     status: map_run_status(status, conclusion),
-                    completed_at: None,
+                    completed_at: parse_job_completed_at(job),
                 });
             }
         }
@@ -217,6 +217,14 @@ pub fn parse_workflow_yaml(filename: &str, content: &str) -> Option<WorkflowFile
 
     let s3_uploads = extract_s3_paths(content);
     Some(WorkflowFile { name, s3_uploads })
+}
+
+/// Extract `completed_at` timestamp from a GitHub Actions job JSON object.
+fn parse_job_completed_at(job: &serde_json::Value) -> Option<chrono::DateTime<chrono::Utc>> {
+    job["completed_at"]
+        .as_str()
+        .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+        .map(|dt| dt.with_timezone(&chrono::Utc))
 }
 
 /// Parse workflow runs from a JSON response page into the latest-per-workflow map.
@@ -531,5 +539,36 @@ jobs:
         let mut latest = std::collections::HashMap::new();
         parse_workflow_runs(&resp, &mut latest);
         assert!(latest.contains_key("unknown"));
+    }
+
+    // --- parse_job_completed_at tests ---
+
+    #[test]
+    fn parse_job_completed_at_extracts_timestamp() {
+        use chrono::TimeZone;
+        let job = serde_json::json!({
+            "completed_at": "2026-03-18T14:28:00Z"
+        });
+        let result = parse_job_completed_at(&job);
+        assert_eq!(
+            result,
+            Some(
+                chrono::Utc
+                    .with_ymd_and_hms(2026, 3, 18, 14, 28, 0)
+                    .unwrap()
+            )
+        );
+    }
+
+    #[test]
+    fn parse_job_completed_at_null_is_none() {
+        let job = serde_json::json!({ "completed_at": null });
+        assert!(parse_job_completed_at(&job).is_none());
+    }
+
+    #[test]
+    fn parse_job_completed_at_missing_is_none() {
+        let job = serde_json::json!({});
+        assert!(parse_job_completed_at(&job).is_none());
     }
 }
