@@ -118,6 +118,8 @@ pub struct PipelineGroup {
     pub stages: Vec<Bar>,
     pub gone: bool,
     pub summary_status: BuildStatus,
+    /// True when linked GH workflow is still running but this pipeline hasn't started yet.
+    pub pending_link: bool,
 }
 
 #[cfg(test)]
@@ -467,6 +469,7 @@ mod tests {
             stages: vec![],
             gone: false,
             summary_status: BuildStatus::Idle,
+            pending_link: false,
         };
         assert_eq!(group.name, "deploy-pipe");
         assert!(group.stages.is_empty());
@@ -483,6 +486,7 @@ mod tests {
             ],
             gone: false,
             summary_status: BuildStatus::Running,
+            pending_link: false,
         };
         assert_eq!(group.stages.len(), 2);
         assert_eq!(group.stages[0].name, "Source");
@@ -496,6 +500,7 @@ mod tests {
             stages: vec![],
             gone: false,
             summary_status: BuildStatus::Idle,
+            pending_link: false,
         };
         group.gone = true;
         assert!(group.gone);

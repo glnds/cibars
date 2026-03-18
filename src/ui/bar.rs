@@ -166,7 +166,7 @@ impl Widget for PipelinesTitle<'_> {
 
         if !self.expanded {
             for group in self.groups {
-                let color = if group.gone {
+                let color = if group.gone || group.pending_link {
                     Color::DarkGray
                 } else {
                     group.summary_status.color()
@@ -370,6 +370,7 @@ mod tests {
             stages: vec![],
             gone: false,
             summary_status,
+            pending_link: false,
         }
     }
 
@@ -795,6 +796,52 @@ mod tests {
             .filter(|c| c.symbol() == "\u{25CF}")
             .collect();
         assert_eq!(dots.len(), 2, "collapsed title should show dots");
+    }
+
+    #[test]
+    fn pipelines_title_pending_link_dims_dot() {
+        let mut g = make_pipe_group("pipe", BuildStatus::Succeeded);
+        g.pending_link = true;
+        let groups = vec![&g];
+        let widget = PipelinesTitle::new(&groups, false);
+        let area = Rect::new(0, 0, 40, 1);
+        let mut buf = Buffer::empty(area);
+        widget.render(area, &mut buf);
+
+        let dots: Vec<_> = buf
+            .content()
+            .iter()
+            .filter(|c| c.symbol() == "\u{25CF}")
+            .collect();
+        assert_eq!(dots.len(), 1);
+        assert_eq!(
+            dots[0].fg,
+            Color::DarkGray,
+            "pending_link should dim the dot to DarkGray"
+        );
+    }
+
+    #[test]
+    fn pipelines_title_pending_link_cleared_shows_status() {
+        let mut g = make_pipe_group("pipe", BuildStatus::Succeeded);
+        g.pending_link = false;
+        let groups = vec![&g];
+        let widget = PipelinesTitle::new(&groups, false);
+        let area = Rect::new(0, 0, 40, 1);
+        let mut buf = Buffer::empty(area);
+        widget.render(area, &mut buf);
+
+        let dots: Vec<_> = buf
+            .content()
+            .iter()
+            .filter(|c| c.symbol() == "\u{25CF}")
+            .collect();
+        assert_eq!(dots.len(), 1);
+        assert_eq!(
+            dots[0].fg,
+            Color::Green,
+            "without pending_link, dot should show status color"
+        );
     }
 
     #[test]

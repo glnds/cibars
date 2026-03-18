@@ -323,7 +323,7 @@ pub fn run_ui(
                         continue;
                     }
                     // Pipeline name header with status dot
-                    let dot_color = if group.gone {
+                    let dot_color = if group.gone || group.pending_link {
                         Color::DarkGray
                     } else {
                         group.summary_status.color()
@@ -337,7 +337,7 @@ pub fn run_ui(
                     idx += 1;
                     // Stage bars
                     for bar in &visible_stages {
-                        let bar_dim = dim || group.gone;
+                        let bar_dim = dim || group.gone || group.pending_link;
                         frame.render_widget(
                             BarWidget::new(bar, stage_name_width, bar_dim),
                             areas[idx],
@@ -533,12 +533,14 @@ mod tests {
                 stages: vec![],
                 gone: false,
                 summary_status: BuildStatus::Idle,
+                pending_link: false,
             },
             PipelineGroup {
                 name: "aaa-running".to_string(),
                 stages: vec![make_test_bar("Build", BuildStatus::Running)],
                 gone: false,
                 summary_status: BuildStatus::Running,
+                pending_link: false,
             },
         ];
         let sorted = sorted_pipeline_groups(&groups);
@@ -618,6 +620,7 @@ mod tests {
             ],
             gone: false,
             summary_status: BuildStatus::Idle,
+            pending_link: false,
         }];
         assert_eq!(all_pipeline_stages_name_width(&groups), 10); // 6 + 4
     }

@@ -103,6 +103,7 @@ mod tests {
             stages: vec![],
             gone: false,
             summary_status: BuildStatus::Running,
+            pending_link: false,
         });
         assert!(app.has_any_running());
     }
@@ -117,6 +118,7 @@ mod tests {
             stages: vec![stage],
             gone: false,
             summary_status: BuildStatus::Succeeded,
+            pending_link: false,
         });
         assert!(app.has_any_running());
     }
@@ -170,6 +172,7 @@ mod tests {
             stages: vec![],
             gone: false,
             summary_status: BuildStatus::Succeeded,
+            pending_link: false,
         });
         app.workflow_groups.push(WorkflowGroup {
             name: "CI".into(),
@@ -190,12 +193,14 @@ mod tests {
             stages: vec![],
             gone: false,
             summary_status: BuildStatus::Succeeded,
+            pending_link: false,
         });
         app.pipeline_groups.push(PipelineGroup {
             name: "p2".into(),
             stages: vec![],
             gone: false,
             summary_status: BuildStatus::Failed,
+            pending_link: false,
         });
         assert!(!app.has_any_running());
         // Now add one with a running stage
@@ -206,6 +211,7 @@ mod tests {
             stages: vec![stage],
             gone: false,
             summary_status: BuildStatus::Idle,
+            pending_link: false,
         });
         assert!(app.has_any_running());
     }
