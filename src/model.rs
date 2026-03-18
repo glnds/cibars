@@ -57,12 +57,12 @@ impl Bar {
             BuildStatus::Succeeded | BuildStatus::Failed => {
                 if self.status != status {
                     tracing::debug!(bar = %self.name, from = ?self.status, to = ?status, "status change");
-                }
-                // Guarantee minimum 1-bar fill for any terminal transition,
-                // including Idle→Succeeded (fast stages like Source).
-                if self.fill == 0 {
-                    self.fill = 1;
-                    self.write_pos = 1;
+                    // Guarantee minimum 1-bar fill for real terminal transitions
+                    // (e.g. Idle→Succeeded for fast-completing stages like Source).
+                    if self.fill == 0 {
+                        self.fill = 1;
+                        self.write_pos = 1;
+                    }
                 }
                 self.status = status;
             }
@@ -266,6 +266,27 @@ mod tests {
         assert_eq!(bar.fill, 3);
         assert_eq!(bar.write_pos, 3);
         assert_eq!(bar.status, BuildStatus::Succeeded);
+    }
+
+    #[test]
+    fn set_status_succeeded_reapplied_keeps_zero_fill() {
+        let mut bar = make_bar();
+        // Simulate reconcile_bars first-poll: direct field assignment
+        bar.status = BuildStatus::Succeeded;
+        // fill stays 0 (no set_status call on first poll for new bars)
+        assert_eq!(bar.fill, 0);
+        // Second poll: set_status re-applies same status
+        bar.set_status(BuildStatus::Succeeded);
+        assert_eq!(bar.fill, 0, "re-applying same status should not bump fill");
+    }
+
+    #[test]
+    fn set_status_failed_reapplied_keeps_zero_fill() {
+        let mut bar = make_bar();
+        bar.status = BuildStatus::Failed;
+        assert_eq!(bar.fill, 0);
+        bar.set_status(BuildStatus::Failed);
+        assert_eq!(bar.fill, 0, "re-applying same status should not bump fill");
     }
 
     #[test]
