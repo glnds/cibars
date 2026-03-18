@@ -266,15 +266,6 @@ fn reconcile_bars(
     bars.sort_by_key(|b| order.get(b.name.as_str()).copied().unwrap_or(usize::MAX));
 }
 
-/// Compute stage-level status from the last action in a stage.
-#[allow(dead_code)]
-fn stage_status_from_actions(actions: &[ActionState]) -> BuildStatus {
-    actions
-        .last()
-        .map(|a| a.status)
-        .unwrap_or(BuildStatus::Idle)
-}
-
 /// Compute stage-level status and finished timestamp from the last action.
 fn stage_status_and_timestamp(
     actions: &[ActionState],
@@ -1021,11 +1012,6 @@ mod tests {
             a.warnings[0]
         );
         assert!(a.warnings[0].contains("my-profile"));
-    }
-
-    #[test]
-    fn stage_status_from_empty_actions_is_idle() {
-        assert_eq!(stage_status_from_actions(&[]), BuildStatus::Idle);
     }
 
     #[test]

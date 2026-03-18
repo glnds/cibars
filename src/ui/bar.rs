@@ -4,7 +4,7 @@ use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Widget;
 
-use crate::model::{Bar, PipelineGroup, WorkflowCategory, WorkflowGroup};
+use crate::model::{format_finished_time, Bar, PipelineGroup, WorkflowCategory, WorkflowGroup};
 
 /// Max chars for the name column
 pub const MAX_NAME_WIDTH: usize = 30;
@@ -46,10 +46,10 @@ impl Widget for BarWidget<'_> {
             return;
         }
 
-        let ts_str = self.bar.last_finished.map(|t| {
-            use crate::model::format_finished_time;
-            format_finished_time(&t, &chrono::Local)
-        });
+        let ts_str = self
+            .bar
+            .last_finished
+            .map(|t| format_finished_time(&t, &chrono::Local));
         let ts_reserve = if ts_str.is_some() { 6 } else { 0 };
 
         let dot_prefix_len = if self.status_dot.is_some() { 2 } else { 0 };

@@ -1,6 +1,5 @@
 use chrono::{DateTime, TimeZone, Utc};
 
-#[allow(dead_code)]
 pub fn format_finished_time<Tz: TimeZone>(time: &DateTime<Utc>, tz: &Tz) -> String
 where
     Tz::Offset: std::fmt::Display,
