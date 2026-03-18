@@ -95,7 +95,10 @@ impl PipelineClient for AwsPipelineClient {
                             .and_then(|e| e.status())
                             .map(|s| map_action_status(s.as_str()))
                             .unwrap_or(BuildStatus::Idle);
-                        ActionState { status }
+                        ActionState {
+                            status,
+                            last_status_change: None,
+                        }
                     })
                     .collect();
                 StageState {

@@ -109,6 +109,7 @@ impl ActionsClient for GitHubActionsClient {
                 jobs.push(JobInfo {
                     name,
                     status: map_run_status(status, conclusion),
+                    completed_at: None,
                 });
             }
         }

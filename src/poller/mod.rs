@@ -30,6 +30,7 @@ pub struct StageState {
 
 pub struct ActionState {
     pub status: BuildStatus,
+    pub last_status_change: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 /// Pipeline definition (source config), from GetPipeline API.
@@ -47,6 +48,7 @@ pub struct S3Source {
 pub struct JobInfo {
     pub name: String,
     pub status: BuildStatus,
+    pub completed_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 /// Parsed GH workflow file with S3 upload targets.
@@ -388,7 +390,10 @@ mod tests {
                             actions: s
                                 .actions
                                 .iter()
-                                .map(|a| ActionState { status: a.status })
+                                .map(|a| ActionState {
+                                    status: a.status,
+                                    last_status_change: None,
+                                })
                                 .collect(),
                         })
                         .collect(),
@@ -432,6 +437,7 @@ mod tests {
                         .map(|j| JobInfo {
                             name: j.name.clone(),
                             status: j.status,
+                            completed_at: None,
                         })
                         .collect()
                 })
@@ -456,7 +462,10 @@ mod tests {
             name: name.to_string(),
             actions: actions
                 .into_iter()
-                .map(|(_n, s)| ActionState { status: s })
+                .map(|(_n, s)| ActionState {
+                    status: s,
+                    last_status_change: None,
+                })
                 .collect(),
         }
     }
@@ -482,6 +491,7 @@ mod tests {
                 jobs: vec![JobInfo {
                     name: "build".to_string(),
                     status: BuildStatus::Succeeded,
+                    completed_at: None,
                 }],
             }],
         };
@@ -617,10 +627,12 @@ mod tests {
                     JobInfo {
                         name: "build".to_string(),
                         status: BuildStatus::Succeeded,
+                        completed_at: None,
                     },
                     JobInfo {
                         name: "test".to_string(),
                         status: BuildStatus::Running,
+                        completed_at: None,
                     },
                 ],
             }],
@@ -843,10 +855,12 @@ mod tests {
                     JobInfo {
                         name: "build".to_string(),
                         status: BuildStatus::Running,
+                        completed_at: None,
                     },
                     JobInfo {
                         name: "test".to_string(),
                         status: BuildStatus::Running,
+                        completed_at: None,
                     },
                 ],
             }],
@@ -862,6 +876,7 @@ mod tests {
                 jobs: vec![JobInfo {
                     name: "build".to_string(),
                     status: BuildStatus::Succeeded,
+                    completed_at: None,
                 }],
             }],
         };
@@ -917,6 +932,7 @@ mod tests {
                 Ok(vec![JobInfo {
                     name: "deploy-job".into(),
                     status: BuildStatus::Succeeded,
+                    completed_at: None,
                 }])
             }
         }
@@ -1045,6 +1061,33 @@ mod tests {
 
         assert_eq!(app.workflow_groups[0].category, WorkflowCategory::CI);
         assert_eq!(app.workflow_groups[1].category, WorkflowCategory::Review);
+    }
+
+    #[test]
+    fn action_state_carries_timestamp() {
+        use chrono::TimeZone;
+        let ts = chrono::Utc
+            .with_ymd_and_hms(2026, 3, 18, 14, 25, 0)
+            .unwrap();
+        let action = ActionState {
+            status: BuildStatus::Succeeded,
+            last_status_change: Some(ts),
+        };
+        assert_eq!(action.last_status_change, Some(ts));
+    }
+
+    #[test]
+    fn job_info_carries_completed_at() {
+        use chrono::TimeZone;
+        let ts = chrono::Utc
+            .with_ymd_and_hms(2026, 3, 18, 14, 28, 0)
+            .unwrap();
+        let job = JobInfo {
+            name: "build".to_string(),
+            status: BuildStatus::Succeeded,
+            completed_at: Some(ts),
+        };
+        assert_eq!(job.completed_at, Some(ts));
     }
 
     #[test]
