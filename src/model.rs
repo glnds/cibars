@@ -28,6 +28,8 @@ pub struct Bar {
     pub write_pos: usize,
     /// Pipeline/workflow disappeared from API
     pub gone: bool,
+    /// When the last execution finished (Succeeded or Failed)
+    pub last_finished: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 impl Bar {
@@ -38,6 +40,7 @@ impl Bar {
             fill: 0,
             write_pos: 0,
             gone: false,
+            last_finished: None,
         }
     }
 
@@ -412,6 +415,12 @@ mod tests {
         bar.tick(0);
         assert_eq!(bar.fill, 0);
         assert_eq!(bar.write_pos, 0);
+    }
+
+    #[test]
+    fn new_bar_has_no_last_finished() {
+        let bar = make_bar();
+        assert!(bar.last_finished.is_none());
     }
 
     // --- WorkflowCategory tests ---

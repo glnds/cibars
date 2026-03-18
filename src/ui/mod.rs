@@ -441,6 +441,7 @@ mod tests {
             fill: 0,
             write_pos: 0,
             gone: false,
+            last_finished: None,
         }
     }
 

@@ -191,6 +191,7 @@ mod tests {
             fill,
             write_pos: fill,
             gone: false,
+            last_finished: None,
         }
     }
 
