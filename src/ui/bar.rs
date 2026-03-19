@@ -50,7 +50,7 @@ impl Widget for BarWidget<'_> {
             .bar
             .last_finished
             .map(|t| format_finished_time(&t, &chrono::Local));
-        let ts_reserve = if ts_str.is_some() { 7 } else { 0 };
+        let ts_reserve = 7; // always reserve space for timestamp stability
 
         let dot_prefix_len = if self.status_dot.is_some() { 2 } else { 0 };
         let name_col = self.name_width + 2;
@@ -79,11 +79,12 @@ impl Widget for BarWidget<'_> {
         spans.push(Span::styled("|".repeat(filled), Style::default().fg(color)));
         spans.push(Span::raw(" ".repeat(empty)));
         spans.push(Span::raw("]"));
-        if let Some(ts) = ts_str {
-            spans.push(Span::styled(
+        match ts_str {
+            Some(ts) => spans.push(Span::styled(
                 format!(" {ts} "),
                 Style::default().fg(Color::DarkGray),
-            ));
+            )),
+            None => spans.push(Span::raw("       ")), // 7 spaces
         }
 
         Line::from(spans).render(area, buf);
@@ -222,7 +223,7 @@ mod tests {
             .collect();
         assert!(content.starts_with("deploy"));
         assert!(content.contains('['));
-        assert!(content.ends_with(']'));
+        assert!(content.contains(']'));
     }
 
     #[test]
@@ -586,7 +587,7 @@ mod tests {
             .map(|c| c.symbol().chars().next().unwrap_or(' '))
             .collect();
         assert!(content.contains('['));
-        assert!(content.ends_with(']'));
+        assert!(content.contains(']'));
     }
 
     #[test]
@@ -926,6 +927,53 @@ mod tests {
         assert!(
             !after_bracket.contains(':'),
             "no timestamp expected, got: {content}"
+        );
+    }
+
+    #[test]
+    fn bars_with_and_without_timestamp_have_same_bracket_positions() {
+        use chrono::{TimeZone, Utc};
+
+        let ts = Utc.with_ymd_and_hms(2026, 3, 18, 14, 28, 0).unwrap();
+        let mut bar_with_ts = make_bar("build", BuildStatus::Succeeded, 5);
+        bar_with_ts.last_finished = Some(ts);
+        let bar_without_ts = make_bar("build", BuildStatus::Succeeded, 5);
+
+        let area = Rect::new(0, 0, 40, 1);
+
+        let mut buf_with = Buffer::empty(area);
+        BarWidget::new(&bar_with_ts, 10, false).render(area, &mut buf_with);
+        let bracket_open_with = buf_with
+            .content()
+            .iter()
+            .position(|c| c.symbol() == "[")
+            .unwrap();
+        let bracket_close_with = buf_with
+            .content()
+            .iter()
+            .position(|c| c.symbol() == "]")
+            .unwrap();
+
+        let mut buf_without = Buffer::empty(area);
+        BarWidget::new(&bar_without_ts, 10, false).render(area, &mut buf_without);
+        let bracket_open_without = buf_without
+            .content()
+            .iter()
+            .position(|c| c.symbol() == "[")
+            .unwrap();
+        let bracket_close_without = buf_without
+            .content()
+            .iter()
+            .position(|c| c.symbol() == "]")
+            .unwrap();
+
+        assert_eq!(
+            bracket_open_with, bracket_open_without,
+            "opening bracket should be at same position"
+        );
+        assert_eq!(
+            bracket_close_with, bracket_close_without,
+            "closing bracket should be at same position (stable bar length)"
         );
     }
 
