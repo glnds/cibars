@@ -376,7 +376,7 @@ pub fn run_ui(
                 let width = a.terminal_width as usize;
 
                 let pipe_stage_name_width = all_pipeline_stages_name_width(&a.pipeline_groups);
-                let pipe_fill_width = width.saturating_sub(pipe_stage_name_width + 4);
+                let pipe_fill_width = width.saturating_sub(pipe_stage_name_width + 4 + 7);
                 for group in &mut a.pipeline_groups {
                     for stage in &mut group.stages {
                         stage.tick(pipe_fill_width);
@@ -384,7 +384,7 @@ pub fn run_ui(
                 }
 
                 let job_name_width = all_jobs_name_width(&a.workflow_groups);
-                let job_fill_width = width.saturating_sub(job_name_width + 4);
+                let job_fill_width = width.saturating_sub(job_name_width + 4 + 7);
                 for group in &mut a.workflow_groups {
                     for job in &mut group.jobs {
                         job.tick(job_fill_width);
