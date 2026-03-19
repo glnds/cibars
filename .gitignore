@@ -3,3 +3,4 @@
 docs/plans/
 config.toml
 .worktrees/
+.superpowers/
