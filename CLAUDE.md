@@ -1,5 +1,9 @@
 # cibars Development Guide
 
+## !!! TRUNK-BASED DEV — NO BRANCHES, NO PRs !!!
+
+**Commit and push directly to `master`. NEVER create feature branches or pull requests.**
+
 ## Stack
 
 - **Language:** Rust (stable toolchain)
