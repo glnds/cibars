@@ -254,11 +254,17 @@ fn parse_workflow_runs(
                 }
             };
 
+            let head_branch = run["head_branch"].as_str().unwrap_or("");
+
+            // Always skip dependabot branch runs
+            if head_branch.starts_with("dependabot/") {
+                continue;
+            }
+
             // Filter by head_branch when a branch filter is configured.
             // The API &branch= param also returns PR runs targeting the branch,
             // so we need client-side filtering on head_branch.
             if let Some(filter) = branch_filter {
-                let head_branch = run["head_branch"].as_str().unwrap_or("");
                 if head_branch != filter {
                     continue;
                 }
@@ -594,11 +600,26 @@ jobs:
     }
 
     #[test]
-    fn parse_no_branch_filter_keeps_all() {
+    fn parse_no_branch_filter_still_excludes_dependabot() {
         let resp = serde_json::json!({
             "workflow_runs": [
                 {"name": "CI", "id": 10, "status": "completed", "conclusion": "success", "head_branch": "master"},
                 {"name": "Deploy", "id": 9, "status": "completed", "conclusion": "success", "head_branch": "dependabot/npm/lodash"}
+            ]
+        });
+        let mut latest = std::collections::HashMap::new();
+        parse_workflow_runs(&resp, &mut latest, None);
+        // dependabot branch runs should always be excluded
+        assert_eq!(latest.len(), 1);
+        assert!(latest.contains_key("CI"));
+    }
+
+    #[test]
+    fn parse_no_branch_filter_keeps_non_dependabot() {
+        let resp = serde_json::json!({
+            "workflow_runs": [
+                {"name": "CI", "id": 10, "status": "completed", "conclusion": "success", "head_branch": "master"},
+                {"name": "Deploy", "id": 9, "status": "completed", "conclusion": "success", "head_branch": "feature/foo"}
             ]
         });
         let mut latest = std::collections::HashMap::new();
