@@ -254,10 +254,9 @@ fn parse_workflow_runs(
                 }
             };
 
-            let head_branch = run["head_branch"].as_str().unwrap_or("");
-
-            // Always skip dependabot branch runs
-            if head_branch.starts_with("dependabot/") {
+            // Skip all bot-triggered runs (dependabot, etc.)
+            let actor = run["actor"]["login"].as_str().unwrap_or("");
+            if actor.ends_with("[bot]") {
                 continue;
             }
 
@@ -265,6 +264,7 @@ fn parse_workflow_runs(
             // The API &branch= param also returns PR runs targeting the branch,
             // so we need client-side filtering on head_branch.
             if let Some(filter) = branch_filter {
+                let head_branch = run["head_branch"].as_str().unwrap_or("");
                 if head_branch != filter {
                     continue;
                 }
@@ -589,8 +589,8 @@ jobs:
     fn parse_filters_by_head_branch() {
         let resp = serde_json::json!({
             "workflow_runs": [
-                {"name": "CI", "id": 10, "status": "completed", "conclusion": "success", "head_branch": "master"},
-                {"name": "CI", "id": 9, "status": "completed", "conclusion": "failure", "head_branch": "dependabot/npm/lodash-4.17.21"}
+                {"name": "CI", "id": 10, "status": "completed", "conclusion": "success", "head_branch": "master", "actor": {"login": "glnds"}},
+                {"name": "CI", "id": 9, "status": "completed", "conclusion": "failure", "head_branch": "feature/foo", "actor": {"login": "glnds"}}
             ]
         });
         let mut latest = std::collections::HashMap::new();
@@ -600,26 +600,26 @@ jobs:
     }
 
     #[test]
-    fn parse_no_branch_filter_still_excludes_dependabot() {
+    fn parse_skips_bot_actors() {
         let resp = serde_json::json!({
             "workflow_runs": [
-                {"name": "CI", "id": 10, "status": "completed", "conclusion": "success", "head_branch": "master"},
-                {"name": "Deploy", "id": 9, "status": "completed", "conclusion": "success", "head_branch": "dependabot/npm/lodash"}
+                {"name": "CI", "id": 10, "status": "completed", "conclusion": "success", "head_branch": "master", "actor": {"login": "glnds"}},
+                {"name": "pip in /backend - Update #123", "id": 9, "status": "completed", "conclusion": "success", "head_branch": "master", "actor": {"login": "dependabot[bot]"}},
+                {"name": "CI", "id": 8, "status": "completed", "conclusion": "failure", "head_branch": "dependabot/npm/lodash", "actor": {"login": "dependabot[bot]"}}
             ]
         });
         let mut latest = std::collections::HashMap::new();
         parse_workflow_runs(&resp, &mut latest, None);
-        // dependabot branch runs should always be excluded
         assert_eq!(latest.len(), 1);
         assert!(latest.contains_key("CI"));
     }
 
     #[test]
-    fn parse_no_branch_filter_keeps_non_dependabot() {
+    fn parse_keeps_human_actors() {
         let resp = serde_json::json!({
             "workflow_runs": [
-                {"name": "CI", "id": 10, "status": "completed", "conclusion": "success", "head_branch": "master"},
-                {"name": "Deploy", "id": 9, "status": "completed", "conclusion": "success", "head_branch": "feature/foo"}
+                {"name": "CI", "id": 10, "status": "completed", "conclusion": "success", "head_branch": "master", "actor": {"login": "glnds"}},
+                {"name": "Deploy", "id": 9, "status": "completed", "conclusion": "success", "head_branch": "feature/foo", "actor": {"login": "coworker"}}
             ]
         });
         let mut latest = std::collections::HashMap::new();
