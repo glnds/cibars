@@ -144,8 +144,17 @@ to give immediate visibility into current status.
 ```bash
 git clone https://github.com/glnds/cibars
 cd cibars
-cargo build --release
-cp target/release/cibars ~/.local/bin/
+cargo install --path .
+```
+
+### macOS Tahoe+ code signing
+
+macOS 26 (Tahoe) and later may block adhoc-signed binaries via
+AppleSystemPolicy. If `cibars` gets killed by SIGKILL on startup,
+re-sign the binary:
+
+```bash
+codesign -s - --force ~/.cargo/bin/cibars
 ```
 
 ## Recommended tmux setup
