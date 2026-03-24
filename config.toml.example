@@ -4,6 +4,7 @@
 aws_profile = "your-aws-profile"   # AWS CLI profile name
 region = "eu-west-1"               # AWS region
 github_repo = "owner/repo"         # GitHub repo (owner/name)
+# branch = "master"                # filter GitHub Actions to this branch only
 
 # [workflow_categories]
 # review = ["Claude Code Review"]

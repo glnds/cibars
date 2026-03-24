@@ -119,8 +119,12 @@ async fn run_poll_orchestrator(
         .github_repo
         .split_once('/')
         .context("github-repo missing '/'; should have been validated in config")?;
-    let gh_client =
-        poller::github::GitHubActionsClient::new(&token, owner.to_string(), repo.to_string())?;
+    let gh_client = poller::github::GitHubActionsClient::new(
+        &token,
+        owner.to_string(),
+        repo.to_string(),
+        config.branch.clone(),
+    )?;
 
     let mut aws_client: Option<poller::aws::AwsPipelineClient> = None;
     let mut scheduler = PollScheduler::new();

@@ -8,10 +8,11 @@ pub struct GitHubActionsClient {
     octocrab: octocrab::Octocrab,
     owner: String,
     repo: String,
+    branch: Option<String>,
 }
 
 impl GitHubActionsClient {
-    pub fn new(token: &str, owner: String, repo: String) -> Result<Self> {
+    pub fn new(token: &str, owner: String, repo: String, branch: Option<String>) -> Result<Self> {
         let octocrab = octocrab::Octocrab::builder()
             .personal_token(token.to_string())
             .build()
@@ -20,8 +21,19 @@ impl GitHubActionsClient {
             octocrab,
             owner,
             repo,
+            branch,
         })
     }
+}
+
+/// Build the API route for listing workflow runs, optionally filtered by branch.
+fn build_runs_route(owner: &str, repo: &str, page: u32, branch: Option<&str>) -> String {
+    let mut route = format!("/repos/{owner}/{repo}/actions/runs?per_page=100&page={page}");
+    if let Some(b) = branch {
+        route.push_str("&branch=");
+        route.push_str(b);
+    }
+    route
 }
 
 /// Map GitHub run status + conclusion to BuildStatus.
@@ -49,10 +61,7 @@ impl ActionsClient for GitHubActionsClient {
         const MAX_PAGES: u32 = 20;
 
         loop {
-            let route = format!(
-                "/repos/{}/{}/actions/runs?per_page=100&page={page}",
-                self.owner, self.repo,
-            );
+            let route = build_runs_route(&self.owner, &self.repo, page, self.branch.as_deref());
             let resp: serde_json::Value = self
                 .octocrab
                 .get(&route, None::<&()>)
@@ -261,6 +270,32 @@ fn parse_workflow_runs(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // --- build_runs_route tests ---
+
+    #[test]
+    fn build_runs_route_no_branch() {
+        let route = build_runs_route("owner", "repo", 1, None);
+        assert_eq!(route, "/repos/owner/repo/actions/runs?per_page=100&page=1");
+    }
+
+    #[test]
+    fn build_runs_route_with_branch() {
+        let route = build_runs_route("owner", "repo", 1, Some("master"));
+        assert_eq!(
+            route,
+            "/repos/owner/repo/actions/runs?per_page=100&page=1&branch=master"
+        );
+    }
+
+    #[test]
+    fn build_runs_route_page_2() {
+        let route = build_runs_route("o", "r", 2, Some("main"));
+        assert_eq!(
+            route,
+            "/repos/o/r/actions/runs?per_page=100&page=2&branch=main"
+        );
+    }
 
     #[test]
     fn parse_skips_run_with_missing_id() {
