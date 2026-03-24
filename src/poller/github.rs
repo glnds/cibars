@@ -68,7 +68,7 @@ impl ActionsClient for GitHubActionsClient {
                 .await
                 .context("failed to list workflow runs")?;
 
-            parse_workflow_runs(&resp, &mut latest_per_workflow);
+            parse_workflow_runs(&resp, &mut latest_per_workflow, self.branch.as_deref());
 
             let total_count = resp["total_count"].as_u64().unwrap_or(0);
             let fetched = resp["workflow_runs"]
@@ -238,9 +238,11 @@ fn parse_job_completed_at(job: &serde_json::Value) -> Option<chrono::DateTime<ch
 
 /// Parse workflow runs from a JSON response page into the latest-per-workflow map.
 /// Skips runs with missing IDs (logs a warning).
+/// When `branch_filter` is Some, only runs whose `head_branch` matches are kept.
 fn parse_workflow_runs(
     resp: &serde_json::Value,
     latest: &mut std::collections::HashMap<String, (u64, BuildStatus)>,
+    branch_filter: Option<&str>,
 ) {
     if let Some(runs) = resp["workflow_runs"].as_array() {
         for run in runs {
@@ -251,6 +253,17 @@ fn parse_workflow_runs(
                     continue;
                 }
             };
+
+            // Filter by head_branch when a branch filter is configured.
+            // The API &branch= param also returns PR runs targeting the branch,
+            // so we need client-side filtering on head_branch.
+            if let Some(filter) = branch_filter {
+                let head_branch = run["head_branch"].as_str().unwrap_or("");
+                if head_branch != filter {
+                    continue;
+                }
+            }
+
             let status = run["status"].as_str().unwrap_or("unknown");
             let conclusion = run["conclusion"].as_str();
 
@@ -307,7 +320,7 @@ mod tests {
             ]
         });
         let mut latest = std::collections::HashMap::new();
-        parse_workflow_runs(&resp, &mut latest);
+        parse_workflow_runs(&resp, &mut latest, None);
         assert_eq!(latest.len(), 1);
         assert!(latest.contains_key("Deploy"));
         assert!(!latest.contains_key("CI"));
@@ -322,7 +335,7 @@ mod tests {
             ]
         });
         let mut latest = std::collections::HashMap::new();
-        parse_workflow_runs(&resp, &mut latest);
+        parse_workflow_runs(&resp, &mut latest, None);
         assert!(latest.is_empty());
     }
 
@@ -336,7 +349,7 @@ mod tests {
             ]
         });
         let mut latest = std::collections::HashMap::new();
-        parse_workflow_runs(&resp, &mut latest);
+        parse_workflow_runs(&resp, &mut latest, None);
         assert_eq!(latest.len(), 1);
         assert_eq!(latest["CI"].0, 10);
         assert_eq!(latest["CI"].1, BuildStatus::Succeeded);
@@ -532,7 +545,7 @@ jobs:
             ]
         });
         let mut latest = std::collections::HashMap::new();
-        parse_workflow_runs(&resp, &mut latest);
+        parse_workflow_runs(&resp, &mut latest, None);
         assert_eq!(latest.len(), 1);
         assert!(latest.contains_key("CI"));
         assert!(!latest.contains_key("Claude Code"));
@@ -547,7 +560,7 @@ jobs:
             ]
         });
         let mut latest = std::collections::HashMap::new();
-        parse_workflow_runs(&resp, &mut latest);
+        parse_workflow_runs(&resp, &mut latest, None);
         assert_eq!(latest.len(), 1);
         assert_eq!(latest["CI"].0, 49);
         assert_eq!(latest["CI"].1, BuildStatus::Succeeded);
@@ -562,8 +575,35 @@ jobs:
             ]
         });
         let mut latest = std::collections::HashMap::new();
-        parse_workflow_runs(&resp, &mut latest);
+        parse_workflow_runs(&resp, &mut latest, None);
         assert!(latest.is_empty());
+    }
+
+    #[test]
+    fn parse_filters_by_head_branch() {
+        let resp = serde_json::json!({
+            "workflow_runs": [
+                {"name": "CI", "id": 10, "status": "completed", "conclusion": "success", "head_branch": "master"},
+                {"name": "CI", "id": 9, "status": "completed", "conclusion": "failure", "head_branch": "dependabot/npm/lodash-4.17.21"}
+            ]
+        });
+        let mut latest = std::collections::HashMap::new();
+        parse_workflow_runs(&resp, &mut latest, Some("master"));
+        assert_eq!(latest.len(), 1);
+        assert_eq!(latest["CI"].0, 10);
+    }
+
+    #[test]
+    fn parse_no_branch_filter_keeps_all() {
+        let resp = serde_json::json!({
+            "workflow_runs": [
+                {"name": "CI", "id": 10, "status": "completed", "conclusion": "success", "head_branch": "master"},
+                {"name": "Deploy", "id": 9, "status": "completed", "conclusion": "success", "head_branch": "dependabot/npm/lodash"}
+            ]
+        });
+        let mut latest = std::collections::HashMap::new();
+        parse_workflow_runs(&resp, &mut latest, None);
+        assert_eq!(latest.len(), 2);
     }
 
     #[test]
@@ -572,7 +612,7 @@ jobs:
             "workflow_runs": [{"id": 1, "status": "completed", "conclusion": "success"}]
         });
         let mut latest = std::collections::HashMap::new();
-        parse_workflow_runs(&resp, &mut latest);
+        parse_workflow_runs(&resp, &mut latest, None);
         assert!(latest.contains_key("unknown"));
     }
 
