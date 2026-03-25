@@ -14,7 +14,8 @@ use tokio::signal::unix::{signal, SignalKind};
 
 use anyhow::{Context, Result};
 
-use app::App;
+use app::{App, SourceHealth};
+use chrono::Utc;
 use config::Config;
 use linkage::LinkMap;
 use poll_scheduler::PollScheduler;
@@ -130,6 +131,7 @@ async fn run_poll_orchestrator(
     let mut scheduler = PollScheduler::new();
     let mut link_map = LinkMap::new();
     let mut stopped_runs = std::collections::HashMap::new();
+    let mut force_next_aws = false;
 
     loop {
         let cycle_start = Instant::now();
@@ -137,7 +139,23 @@ async fn run_poll_orchestrator(
         // not delayed until after slow API calls complete.
         app.lock().expect("app mutex poisoned").last_poll_started = Some(cycle_start);
 
+        let force_aws = force_next_aws || {
+            let a = app.lock().expect("app mutex poisoned");
+            match &a.aws_health {
+                SourceHealth::AuthFailed { since } => {
+                    let elapsed = Utc::now()
+                        .signed_duration_since(*since)
+                        .num_seconds()
+                        .unsigned_abs();
+                    elapsed >= 300 // 5 minutes
+                }
+                SourceHealth::Healthy => false,
+            }
+        };
+        force_next_aws = false; // consumed
+
         let need_aws = scheduler.should_poll_aws();
+        let poll_aws = need_aws || force_aws;
 
         // Lazy-init AWS on first need + run link discovery
         if need_aws && aws_client.is_none() {
@@ -148,10 +166,10 @@ async fn run_poll_orchestrator(
         }
 
         // Poll: parallel when both, GH-only otherwise
-        if let Some(aws) = aws_client.as_ref().filter(|_| need_aws) {
+        if let Some(aws) = aws_client.as_ref().filter(|_| poll_aws) {
             tokio::join!(
                 poller::poll_actions_tick(&app, &gh_client),
-                poller::poll_pipelines_tick(&app, aws, &config.aws_profile, false),
+                poller::poll_pipelines_tick(&app, aws, &config.aws_profile, force_aws),
             );
         } else {
             poller::poll_actions_tick(&app, &gh_client).await;
@@ -188,9 +206,11 @@ async fn run_poll_orchestrator(
             _ = tokio::time::sleep(remaining) => {}
             _ = boost_notify.notified() => {
                 scheduler.boost();
+                force_next_aws = true;
             }
             _ = sigusr1.recv() => {
                 scheduler.boost();
+                force_next_aws = true;
                 tracing::info!("boost triggered by SIGUSR1");
             }
         }
