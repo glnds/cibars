@@ -1350,4 +1350,47 @@ mod tests {
         let job = &a.workflow_groups[0].jobs[0];
         assert!(job.last_finished.is_none());
     }
+
+    #[tokio::test]
+    async fn poll_skips_when_auth_failed_and_not_forced() {
+        use crate::app::SourceHealth;
+        let app = Arc::new(Mutex::new(App::new()));
+        {
+            let mut a = app.lock().unwrap();
+            a.aws_health = SourceHealth::AuthFailed { since: Utc::now() };
+            a.push_warning("AWS: SSO session expired".to_string());
+            a.loading_pipelines = false;
+        }
+        let pipes = FailingPipelineClient;
+        poll_pipelines_tick(&app, &pipes, "my-profile", false).await;
+
+        let a = app.lock().unwrap();
+        // Warning should be preserved (not cleared)
+        assert!(
+            a.warnings.iter().any(|w| w.contains("SSO")),
+            "SSO warning should be preserved, got: {:?}",
+            a.warnings
+        );
+        // loading_pipelines should remain unchanged (skip = no-op)
+        assert!(!a.loading_pipelines);
+    }
+
+    #[tokio::test]
+    async fn poll_force_bypasses_auth_failed_skip() {
+        use crate::app::SourceHealth;
+        let app = Arc::new(Mutex::new(App::new()));
+        {
+            let mut a = app.lock().unwrap();
+            a.aws_health = SourceHealth::AuthFailed { since: Utc::now() };
+        }
+        let pipes = MockPipelineClient {
+            pipelines: vec![mock_pipeline("deploy", BuildStatus::Succeeded, vec![])],
+        };
+        poll_pipelines_tick(&app, &pipes, "my-profile", true).await;
+
+        let a = app.lock().unwrap();
+        // Should have recovered
+        assert_eq!(a.aws_health, SourceHealth::Healthy);
+        assert_eq!(a.pipeline_groups.len(), 1);
+    }
 }
