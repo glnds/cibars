@@ -5,16 +5,29 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Widget;
 
+use crate::app::SourceHealth;
+
 pub struct Header<'a> {
     pub profile: &'a str,
     pub region: &'a str,
     pub repo: &'a str,
+    pub aws_health: &'a SourceHealth,
 }
 
 impl Widget for Header<'_> {
     fn render(self, area: Rect, buf: &mut Buffer) {
         let time = Local::now().format("%H:%M:%S");
-        let line = Line::from(vec![
+
+        // Profile span: red with suffix when auth failed
+        let profile_spans: Vec<Span> = match self.aws_health {
+            SourceHealth::AuthFailed { .. } => vec![
+                Span::styled(self.profile, Style::default().fg(Color::Red)),
+                Span::styled(" \u{26A0} SSO expired", Style::default().fg(Color::Red)),
+            ],
+            SourceHealth::Healthy => vec![Span::raw(self.profile)],
+        };
+
+        let mut spans = vec![
             Span::styled(
                 format!(
                     "cibars (v{}-{})",
@@ -26,7 +39,9 @@ impl Widget for Header<'_> {
                     .add_modifier(Modifier::BOLD),
             ),
             Span::raw(" | "),
-            Span::raw(self.profile),
+        ];
+        spans.extend(profile_spans);
+        spans.extend([
             Span::raw(" | "),
             Span::raw(self.region),
             Span::raw(" | "),
@@ -34,27 +49,72 @@ impl Widget for Header<'_> {
             Span::raw(" | "),
             Span::styled(format!("{time}"), Style::default().fg(Color::DarkGray)),
         ]);
-        line.render(area, buf);
+
+        Line::from(spans).render(area, buf);
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app::SourceHealth;
     use ratatui::buffer::Buffer;
     use ratatui::layout::Rect;
     use ratatui::style::{Color, Modifier};
 
-    fn render_header(profile: &str, region: &str, repo: &str) -> Buffer {
+    fn render_header_with_health(
+        profile: &str,
+        region: &str,
+        repo: &str,
+        aws_health: &SourceHealth,
+    ) -> Buffer {
         let header = Header {
             profile,
             region,
             repo,
+            aws_health,
         };
-        let area = Rect::new(0, 0, 80, 1);
+        let area = Rect::new(0, 0, 100, 1);
         let mut buf = Buffer::empty(area);
         header.render(area, &mut buf);
         buf
+    }
+
+    fn render_header(profile: &str, region: &str, repo: &str) -> Buffer {
+        render_header_with_health(profile, region, repo, &SourceHealth::Healthy)
+    }
+
+    #[test]
+    fn renders_sso_expired_when_auth_failed() {
+        let health = SourceHealth::AuthFailed {
+            since: chrono::Utc::now(),
+        };
+        let buf = render_header_with_health("my-profile", "eu-west-1", "owner/repo", &health);
+        let content = buffer_text(&buf);
+        assert!(content.contains("SSO expired"), "got: {content}");
+    }
+
+    #[test]
+    fn renders_profile_red_when_auth_failed() {
+        let health = SourceHealth::AuthFailed {
+            since: chrono::Utc::now(),
+        };
+        let buf = render_header_with_health("my-profile", "eu-west-1", "owner/repo", &health);
+        let content = buffer_text(&buf);
+        let profile_pos = content.find("my-profile").expect("profile not found");
+        let cell = &buf.content()[profile_pos];
+        assert_eq!(cell.fg, Color::Red);
+    }
+
+    #[test]
+    fn renders_profile_default_when_healthy() {
+        let health = SourceHealth::Healthy;
+        let buf = render_header_with_health("my-profile", "eu-west-1", "owner/repo", &health);
+        let content = buffer_text(&buf);
+        assert!(!content.contains("SSO expired"), "got: {content}");
+        let profile_pos = content.find("my-profile").expect("profile not found");
+        let cell = &buf.content()[profile_pos];
+        assert_eq!(cell.fg, Color::Reset);
     }
 
     fn buffer_text(buf: &Buffer) -> String {

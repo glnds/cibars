@@ -211,6 +211,7 @@ pub fn run_ui(
                     profile,
                     region,
                     repo,
+                    aws_health: &app.aws_health,
                 },
                 areas[idx],
             );
