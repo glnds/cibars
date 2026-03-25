@@ -26,12 +26,12 @@ New enum in `src/app.rs`:
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SourceHealth {
     Healthy,
-    AuthFailed {
-        since: DateTime<Utc>,
-        hint: String,
-    },
+    AuthFailed { since: DateTime<Utc> },
 }
 ```
+
+The `since` field is used by the orchestrator to decide when to
+attempt the next 5-min retry probe.
 
 New field in `App`:
 
@@ -66,8 +66,9 @@ false positives from IAM policy errors.
 
 ### On auth error
 
-- Set `app.aws_health = SourceHealth::AuthFailed { since, hint }`
-- Push warning (status bar visibility, first occurrence)
+- Set `app.aws_health = SourceHealth::AuthFailed { since }`
+- Push warning with SSO login hint (every time auth error occurs,
+  including retries — warnings are cleared per cycle anyway)
 - Skip further AWS polling
 
 ### On successful poll
@@ -75,36 +76,79 @@ false positives from IAM policy errors.
 - Set `app.aws_health = SourceHealth::Healthy`
 - Clear `"AWS:"` warnings (existing behavior)
 
-### Skip logic
+### Skip logic and parameter threading
 
-In `poll_pipelines_tick`, early-exit when `AuthFailed` unless a
-boost or slow retry is active:
+Add a `force: bool` parameter to `poll_pipelines_tick`. When
+`AuthFailed` and `!force`, early-exit **before** the warning-clear
+step (so existing SSO warning is preserved):
 
 ```rust
-if matches!(app.aws_health, SourceHealth::AuthFailed { .. })
-    && !boost_requested
-{
-    return;
+pub async fn poll_pipelines_tick(
+    app: &Arc<Mutex<App>>,
+    client: &dyn PipelineClient,
+    profile: &str,
+    force: bool,  // true on boost or 5-min retry
+) {
+    // Skip check BEFORE warning-clear to preserve SSO warning
+    {
+        let a = app.lock().expect("app mutex poisoned");
+        if matches!(a.aws_health, SourceHealth::AuthFailed { .. })
+            && !force
+        {
+            return;
+        }
+    }
+
+    // Existing warning-clear (only reached on actual poll attempt)
+    {
+        let mut a = app.lock().expect("app mutex poisoned");
+        a.warnings.retain(|w| !w.starts_with("AWS:"));
+    }
+    // ... rest of poll logic
 }
 ```
 
-### Slow retry (5 min)
+Normal callers pass `force: false`. Boost and retry pass
+`force: true`.
 
-The orchestrator tracks `last_aws_auth_retry: Option<Instant>`.
-Every 5 minutes while `AuthFailed`, it attempts one probe poll.
-On success: `Healthy`, resume normal schedule. On failure: stay
-`AuthFailed`, wait another 5 min.
+### Slow retry (5 min) — orchestrator integration
+
+In `run_poll_orchestrator` (src/main.rs), before the poll call:
+
+```rust
+let force_aws = {
+    let a = app.lock().expect("app mutex poisoned");
+    match &a.aws_health {
+        SourceHealth::AuthFailed { since } => {
+            // Retry if 5 min elapsed since last failure
+            since.signed_duration_since(Utc::now()).num_seconds()
+                .abs() >= 300
+        }
+        SourceHealth::Healthy => false,
+    }
+};
+```
+
+On retry: call `poll_pipelines_tick` with `force: true`. On
+success, `aws_health` is set to `Healthy` inside the tick fn.
+On failure, `since` is updated to `Utc::now()` (resets the
+5-min timer).
+
+Lock duration is minimal — only read `aws_health`, release,
+then call the tick function.
 
 ### Boost recovery
 
-`b` press always triggers a poll regardless of `AuthFailed` state.
-Success: `Healthy`. Failure: stays `AuthFailed`.
+Boost (via existing `AtomicBool` flag) passes `force: true` to
+`poll_pipelines_tick`. Success: `Healthy`. Failure: stays
+`AuthFailed` with updated `since`.
 
 ## UI Changes
 
 ### Header (`src/ui/header.rs`)
 
-When `AuthFailed`, the profile span turns red with a suffix:
+When `AuthFailed`, the profile span turns red with a hardcoded
+suffix (not from the enum — the enum only stores `since`):
 
 ```text
 cibars (v0.1-42) | my-profile ⚠ SSO expired | eu-west-1 | ...
@@ -112,7 +156,8 @@ cibars (v0.1-42) | my-profile ⚠ SSO expired | eu-west-1 | ...
                    red (was default color)
 ```
 
-When `Healthy`, renders as today (default color).
+When `Healthy`, renders as today (default color). The `Header`
+widget receives `&SourceHealth` as a new field.
 
 The header is always visible and the profile name is the natural
 place to signal "this AWS connection is broken." The status bar
@@ -131,7 +176,7 @@ No changes. Warnings still fire as-is.
 | `src/poll_scheduler.rs` | No changes |
 | `src/ui/header.rs` | Red profile + suffix when `AuthFailed` |
 | `src/ui/statusbar.rs` | No changes |
-| Orchestrator (main) | `last_aws_auth_retry`, probe every 5 min |
+| Orchestrator (main) | `force` flag, 5-min retry check |
 
 ## Out of Scope
 
@@ -149,6 +194,10 @@ No changes. Warnings still fire as-is.
 | `poll_pipelines_tick` sets `aws_health` on error | Unit |
 | `poll_pipelines_tick` clears `aws_health` on success | Unit |
 | Skip-poll-when-AuthFailed behavior | Unit |
+| Skip preserves SSO warning (no clear before return) | Unit |
+| Force=true bypasses skip (boost/retry path) | Unit |
+| 5-min retry triggers after `since` threshold | Unit |
+| Boost when AuthFailed → success → Healthy (e2e) | Unit |
 | Header renders red profile when `AuthFailed` | Unit |
 | Header renders normal when `Healthy` | Unit |
-| Existing 322 tests stay green | Regression |
+| Existing tests stay green | Regression |
