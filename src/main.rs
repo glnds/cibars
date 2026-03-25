@@ -193,26 +193,33 @@ async fn run_poll_orchestrator(
             a.cooldown_remaining = scheduler.cooldown_remaining();
         }
 
-        tracing::debug!(
+        // Sleep only the remaining interval after poll duration
+        let remaining = scheduler.interval().saturating_sub(cycle_start.elapsed());
+
+        tracing::info!(
             state = ?scheduler.state(),
             any_running,
             interval = ?scheduler.interval(),
+            ?remaining,
             "poll cycle complete"
         );
-
-        // Sleep only the remaining interval after poll duration
-        let remaining = scheduler.interval().saturating_sub(cycle_start.elapsed());
         tokio::select! {
-            _ = tokio::time::sleep(remaining) => {}
+            biased;
             _ = boost_notify.notified() => {
                 scheduler.boost();
                 force_next_aws = true;
+                let mut a = app.lock().expect("app mutex poisoned");
+                a.poll_state = scheduler.state();
+                tracing::info!(state = ?scheduler.state(), "boost triggered by key");
             }
             _ = sigusr1.recv() => {
                 scheduler.boost();
                 force_next_aws = true;
-                tracing::info!("boost triggered by SIGUSR1");
+                let mut a = app.lock().expect("app mutex poisoned");
+                a.poll_state = scheduler.state();
+                tracing::info!(state = ?scheduler.state(), "boost triggered by SIGUSR1");
             }
+            _ = tokio::time::sleep(remaining) => {}
         }
     }
 }

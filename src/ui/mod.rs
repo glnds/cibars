@@ -408,6 +408,7 @@ pub fn run_ui(
                         toggle_expand(&app);
                     }
                     KeyCode::Char('b') => {
+                        tracing::info!("UI: boost key pressed");
                         boost_notify.notify_one();
                     }
                     KeyCode::Char('h') => {

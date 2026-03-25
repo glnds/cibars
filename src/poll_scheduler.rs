@@ -44,9 +44,13 @@ impl PollScheduler {
 
     pub fn boost(&mut self) {
         if matches!(self.state, PollState::Idle | PollState::LongIdle) {
+            let prev = self.state;
             self.state = PollState::Watching;
             self.watching_started = Some(Instant::now());
             self.idle_started = None;
+            tracing::info!(?prev, "boost: → Watching");
+        } else {
+            tracing::info!(state = ?self.state, "boost: no-op (not idle)");
         }
     }
 
