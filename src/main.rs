@@ -151,7 +151,7 @@ async fn run_poll_orchestrator(
         if let Some(aws) = aws_client.as_ref().filter(|_| need_aws) {
             tokio::join!(
                 poller::poll_actions_tick(&app, &gh_client),
-                poller::poll_pipelines_tick(&app, aws, &config.aws_profile),
+                poller::poll_pipelines_tick(&app, aws, &config.aws_profile, false),
             );
         } else {
             poller::poll_actions_tick(&app, &gh_client).await;

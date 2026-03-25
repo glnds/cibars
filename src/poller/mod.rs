@@ -9,7 +9,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use chrono::Utc;
 
-use crate::app::App;
+use crate::app::{App, SourceHealth};
 use crate::config::Config;
 use crate::model::{Bar, BuildStatus, PipelineGroup, WorkflowCategory, WorkflowGroup};
 
@@ -110,7 +110,15 @@ pub async fn poll_pipelines_tick(
     app: &Arc<Mutex<App>>,
     client: &dyn PipelineClient,
     profile: &str,
+    force: bool,
 ) {
+    {
+        let a = app.lock().expect("app mutex poisoned");
+        if matches!(a.aws_health, SourceHealth::AuthFailed { .. }) && !force {
+            return;
+        }
+    }
+
     {
         let mut a = app.lock().expect("app mutex poisoned");
         a.warnings.retain(|w| !w.starts_with("AWS:"));
@@ -121,11 +129,13 @@ pub async fn poll_pipelines_tick(
             tracing::debug!(count = states.len(), "polled pipelines");
             let mut a = app.lock().expect("app mutex poisoned");
             update_pipeline_groups(&mut a, states);
+            a.aws_health = SourceHealth::Healthy;
         }
         Err(e) => {
             let msg = format!("{e:#}");
             let mut a = app.lock().expect("app mutex poisoned");
-            if msg.contains("ExpiredToken") || msg.contains("UnauthorizedException") {
+            if is_auth_error(&msg) {
+                a.aws_health = SourceHealth::AuthFailed { since: Utc::now() };
                 a.push_warning(format!(
                     "AWS: SSO session expired \u{2014} run `aws sso login --profile {profile}` then press b"
                 ));
@@ -233,7 +243,7 @@ pub async fn poll_once(
     actions_client: &dyn ActionsClient,
 ) {
     tokio::join!(
-        poll_pipelines_tick(app, pipeline_client, "test-profile"),
+        poll_pipelines_tick(app, pipeline_client, "test-profile", false),
         poll_actions_tick(app, actions_client),
     );
 }
@@ -734,7 +744,7 @@ mod tests {
     async fn poll_expired_token_shows_sso_login_hint() {
         let app = Arc::new(Mutex::new(App::new()));
         let pipes = ExpiredTokenClient;
-        poll_pipelines_tick(&app, &pipes, "my-profile").await;
+        poll_pipelines_tick(&app, &pipes, "my-profile", false).await;
 
         let app = app.lock().unwrap();
         assert_eq!(app.warnings.len(), 1);
@@ -1011,7 +1021,7 @@ mod tests {
     async fn poll_unauthorized_exception_shows_sso_hint() {
         let app = Arc::new(Mutex::new(App::new()));
         let pipes = UnauthorizedClient;
-        poll_pipelines_tick(&app, &pipes, "my-profile").await;
+        poll_pipelines_tick(&app, &pipes, "my-profile", false).await;
 
         let a = app.lock().unwrap();
         assert_eq!(a.warnings.len(), 1);
@@ -1218,6 +1228,38 @@ mod tests {
     #[test]
     fn is_auth_error_network_timeout_is_not_auth() {
         assert!(!is_auth_error("network timeout"));
+    }
+
+    #[tokio::test]
+    async fn poll_expired_token_sets_auth_failed() {
+        use crate::app::SourceHealth;
+        let app = Arc::new(Mutex::new(App::new()));
+        let pipes = ExpiredTokenClient;
+        poll_pipelines_tick(&app, &pipes, "my-profile", false).await;
+
+        let a = app.lock().unwrap();
+        assert!(
+            matches!(a.aws_health, SourceHealth::AuthFailed { .. }),
+            "expected AuthFailed, got: {:?}",
+            a.aws_health
+        );
+    }
+
+    #[tokio::test]
+    async fn poll_success_clears_auth_failed() {
+        use crate::app::SourceHealth;
+        let app = Arc::new(Mutex::new(App::new()));
+        {
+            let mut a = app.lock().unwrap();
+            a.aws_health = SourceHealth::AuthFailed { since: Utc::now() };
+        }
+        let pipes = MockPipelineClient {
+            pipelines: vec![mock_pipeline("deploy", BuildStatus::Succeeded, vec![])],
+        };
+        poll_pipelines_tick(&app, &pipes, "my-profile", true).await;
+
+        let a = app.lock().unwrap();
+        assert_eq!(a.aws_health, SourceHealth::Healthy);
     }
 
     #[test]
