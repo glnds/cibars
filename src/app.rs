@@ -6,6 +6,12 @@ use crate::config::HookStatus;
 use crate::model::{BuildStatus, PipelineGroup, WorkflowGroup};
 use crate::poll_scheduler::PollState;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SourceHealth {
+    Healthy,
+    AuthFailed { since: DateTime<Utc> },
+}
+
 pub struct App {
     pub pipeline_groups: Vec<PipelineGroup>,
     pub workflow_groups: Vec<WorkflowGroup>,
@@ -29,6 +35,8 @@ pub struct App {
     pub cooldown_remaining: Option<std::time::Duration>,
     /// Git pre-push hook status for boost integration.
     pub hook_status: HookStatus,
+    /// AWS authentication health state.
+    pub aws_health: SourceHealth,
 }
 
 impl App {
@@ -50,6 +58,7 @@ impl App {
             last_poll_started: None,
             cooldown_remaining: None,
             hook_status: HookStatus::NoGitDir,
+            aws_health: SourceHealth::Healthy,
         }
     }
 
@@ -81,6 +90,12 @@ impl Default for App {
 mod tests {
     use super::*;
     use crate::model::{Bar, WorkflowCategory, WorkflowGroup};
+
+    #[test]
+    fn app_starts_with_healthy_aws() {
+        let app = App::new();
+        assert_eq!(app.aws_health, SourceHealth::Healthy);
+    }
 
     #[test]
     fn app_starts_with_loading_flags() {
