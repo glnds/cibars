@@ -96,6 +96,15 @@ pub trait ActionsClient: Send + Sync {
     async fn fetch_workflow_files(&self) -> Result<Vec<WorkflowFile>>;
 }
 
+/// Detect AWS auth/credential errors by string matching.
+fn is_auth_error(msg: &str) -> bool {
+    msg.contains("ExpiredToken")
+        || msg.contains("UnauthorizedException")
+        || msg.contains("InvalidIdentityToken")
+        || msg.contains("ExpiredTokenException")
+        || (msg.contains("AccessDenied") && (msg.contains("SSO") || msg.contains("STS")))
+}
+
 /// Poll AWS pipelines and update app state. Clears only AWS-specific warnings.
 pub async fn poll_pipelines_tick(
     app: &Arc<Mutex<App>>,
@@ -1160,6 +1169,55 @@ mod tests {
         let (status, timestamp) = stage_status_and_timestamp(&actions);
         assert_eq!(status, BuildStatus::Running);
         assert!(timestamp.is_none());
+    }
+
+    #[test]
+    fn is_auth_error_expired_token() {
+        assert!(is_auth_error("ExpiredToken: the security token is expired"));
+    }
+
+    #[test]
+    fn is_auth_error_unauthorized_exception() {
+        assert!(is_auth_error(
+            "UnauthorizedException: user is not authorized"
+        ));
+    }
+
+    #[test]
+    fn is_auth_error_invalid_identity_token() {
+        assert!(is_auth_error("InvalidIdentityToken: bad token"));
+    }
+
+    #[test]
+    fn is_auth_error_expired_token_exception() {
+        assert!(is_auth_error("ExpiredTokenException: token expired"));
+    }
+
+    #[test]
+    fn is_auth_error_access_denied_with_sso() {
+        assert!(is_auth_error("AccessDenied: SSO session has expired"));
+    }
+
+    #[test]
+    fn is_auth_error_access_denied_with_sts() {
+        assert!(is_auth_error("AccessDenied: STS token is invalid"));
+    }
+
+    #[test]
+    fn is_auth_error_plain_access_denied_is_not_auth() {
+        assert!(!is_auth_error(
+            "AccessDenied: not authorized to perform action"
+        ));
+    }
+
+    #[test]
+    fn is_auth_error_connection_refused_is_not_auth() {
+        assert!(!is_auth_error("connection refused"));
+    }
+
+    #[test]
+    fn is_auth_error_network_timeout_is_not_auth() {
+        assert!(!is_auth_error("network timeout"));
     }
 
     #[test]
