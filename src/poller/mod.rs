@@ -103,6 +103,7 @@ fn is_auth_error(msg: &str) -> bool {
         || msg.contains("InvalidIdentityToken")
         || msg.contains("ExpiredTokenException")
         || (msg.contains("AccessDenied") && (msg.contains("SSO") || msg.contains("STS")))
+        || msg.contains("error occurred while loading credentials")
 }
 
 /// Poll AWS pipelines and update app state. Clears only AWS-specific warnings.
@@ -1228,6 +1229,15 @@ mod tests {
     #[test]
     fn is_auth_error_network_timeout_is_not_auth() {
         assert!(!is_auth_error("network timeout"));
+    }
+
+    #[test]
+    fn is_auth_error_loading_credentials() {
+        assert!(is_auth_error(
+            "failed to list pipelines: dispatch failure: other: \
+             an error occurred while loading credentials: \
+             an error occurred while loading credentials"
+        ));
     }
 
     #[tokio::test]
