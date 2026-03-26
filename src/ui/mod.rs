@@ -11,9 +11,10 @@ use tokio::sync::Notify;
 
 use anyhow::Result;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
-use ratatui::layout::{Constraint, Layout};
+use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::Style;
-use ratatui::widgets::Paragraph;
+use ratatui::text::{Line, Span};
+use ratatui::widgets::{Block, BorderType, Paragraph, Widget};
 use ratatui::DefaultTerminal;
 
 use crate::app::App;
@@ -21,7 +22,7 @@ use crate::config::HookStatus;
 use crate::model::{BuildStatus, PipelineGroup, WorkflowCategory, WorkflowGroup};
 use crate::poll_scheduler::PollState;
 
-use bar::{ActionsTitle, BarWidget, PipelinesTitle};
+use bar::BarWidget;
 use header::Header;
 use statusbar::StatusBar;
 
@@ -118,6 +119,89 @@ fn handle_hook_install(app: &Arc<Mutex<App>>) -> bool {
     true
 }
 
+/// Compute section height for actions/pipelines blocks.
+/// Expanded: 2 (borders) + content rows. Collapsed/empty: 3 (borders + 1 content line).
+fn section_height(has_content: bool, expanded: bool, content_rows: usize) -> u16 {
+    if !has_content || !expanded {
+        3
+    } else {
+        (2 + content_rows) as u16
+    }
+}
+
+/// Compute layout constraints for the main UI.
+fn compute_layout_constraints(actions_height: u16, pipelines_height: u16) -> Vec<Constraint> {
+    vec![
+        Constraint::Length(3),                // header block
+        Constraint::Length(actions_height),   // actions block
+        Constraint::Length(pipelines_height), // pipelines block
+        Constraint::Fill(1),                  // remaining space
+        Constraint::Length(3),                // status bar block
+    ]
+}
+
+/// Render collapsed actions: status dots + count inside the block inner area.
+fn render_collapsed_actions(
+    groups: &[&WorkflowGroup],
+    area: Rect,
+    buf: &mut ratatui::buffer::Buffer,
+) {
+    let mut spans = Vec::new();
+    let mut count = 0usize;
+    for group in groups {
+        let visible_jobs: Vec<_> = group.jobs.iter().filter(|j| !j.gone).collect();
+        if visible_jobs.is_empty() {
+            let color = if group.gone || group.category == WorkflowCategory::Review {
+                theme::FG_DIM
+            } else {
+                group.summary_status.color()
+            };
+            spans.push(Span::styled("\u{25CF}", Style::default().fg(color)));
+            count += 1;
+        } else {
+            for job in &visible_jobs {
+                let color = if group.gone || group.category == WorkflowCategory::Review {
+                    theme::FG_DIM
+                } else {
+                    job.status.color()
+                };
+                spans.push(Span::styled("\u{25CF}", Style::default().fg(color)));
+                count += 1;
+            }
+        }
+    }
+    spans.push(Span::styled(
+        format!(" ({count} jobs)"),
+        Style::default().fg(theme::FG_DIM),
+    ));
+    Line::from(spans).render(area, buf);
+}
+
+/// Render collapsed pipelines: status dots + count inside the block inner area.
+fn render_collapsed_pipelines(
+    groups: &[&PipelineGroup],
+    area: Rect,
+    buf: &mut ratatui::buffer::Buffer,
+) {
+    let mut spans = Vec::new();
+    let mut count = 0usize;
+    for group in groups {
+        let color = if group.gone || group.pending_link {
+            theme::FG_DIM
+        } else {
+            group.summary_status.color()
+        };
+        spans.push(Span::styled("\u{25CF}", Style::default().fg(color)));
+        count += 1;
+    }
+    let label = if count == 1 { "pipeline" } else { "pipelines" };
+    spans.push(Span::styled(
+        format!(" ({count} {label})"),
+        Style::default().fg(theme::FG_DIM),
+    ));
+    Line::from(spans).render(area, buf);
+}
+
 pub fn run_ui(
     app: Arc<Mutex<App>>,
     mut terminal: DefaultTerminal,
@@ -190,23 +274,14 @@ pub fn run_ui(
                 0
             };
 
-            // Build dynamic layout constraints
-            let mut constraints = vec![Constraint::Length(1)]; // header
-            constraints.push(Constraint::Length(1)); // actions title
-            for _ in 0..action_rows {
-                constraints.push(Constraint::Length(1));
-            }
-            constraints.push(Constraint::Length(1)); // pipelines title
-            for _ in 0..pipe_rows {
-                constraints.push(Constraint::Length(1));
-            }
-            constraints.push(Constraint::Fill(1)); // remaining space
-            constraints.push(Constraint::Length(3)); // status bar (bordered block)
+            // Compute block heights
+            let actions_height = section_height(has_actions, app.actions_expanded, action_rows);
+            let pipelines_height = section_height(has_pipelines, app.pipelines_expanded, pipe_rows);
 
+            let constraints = compute_layout_constraints(actions_height, pipelines_height);
             let areas = Layout::vertical(constraints).split(size);
-            let mut idx = 0;
 
-            // Header
+            // --- Header block (area 0) ---
             frame.render_widget(
                 Header {
                     profile,
@@ -214,11 +289,20 @@ pub fn run_ui(
                     repo,
                     aws_health: &app.aws_health,
                 },
-                areas[idx],
+                areas[0],
             );
-            idx += 1;
 
-            // Actions title (with inline dots)
+            // --- Actions block (area 1) ---
+            let actions_block = Block::bordered()
+                .border_type(BorderType::Rounded)
+                .border_style(Style::default().fg(theme::BORDER_ACTIONS))
+                .title(Span::styled(
+                    " GitHub Actions ",
+                    Style::default().fg(theme::BORDER_ACTIONS),
+                ));
+            let actions_inner = actions_block.inner(areas[1]);
+            actions_block.render(areas[1], frame.buffer_mut());
+
             if !has_actions {
                 let msg = if app.loading_actions {
                     "Loading GitHub Actions..."
@@ -227,18 +311,17 @@ pub fn run_ui(
                 };
                 frame.render_widget(
                     Paragraph::new(msg).style(Style::default().fg(theme::FG_DIM)),
-                    areas[idx],
+                    actions_inner,
                 );
-            } else {
-                frame.render_widget(
-                    ActionsTitle::new(&sorted_wf_groups, app.actions_expanded),
-                    areas[idx],
-                );
-            }
-            idx += 1;
+            } else if app.actions_expanded {
+                // Build inner row constraints
+                let mut inner_constraints = Vec::new();
+                for _ in 0..action_rows {
+                    inner_constraints.push(Constraint::Length(1));
+                }
+                let inner_areas = Layout::vertical(inner_constraints).split(actions_inner);
+                let mut row = 0;
 
-            // Action job bars (when expanded)
-            if app.actions_expanded {
                 let job_name_width = all_jobs_name_width(&app.workflow_groups);
 
                 // CI workflows first
@@ -247,6 +330,9 @@ pub fn run_ui(
                     .filter(|g| g.category == WorkflowCategory::CI)
                 {
                     for bar in group.jobs.iter().filter(|j| !j.gone) {
+                        if row >= inner_areas.len() {
+                            break;
+                        }
                         let bar_dim = dim || group.gone;
                         let dot_color = if group.gone {
                             theme::FG_DIM
@@ -255,9 +341,9 @@ pub fn run_ui(
                         };
                         frame.render_widget(
                             BarWidget::new(bar, job_name_width, bar_dim).with_dot(dot_color),
-                            areas[idx],
+                            inner_areas[row],
                         );
-                        idx += 1;
+                        row += 1;
                     }
                 }
 
@@ -267,37 +353,51 @@ pub fn run_ui(
                     .filter(|g| g.category == WorkflowCategory::Review)
                     .any(|g| g.jobs.iter().any(|j| !j.gone));
 
-                if has_review_jobs {
-                    // Render separator line
-                    let sep_width = areas[idx].width as usize;
+                if has_review_jobs && row < inner_areas.len() {
+                    let sep_width = inner_areas[row].width as usize;
                     let label = " reviews ";
                     let pad_len = sep_width.saturating_sub(label.len() + 2);
                     let pad = "\u{2500}".repeat(pad_len);
                     let sep_text = format!("\u{2500}\u{2500}{label}{pad}");
-                    let sep_line = ratatui::text::Line::from(ratatui::text::Span::styled(
+                    let sep_line = Line::from(Span::styled(
                         sep_text,
                         Style::default().fg(theme::SEPARATOR),
                     ));
-                    frame.render_widget(sep_line, areas[idx]);
-                    idx += 1;
+                    frame.render_widget(sep_line, inner_areas[row]);
+                    row += 1;
 
-                    // Review workflow bars (dimmed, dots always DarkGray)
                     for group in sorted_wf_groups
                         .iter()
                         .filter(|g| g.category == WorkflowCategory::Review)
                     {
                         for bar in group.jobs.iter().filter(|j| !j.gone) {
+                            if row >= inner_areas.len() {
+                                break;
+                            }
                             frame.render_widget(
                                 BarWidget::new(bar, job_name_width, true).with_dot(theme::FG_DIM),
-                                areas[idx],
+                                inner_areas[row],
                             );
-                            idx += 1;
+                            row += 1;
                         }
                     }
                 }
+            } else {
+                // Collapsed: dots + count
+                render_collapsed_actions(&sorted_wf_groups, actions_inner, frame.buffer_mut());
             }
 
-            // Pipelines title (with inline dots)
+            // --- Pipelines block (area 2) ---
+            let pipelines_block = Block::bordered()
+                .border_type(BorderType::Rounded)
+                .border_style(Style::default().fg(theme::BORDER_PIPELINES))
+                .title(Span::styled(
+                    " CodePipelines ",
+                    Style::default().fg(theme::BORDER_PIPELINES),
+                ));
+            let pipelines_inner = pipelines_block.inner(areas[2]);
+            pipelines_block.render(areas[2], frame.buffer_mut());
+
             if !has_pipelines {
                 let msg = if app.loading_pipelines {
                     "Loading CodePipelines..."
@@ -306,23 +406,24 @@ pub fn run_ui(
                 };
                 frame.render_widget(
                     Paragraph::new(msg).style(Style::default().fg(theme::FG_DIM)),
-                    areas[idx],
+                    pipelines_inner,
                 );
-            } else {
-                frame.render_widget(
-                    PipelinesTitle::new(&sorted_pipe_groups, app.pipelines_expanded),
-                    areas[idx],
-                );
-            }
-            idx += 1;
+            } else if app.pipelines_expanded {
+                let mut inner_constraints = Vec::new();
+                for _ in 0..pipe_rows {
+                    inner_constraints.push(Constraint::Length(1));
+                }
+                let inner_areas = Layout::vertical(inner_constraints).split(pipelines_inner);
+                let mut row = 0;
 
-            // Pipeline stage bars (when expanded)
-            if app.pipelines_expanded {
                 let stage_name_width = all_pipeline_stages_name_width(&app.pipeline_groups);
                 for group in &sorted_pipe_groups {
                     let visible_stages: Vec<_> = group.stages.iter().filter(|s| !s.gone).collect();
                     if visible_stages.is_empty() {
                         continue;
+                    }
+                    if row >= inner_areas.len() {
+                        break;
                     }
                     // Pipeline name header with status dot
                     let dot_color = if group.gone || group.pending_link {
@@ -330,29 +431,36 @@ pub fn run_ui(
                     } else {
                         group.summary_status.color()
                     };
-                    let header_line = ratatui::text::Line::from(vec![
-                        ratatui::text::Span::raw("  "),
-                        ratatui::text::Span::styled("\u{25CF} ", Style::default().fg(dot_color)),
-                        ratatui::text::Span::styled(&group.name, Style::default().fg(dot_color)),
+                    let header_line = Line::from(vec![
+                        Span::raw("  "),
+                        Span::styled("\u{25CF} ", Style::default().fg(dot_color)),
+                        Span::styled(&group.name, Style::default().fg(dot_color)),
                     ]);
-                    frame.render_widget(header_line, areas[idx]);
-                    idx += 1;
+                    frame.render_widget(header_line, inner_areas[row]);
+                    row += 1;
                     // Stage bars
                     for bar in &visible_stages {
+                        if row >= inner_areas.len() {
+                            break;
+                        }
                         let bar_dim = dim || group.gone || group.pending_link;
                         frame.render_widget(
                             BarWidget::new(bar, stage_name_width, bar_dim),
-                            areas[idx],
+                            inner_areas[row],
                         );
-                        idx += 1;
+                        row += 1;
                     }
                 }
+            } else {
+                // Collapsed: dots + count
+                render_collapsed_pipelines(
+                    &sorted_pipe_groups,
+                    pipelines_inner,
+                    frame.buffer_mut(),
+                );
             }
 
-            // Skip fill area
-            idx += 1;
-
-            // Status bar
+            // --- Status bar block (area 4, after fill at area 3) ---
             let elapsed = app
                 .last_poll_started
                 .map(|t| t.elapsed())
@@ -365,7 +473,7 @@ pub fn run_ui(
                     warnings: &app.warnings,
                     hook_status: &app.hook_status,
                 },
-                areas[idx],
+                areas[4],
             );
 
             drop(app);
@@ -378,7 +486,8 @@ pub fn run_ui(
                 let width = a.terminal_width as usize;
 
                 let pipe_stage_name_width = all_pipeline_stages_name_width(&a.pipeline_groups);
-                let pipe_fill_width = width.saturating_sub(pipe_stage_name_width + 4 + 7);
+                // +2 for block borders (left + right │)
+                let pipe_fill_width = width.saturating_sub(pipe_stage_name_width + 4 + 7 + 2);
                 for group in &mut a.pipeline_groups {
                     for stage in &mut group.stages {
                         stage.tick(pipe_fill_width);
@@ -386,7 +495,8 @@ pub fn run_ui(
                 }
 
                 let job_name_width = all_jobs_name_width(&a.workflow_groups);
-                let job_fill_width = width.saturating_sub(job_name_width + 4 + 7);
+                // +2 for block borders (left + right │)
+                let job_fill_width = width.saturating_sub(job_name_width + 4 + 7 + 2);
                 for group in &mut a.workflow_groups {
                     for job in &mut group.jobs {
                         job.tick(job_fill_width);
@@ -776,6 +886,149 @@ mod tests {
         let sorted = sorted_workflow_groups(&groups);
         assert_eq!(sorted[0].name, "aaa-running");
         assert_eq!(sorted[1].name, "zzz-idle");
+    }
+
+    #[test]
+    fn section_height_expanded_with_content() {
+        assert_eq!(section_height(true, true, 5), 7); // 2 borders + 5 rows
+    }
+
+    #[test]
+    fn section_height_collapsed() {
+        assert_eq!(section_height(true, false, 5), 3);
+    }
+
+    #[test]
+    fn section_height_no_content() {
+        assert_eq!(section_height(false, true, 0), 3);
+    }
+
+    #[test]
+    fn compute_layout_constraints_produces_five_sections() {
+        let c = compute_layout_constraints(7, 5);
+        assert_eq!(c.len(), 5);
+        assert_eq!(c[0], Constraint::Length(3)); // header
+        assert_eq!(c[1], Constraint::Length(7)); // actions
+        assert_eq!(c[2], Constraint::Length(5)); // pipelines
+        assert_eq!(c[3], Constraint::Fill(1)); // fill
+        assert_eq!(c[4], Constraint::Length(3)); // status
+    }
+
+    #[test]
+    fn compute_layout_constraints_collapsed() {
+        let c = compute_layout_constraints(3, 3);
+        assert_eq!(c[1], Constraint::Length(3));
+        assert_eq!(c[2], Constraint::Length(3));
+    }
+
+    #[test]
+    fn collapsed_actions_renders_dots_and_count() {
+        use ratatui::buffer::Buffer;
+        let group = WorkflowGroup {
+            name: "CI".to_string(),
+            jobs: vec![
+                make_test_bar("build", BuildStatus::Succeeded),
+                make_test_bar("test", BuildStatus::Running),
+            ],
+            gone: false,
+            summary_status: BuildStatus::Running,
+            run_id: None,
+            category: WorkflowCategory::CI,
+        };
+        let groups = vec![&group];
+        let area = Rect::new(0, 0, 40, 1);
+        let mut buf = Buffer::empty(area);
+        render_collapsed_actions(&groups, area, &mut buf);
+        let content: String = buf
+            .content()
+            .iter()
+            .map(|c| c.symbol().to_string())
+            .collect();
+        assert!(content.contains("(2 jobs)"), "got: {content}");
+        let dots: Vec<_> = buf
+            .content()
+            .iter()
+            .filter(|c| c.symbol() == "\u{25CF}")
+            .collect();
+        assert_eq!(dots.len(), 2);
+    }
+
+    #[test]
+    fn collapsed_pipelines_renders_dots_and_count() {
+        use ratatui::buffer::Buffer;
+        let g1 = PipelineGroup {
+            name: "pipe-a".to_string(),
+            stages: vec![],
+            gone: false,
+            summary_status: BuildStatus::Succeeded,
+            pending_link: false,
+        };
+        let g2 = PipelineGroup {
+            name: "pipe-b".to_string(),
+            stages: vec![],
+            gone: false,
+            summary_status: BuildStatus::Running,
+            pending_link: false,
+        };
+        let groups = vec![&g1, &g2];
+        let area = Rect::new(0, 0, 40, 1);
+        let mut buf = Buffer::empty(area);
+        render_collapsed_pipelines(&groups, area, &mut buf);
+        let content: String = buf
+            .content()
+            .iter()
+            .map(|c| c.symbol().to_string())
+            .collect();
+        assert!(content.contains("(2 pipelines)"), "got: {content}");
+    }
+
+    #[test]
+    fn collapsed_pipelines_singular_label() {
+        use ratatui::buffer::Buffer;
+        let g = PipelineGroup {
+            name: "pipe".to_string(),
+            stages: vec![],
+            gone: false,
+            summary_status: BuildStatus::Succeeded,
+            pending_link: false,
+        };
+        let groups = vec![&g];
+        let area = Rect::new(0, 0, 40, 1);
+        let mut buf = Buffer::empty(area);
+        render_collapsed_pipelines(&groups, area, &mut buf);
+        let content: String = buf
+            .content()
+            .iter()
+            .map(|c| c.symbol().to_string())
+            .collect();
+        assert!(content.contains("(1 pipeline)"), "got: {content}");
+    }
+
+    #[test]
+    fn collapsed_dots_retain_status_colors() {
+        use ratatui::buffer::Buffer;
+        let group = WorkflowGroup {
+            name: "CI".to_string(),
+            jobs: vec![
+                make_test_bar("build", BuildStatus::Succeeded),
+                make_test_bar("test", BuildStatus::Failed),
+            ],
+            gone: false,
+            summary_status: BuildStatus::Failed,
+            run_id: None,
+            category: WorkflowCategory::CI,
+        };
+        let groups = vec![&group];
+        let area = Rect::new(0, 0, 40, 1);
+        let mut buf = Buffer::empty(area);
+        render_collapsed_actions(&groups, area, &mut buf);
+        let dots: Vec<_> = buf
+            .content()
+            .iter()
+            .filter(|c| c.symbol() == "\u{25CF}")
+            .collect();
+        assert_eq!(dots[0].fg, theme::STATUS_SUCCESS);
+        assert_eq!(dots[1].fg, theme::STATUS_FAILED);
     }
 
     #[test]

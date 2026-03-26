@@ -5,9 +5,9 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Widget;
 
 use super::theme;
-use crate::model::{
-    format_finished_time, Bar, BuildStatus, PipelineGroup, WorkflowCategory, WorkflowGroup,
-};
+use crate::model::{format_finished_time, Bar, BuildStatus};
+#[cfg(test)]
+use crate::model::{PipelineGroup, WorkflowCategory, WorkflowGroup};
 
 /// Max chars for the name column
 pub const MAX_NAME_WIDTH: usize = 30;
@@ -127,17 +127,20 @@ pub fn compute_name_width(bars: &[Bar]) -> usize {
 
 /// "GitHub Actions" title with inline status dots for all jobs across groups.
 /// Dots always retain their status color — they are never dimmed by poll state.
+#[cfg(test)]
 pub struct ActionsTitle<'a> {
     groups: &'a [&'a WorkflowGroup],
     expanded: bool,
 }
 
+#[cfg(test)]
 impl<'a> ActionsTitle<'a> {
     pub fn new(groups: &'a [&'a WorkflowGroup], expanded: bool) -> Self {
         Self { groups, expanded }
     }
 }
 
+#[cfg(test)]
 impl Widget for ActionsTitle<'_> {
     fn render(self, area: Rect, buf: &mut Buffer) {
         if area.width < 10 || area.height < 1 {
@@ -179,17 +182,20 @@ impl Widget for ActionsTitle<'_> {
 
 /// "CodePipelines" title with inline status dots for each pipeline group.
 /// Dots always retain their status color — they are never dimmed by poll state.
+#[cfg(test)]
 pub struct PipelinesTitle<'a> {
     groups: &'a [&'a PipelineGroup],
     expanded: bool,
 }
 
+#[cfg(test)]
 impl<'a> PipelinesTitle<'a> {
     pub fn new(groups: &'a [&'a PipelineGroup], expanded: bool) -> Self {
         Self { groups, expanded }
     }
 }
 
+#[cfg(test)]
 impl Widget for PipelinesTitle<'_> {
     fn render(self, area: Rect, buf: &mut Buffer) {
         if area.width < 10 || area.height < 1 {
