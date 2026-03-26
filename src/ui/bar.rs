@@ -993,12 +993,12 @@ mod tests {
         let mut buf = Buffer::empty(area);
         widget.render(area, &mut buf);
 
-        let unfilled_str = theme::BAR_UNFILLED.to_string();
+        let bar_str = theme::BAR_UNFILLED.to_string();
         let unfilled_cell = buf
             .content()
             .iter()
-            .find(|c| c.symbol() == unfilled_str)
-            .expect("should have BAR_UNFILLED char");
+            .find(|c| c.symbol() == bar_str && c.fg == theme::BAR_EMPTY)
+            .expect("should have BAR_UNFILLED char in BAR_EMPTY color");
         assert_eq!(unfilled_cell.fg, theme::BAR_EMPTY);
     }
 
@@ -1025,11 +1025,11 @@ mod tests {
         let mut buf = Buffer::empty(area);
         widget.render(area, &mut buf);
 
-        let filled_str = theme::BAR_FILLED.to_string();
+        let bar_str = theme::BAR_FILLED.to_string();
         let filled_cells: Vec<_> = buf
             .content()
             .iter()
-            .filter(|c| c.symbol() == filled_str)
+            .filter(|c| c.symbol() == bar_str && c.fg != theme::BAR_EMPTY)
             .collect();
         assert!(
             filled_cells.len() >= 3,
@@ -1051,11 +1051,11 @@ mod tests {
         let mut buf = Buffer::empty(area);
         widget.render(area, &mut buf);
 
-        let filled_str = theme::BAR_FILLED.to_string();
+        let bar_str = theme::BAR_FILLED.to_string();
         let filled_cells: Vec<_> = buf
             .content()
             .iter()
-            .filter(|c| c.symbol() == filled_str)
+            .filter(|c| c.symbol() == bar_str && c.fg != theme::BAR_EMPTY)
             .collect();
         assert_eq!(filled_cells.len(), 1);
         // Single char should be tip color
@@ -1070,11 +1070,11 @@ mod tests {
         let mut buf = Buffer::empty(area);
         widget.render(area, &mut buf);
 
-        let filled_str = theme::BAR_FILLED.to_string();
+        let bar_str = theme::BAR_FILLED.to_string();
         let filled_cells: Vec<_> = buf
             .content()
             .iter()
-            .filter(|c| c.symbol() == filled_str)
+            .filter(|c| c.symbol() == bar_str && c.fg != theme::BAR_EMPTY)
             .collect();
         // All fill chars should have the same color
         for cell in &filled_cells {
@@ -1090,11 +1090,11 @@ mod tests {
         let mut buf = Buffer::empty(area);
         widget.render(area, &mut buf);
 
-        let filled_str = theme::BAR_FILLED.to_string();
+        let bar_str = theme::BAR_FILLED.to_string();
         let filled_cells: Vec<_> = buf
             .content()
             .iter()
-            .filter(|c| c.symbol() == filled_str)
+            .filter(|c| c.symbol() == bar_str && c.fg != theme::BAR_EMPTY)
             .collect();
         // All fill chars should be dim — no gradient when dimmed
         for cell in &filled_cells {

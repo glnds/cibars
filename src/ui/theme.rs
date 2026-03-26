@@ -24,9 +24,9 @@ pub const STATUS_IDLE: Color = Color::Rgb(86, 95, 137);
 // Separator color
 pub const SEPARATOR: Color = Color::Rgb(59, 66, 97);
 
-// Progress bar characters
-pub const BAR_FILLED: char = '\u{2588}'; // █
-pub const BAR_UNFILLED: char = '\u{2591}'; // ░
+// Progress bar characters (braille, 4-dot height)
+pub const BAR_FILLED: char = '\u{28FF}'; // ⣿
+pub const BAR_UNFILLED: char = '\u{28FF}'; // ⣿
 
 // Tick bar characters
 pub const TICK_FILLED: char = '\u{25AE}'; // ▮
@@ -61,8 +61,8 @@ mod tests {
 
     #[test]
     fn bar_chars_are_correct_unicode() {
-        assert_eq!(BAR_FILLED, '█');
-        assert_eq!(BAR_UNFILLED, '░');
+        assert_eq!(BAR_FILLED, '⣿');
+        assert_eq!(BAR_UNFILLED, '⣿');
     }
 
     #[test]
