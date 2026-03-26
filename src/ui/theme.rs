@@ -7,6 +7,7 @@ pub const BORDER_PIPELINES: Color = Color::Rgb(187, 154, 247);
 pub const BORDER_STATUS: Color = Color::Rgb(86, 95, 137);
 
 // Text colors
+#[allow(dead_code)]
 pub const FG_PRIMARY: Color = Color::Rgb(192, 202, 245);
 pub const FG_DIM: Color = Color::Rgb(86, 95, 137);
 
