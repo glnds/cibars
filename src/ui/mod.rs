@@ -237,7 +237,7 @@ pub fn run_ui(
             let has_actions = !sorted_wf_groups.is_empty();
             let has_pipelines = !sorted_pipe_groups.is_empty();
 
-            // Count action rows: CI jobs + separator (if review present) + review jobs
+            // Count action rows: CI jobs + spacers + separator + review jobs + spacers
             let action_rows: usize = if app.actions_expanded {
                 let ci_jobs: usize = sorted_wf_groups
                     .iter()
@@ -245,21 +245,37 @@ pub fn run_ui(
                     .flat_map(|g| g.jobs.iter())
                     .filter(|j| !j.gone)
                     .count();
+                let ci_groups_with_jobs = sorted_wf_groups
+                    .iter()
+                    .filter(|g| g.category == WorkflowCategory::CI)
+                    .filter(|g| g.jobs.iter().any(|j| !j.gone))
+                    .count();
+                let ci_spacers = ci_groups_with_jobs.saturating_sub(1);
                 let review_jobs: usize = sorted_wf_groups
                     .iter()
                     .filter(|g| g.category == WorkflowCategory::Review)
                     .flat_map(|g| g.jobs.iter())
                     .filter(|j| !j.gone)
                     .count();
+                let review_groups_with_jobs = sorted_wf_groups
+                    .iter()
+                    .filter(|g| g.category == WorkflowCategory::Review)
+                    .filter(|g| g.jobs.iter().any(|j| !j.gone))
+                    .count();
+                let review_spacers = review_groups_with_jobs.saturating_sub(1);
                 let separator = if review_jobs > 0 { 1 } else { 0 };
-                ci_jobs + separator + review_jobs
+                ci_jobs + ci_spacers + separator + review_jobs + review_spacers
             } else {
                 0
             };
 
-            // Count pipeline rows: pipeline name headers + non-gone stages
+            // Count pipeline rows: headers + stages + spacers between groups
             let pipe_rows: usize = if app.pipelines_expanded {
-                sorted_pipe_groups
+                let groups_with_stages: usize = sorted_pipe_groups
+                    .iter()
+                    .filter(|g| g.stages.iter().any(|s| !s.gone))
+                    .count();
+                let base: usize = sorted_pipe_groups
                     .iter()
                     .map(|g| {
                         let stage_count = g.stages.iter().filter(|s| !s.gone).count();
@@ -269,7 +285,9 @@ pub fn run_ui(
                             0
                         }
                     })
-                    .sum()
+                    .sum();
+                let spacers = groups_with_stages.saturating_sub(1);
+                base + spacers
             } else {
                 0
             };
@@ -324,11 +342,21 @@ pub fn run_ui(
 
                 let job_name_width = all_jobs_name_width(&app.workflow_groups);
 
-                // CI workflows first
-                for group in sorted_wf_groups
+                // CI workflows first (with separator lines between groups)
+                let ci_groups: Vec<_> = sorted_wf_groups
                     .iter()
                     .filter(|g| g.category == WorkflowCategory::CI)
-                {
+                    .filter(|g| g.jobs.iter().any(|j| !j.gone))
+                    .collect();
+                for (gi, group) in ci_groups.iter().enumerate() {
+                    if gi > 0 && row < inner_areas.len() {
+                        let sep = "\u{2500}".repeat(inner_areas[row].width as usize);
+                        frame.render_widget(
+                            Line::from(Span::styled(sep, Style::default().fg(theme::SEPARATOR))),
+                            inner_areas[row],
+                        );
+                        row += 1;
+                    }
                     for bar in group.jobs.iter().filter(|j| !j.gone) {
                         if row >= inner_areas.len() {
                             break;
@@ -366,10 +394,23 @@ pub fn run_ui(
                     frame.render_widget(sep_line, inner_areas[row]);
                     row += 1;
 
-                    for group in sorted_wf_groups
+                    let review_groups: Vec<_> = sorted_wf_groups
                         .iter()
                         .filter(|g| g.category == WorkflowCategory::Review)
-                    {
+                        .filter(|g| g.jobs.iter().any(|j| !j.gone))
+                        .collect();
+                    for (gi, group) in review_groups.iter().enumerate() {
+                        if gi > 0 && row < inner_areas.len() {
+                            let sep = "\u{2500}".repeat(inner_areas[row].width as usize);
+                            frame.render_widget(
+                                Line::from(Span::styled(
+                                    sep,
+                                    Style::default().fg(theme::SEPARATOR),
+                                )),
+                                inner_areas[row],
+                            );
+                            row += 1;
+                        }
                         for bar in group.jobs.iter().filter(|j| !j.gone) {
                             if row >= inner_areas.len() {
                                 break;
@@ -417,10 +458,18 @@ pub fn run_ui(
                 let mut row = 0;
 
                 let stage_name_width = all_pipeline_stages_name_width(&app.pipeline_groups);
-                for group in &sorted_pipe_groups {
-                    let visible_stages: Vec<_> = group.stages.iter().filter(|s| !s.gone).collect();
-                    if visible_stages.is_empty() {
-                        continue;
+                let pipe_groups_visible: Vec<_> = sorted_pipe_groups
+                    .iter()
+                    .filter(|g| g.stages.iter().any(|s| !s.gone))
+                    .collect();
+                for (gi, group) in pipe_groups_visible.iter().enumerate() {
+                    if gi > 0 && row < inner_areas.len() {
+                        let sep = "\u{2500}".repeat(inner_areas[row].width as usize);
+                        frame.render_widget(
+                            Line::from(Span::styled(sep, Style::default().fg(theme::SEPARATOR))),
+                            inner_areas[row],
+                        );
+                        row += 1;
                     }
                     if row >= inner_areas.len() {
                         break;
@@ -439,6 +488,7 @@ pub fn run_ui(
                     frame.render_widget(header_line, inner_areas[row]);
                     row += 1;
                     // Stage bars
+                    let visible_stages: Vec<_> = group.stages.iter().filter(|s| !s.gone).collect();
                     for bar in &visible_stages {
                         if row >= inner_areas.len() {
                             break;
@@ -739,7 +789,7 @@ mod tests {
         assert_eq!(all_pipeline_stages_name_width(&groups), 10); // 6 + 4
     }
 
-    /// Count action rows including separator when Review workflows present
+    /// Count action rows including separators between groups and CI/Review boundary
     fn count_action_rows(groups: &[&WorkflowGroup]) -> usize {
         let ci_jobs: usize = groups
             .iter()
@@ -747,14 +797,26 @@ mod tests {
             .flat_map(|g| g.jobs.iter())
             .filter(|j| !j.gone)
             .count();
+        let ci_groups_with_jobs = groups
+            .iter()
+            .filter(|g| g.category == WorkflowCategory::CI)
+            .filter(|g| g.jobs.iter().any(|j| !j.gone))
+            .count();
+        let ci_spacers = ci_groups_with_jobs.saturating_sub(1);
         let review_jobs: usize = groups
             .iter()
             .filter(|g| g.category == WorkflowCategory::Review)
             .flat_map(|g| g.jobs.iter())
             .filter(|j| !j.gone)
             .count();
+        let review_groups_with_jobs = groups
+            .iter()
+            .filter(|g| g.category == WorkflowCategory::Review)
+            .filter(|g| g.jobs.iter().any(|j| !j.gone))
+            .count();
+        let review_spacers = review_groups_with_jobs.saturating_sub(1);
         let separator = if review_jobs > 0 { 1 } else { 0 };
-        ci_jobs + separator + review_jobs
+        ci_jobs + ci_spacers + separator + review_jobs + review_spacers
     }
 
     #[test]
@@ -792,6 +854,136 @@ mod tests {
         };
         let groups = vec![&ci];
         assert_eq!(count_action_rows(&groups), 1);
+    }
+
+    #[test]
+    fn action_rows_includes_spacers_between_ci_groups() {
+        let ci1 = WorkflowGroup {
+            name: "CI".to_string(),
+            jobs: vec![
+                make_test_bar("build", BuildStatus::Idle),
+                make_test_bar("test", BuildStatus::Idle),
+            ],
+            gone: false,
+            summary_status: BuildStatus::Idle,
+            run_id: None,
+            category: WorkflowCategory::CI,
+        };
+        let ci2 = WorkflowGroup {
+            name: "Deploy".to_string(),
+            jobs: vec![make_test_bar("deploy", BuildStatus::Idle)],
+            gone: false,
+            summary_status: BuildStatus::Idle,
+            run_id: None,
+            category: WorkflowCategory::CI,
+        };
+        let groups = vec![&ci1, &ci2];
+        // 2 CI jobs + 1 CI job + 1 spacer between groups = 4
+        assert_eq!(count_action_rows(&groups), 4);
+    }
+
+    #[test]
+    fn action_rows_single_ci_group_no_spacer() {
+        let ci = WorkflowGroup {
+            name: "CI".to_string(),
+            jobs: vec![
+                make_test_bar("build", BuildStatus::Idle),
+                make_test_bar("test", BuildStatus::Idle),
+            ],
+            gone: false,
+            summary_status: BuildStatus::Idle,
+            run_id: None,
+            category: WorkflowCategory::CI,
+        };
+        let groups = vec![&ci];
+        // 2 jobs, no spacer
+        assert_eq!(count_action_rows(&groups), 2);
+    }
+
+    #[test]
+    fn action_rows_spacers_and_separator() {
+        let ci1 = WorkflowGroup {
+            name: "CI".to_string(),
+            jobs: vec![make_test_bar("build", BuildStatus::Idle)],
+            gone: false,
+            summary_status: BuildStatus::Idle,
+            run_id: None,
+            category: WorkflowCategory::CI,
+        };
+        let ci2 = WorkflowGroup {
+            name: "Deploy".to_string(),
+            jobs: vec![make_test_bar("deploy", BuildStatus::Idle)],
+            gone: false,
+            summary_status: BuildStatus::Idle,
+            run_id: None,
+            category: WorkflowCategory::CI,
+        };
+        let review = WorkflowGroup {
+            name: "Review".to_string(),
+            jobs: vec![make_test_bar("review", BuildStatus::Idle)],
+            gone: false,
+            summary_status: BuildStatus::Idle,
+            run_id: None,
+            category: WorkflowCategory::Review,
+        };
+        let groups = vec![&ci1, &ci2, &review];
+        // 1 + 1 spacer + 1 + 1 separator + 1 review = 5
+        assert_eq!(count_action_rows(&groups), 5);
+    }
+
+    /// Count pipeline rows including spacers between groups
+    fn count_pipe_rows(groups: &[&PipelineGroup]) -> usize {
+        let groups_with_stages: Vec<_> = groups
+            .iter()
+            .filter(|g| g.stages.iter().any(|s| !s.gone))
+            .collect();
+        let base: usize = groups_with_stages
+            .iter()
+            .map(|g| 1 + g.stages.iter().filter(|s| !s.gone).count())
+            .sum();
+        let spacers = groups_with_stages.len().saturating_sub(1);
+        base + spacers
+    }
+
+    #[test]
+    fn pipe_rows_includes_spacers_between_groups() {
+        let g1 = PipelineGroup {
+            name: "pipe-a".to_string(),
+            stages: vec![
+                make_test_bar("Source", BuildStatus::Succeeded),
+                make_test_bar("Build", BuildStatus::Running),
+            ],
+            gone: false,
+            summary_status: BuildStatus::Running,
+            pending_link: false,
+        };
+        let g2 = PipelineGroup {
+            name: "pipe-b".to_string(),
+            stages: vec![make_test_bar("Deploy", BuildStatus::Idle)],
+            gone: false,
+            summary_status: BuildStatus::Idle,
+            pending_link: false,
+        };
+        let groups = vec![&g1, &g2];
+        // group1: 1 header + 2 stages = 3, group2: 1 header + 1 stage = 2, 1 spacer = 6
+        assert_eq!(count_pipe_rows(&groups), 6);
+    }
+
+    #[test]
+    fn pipe_rows_single_group_no_spacer() {
+        let g = PipelineGroup {
+            name: "pipe".to_string(),
+            stages: vec![
+                make_test_bar("Source", BuildStatus::Succeeded),
+                make_test_bar("Build", BuildStatus::Running),
+            ],
+            gone: false,
+            summary_status: BuildStatus::Running,
+            pending_link: false,
+        };
+        let groups = vec![&g];
+        // 1 header + 2 stages = 3, no spacer
+        assert_eq!(count_pipe_rows(&groups), 3);
     }
 
     #[test]
