@@ -4,7 +4,7 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
-use ratatui::widgets::Widget;
+use ratatui::widgets::{Block, BorderType, Widget};
 
 use super::theme;
 use crate::config::HookStatus;
@@ -36,14 +36,24 @@ fn filled_ticks(elapsed: Duration, state: &PollState) -> usize {
     (elapsed_ms / tick_duration_ms).min(NUM_TICKS) as usize
 }
 
-/// Build the tick bar string: filled '=' + remaining '-'.
+/// Build the tick bar string: filled '▮' + remaining '▯'.
 fn tick_bar(filled: usize) -> String {
     let remaining = (NUM_TICKS as usize).saturating_sub(filled);
-    format!("{}{}", "=".repeat(filled), "-".repeat(remaining))
+    format!(
+        "{}{}",
+        theme::TICK_FILLED.to_string().repeat(filled),
+        theme::TICK_EMPTY.to_string().repeat(remaining)
+    )
 }
 
 impl Widget for StatusBar<'_> {
     fn render(self, area: Rect, buf: &mut Buffer) {
+        let block = Block::bordered()
+            .border_type(BorderType::Rounded)
+            .border_style(Style::default().fg(theme::BORDER_STATUS));
+        let inner = block.inner(area);
+        block.render(area, buf);
+
         let label = match self.poll_state {
             PollState::Idle => "Slow",
             PollState::LongIdle => "Long",
@@ -53,18 +63,23 @@ impl Widget for StatusBar<'_> {
         let filled = filled_ticks(self.elapsed_since_poll, self.poll_state);
         let bar = tick_bar(filled);
 
-        let mut spans = vec![Span::raw(format!("{label} Polling: {bar}"))];
+        let dim_sep = Span::styled(" \u{2502} ", Style::default().fg(theme::SEPARATOR));
+
+        let mut spans = vec![Span::raw(format!("{label} {bar}"))];
 
         if let Some(cd) = self.cooldown_remaining {
-            spans.push(Span::raw(format!(" | Cooldown: {}s", cd.as_secs())));
+            spans.push(dim_sep.clone());
+            spans.push(Span::raw(format!("Cooldown: {}s", cd.as_secs())));
         }
 
-        spans.push(Span::raw(" | e=expand b=boost q=quit"));
+        spans.push(dim_sep.clone());
+        spans.push(Span::raw("e=expand b=boost q=quit"));
 
         match self.hook_status {
             HookStatus::Missing | HookStatus::Incomplete => {
+                spans.push(dim_sep.clone());
                 spans.push(Span::styled(
-                    " | h=install pre-push hook",
+                    "h=install pre-push hook",
                     Style::default().fg(theme::STATUS_RUNNING),
                 ));
             }
@@ -72,14 +87,14 @@ impl Widget for StatusBar<'_> {
         }
 
         if !self.warnings.is_empty() {
-            let warn_text = format!(" | {}", self.warnings.join("; "));
+            spans.push(dim_sep);
             spans.push(Span::styled(
-                warn_text,
+                self.warnings.join("; "),
                 Style::default().fg(theme::STATUS_RUNNING),
             ));
         }
 
-        Line::from(spans).render(area, buf);
+        Line::from(spans).render(inner, buf);
     }
 }
 
@@ -89,6 +104,7 @@ mod tests {
     use ratatui::buffer::Buffer;
     use ratatui::layout::Rect;
 
+    /// Extract content from row 1 (inner area of bordered block).
     fn render_bar(state: &PollState, elapsed: Duration, cooldown: Option<Duration>) -> String {
         render_bar_with_hook(state, elapsed, cooldown, &HookStatus::Installed)
     }
@@ -106,24 +122,27 @@ mod tests {
             warnings: &[],
             hook_status,
         };
-        let area = Rect::new(0, 0, 120, 1);
+        let area = Rect::new(0, 0, 120, 3);
         let mut buf = Buffer::empty(area);
         bar.render(area, &mut buf);
         (0..120)
-            .map(|x| buf.cell((x, 0)).unwrap().symbol().to_string())
+            .map(|x| buf.cell((x, 1)).unwrap().symbol().to_string())
             .collect()
     }
 
     #[test]
     fn idle_shows_slow_polling() {
         let content = render_bar(&PollState::Idle, Duration::ZERO, None);
-        assert!(content.contains("Slow Polling:"), "got: {content}");
+        // No more "Polling:" label — just "Slow" followed by tick chars
+        assert!(content.contains("Slow"), "got: {content}");
+        assert!(!content.contains("Polling:"), "got: {content}");
     }
 
     #[test]
     fn active_shows_fast_polling() {
         let content = render_bar(&PollState::Active, Duration::ZERO, None);
-        assert!(content.contains("Fast Polling:"), "got: {content}");
+        assert!(content.contains("Fast"), "got: {content}");
+        assert!(!content.contains("Polling:"), "got: {content}");
     }
 
     #[test]
@@ -133,42 +152,54 @@ mod tests {
             Duration::ZERO,
             Some(Duration::from_secs(42)),
         );
-        assert!(content.contains("Fast Polling:"), "got: {content}");
+        assert!(content.contains("Fast"), "got: {content}");
+        assert!(!content.contains("Polling:"), "got: {content}");
         assert!(content.contains("Cooldown: 42s"), "got: {content}");
     }
 
     #[test]
     fn idle_zero_elapsed_shows_all_empty() {
         let content = render_bar(&PollState::Idle, Duration::ZERO, None);
-        assert!(content.contains("-----"), "got: {content}");
+        let empty5: String = std::iter::repeat(theme::TICK_EMPTY).take(5).collect();
+        assert!(content.contains(&empty5), "got: {content}");
     }
 
     #[test]
     fn idle_near_interval_shows_most_filled() {
         // At 20s, 20000/5000 = 4 ticks filled (tick_duration = 30000/6 = 5000ms)
         let content = render_bar(&PollState::Idle, Duration::from_secs(20), None);
-        assert!(content.contains("====-"), "got: {content}");
+        let filled4: String = std::iter::repeat(theme::TICK_FILLED).take(4).collect();
+        let empty1: String = std::iter::repeat(theme::TICK_EMPTY).take(1).collect();
+        let expected = format!("{filled4}{empty1}");
+        assert!(content.contains(&expected), "got: {content}");
     }
 
     #[test]
     fn idle_at_interval_shows_full() {
         // At exactly the interval boundary, bar should be full (poll is due)
         let content = render_bar(&PollState::Idle, Duration::from_secs(30), None);
-        assert!(content.contains("====="), "got: {content}");
+        let filled5: String = std::iter::repeat(theme::TICK_FILLED).take(5).collect();
+        assert!(content.contains(&filled5), "got: {content}");
     }
 
     #[test]
     fn active_partial_elapsed() {
         // 1s per tick, 2s elapsed → 2 filled
         let content = render_bar(&PollState::Active, Duration::from_secs(2), None);
-        assert!(content.contains("==---"), "got: {content}");
+        let filled2: String = std::iter::repeat(theme::TICK_FILLED).take(2).collect();
+        let empty3: String = std::iter::repeat(theme::TICK_EMPTY).take(3).collect();
+        let expected = format!("{filled2}{empty3}");
+        assert!(content.contains(&expected), "got: {content}");
     }
 
     #[test]
     fn idle_partial_elapsed() {
         // 6s per tick, 12s elapsed → 2 filled
         let content = render_bar(&PollState::Idle, Duration::from_secs(12), None);
-        assert!(content.contains("==---"), "got: {content}");
+        let filled2: String = std::iter::repeat(theme::TICK_FILLED).take(2).collect();
+        let empty3: String = std::iter::repeat(theme::TICK_EMPTY).take(3).collect();
+        let expected = format!("{filled2}{empty3}");
+        assert!(content.contains(&expected), "got: {content}");
     }
 
     #[test]
@@ -181,26 +212,29 @@ mod tests {
     #[test]
     fn watching_shows_fast_polling() {
         let content = render_bar(&PollState::Watching, Duration::ZERO, None);
-        assert!(content.contains("Fast Polling:"), "got: {content}");
+        assert!(content.contains("Fast"), "got: {content}");
+        assert!(!content.contains("Polling:"), "got: {content}");
     }
 
     #[test]
     fn long_idle_shows_long_polling() {
         let content = render_bar(&PollState::LongIdle, Duration::ZERO, None);
-        assert!(content.contains("Long Polling:"), "got: {content}");
+        assert!(content.contains("Long"), "got: {content}");
+        assert!(!content.contains("Polling:"), "got: {content}");
     }
 
     #[test]
     fn long_idle_partial_elapsed() {
         // 60s per tick, 120s elapsed → 2 filled
         let content = render_bar(&PollState::LongIdle, Duration::from_secs(120), None);
-        assert!(content.contains("==---"), "got: {content}");
+        let filled2: String = std::iter::repeat(theme::TICK_FILLED).take(2).collect();
+        let empty3: String = std::iter::repeat(theme::TICK_EMPTY).take(3).collect();
+        let expected = format!("{filled2}{empty3}");
+        assert!(content.contains(&expected), "got: {content}");
     }
 
     #[test]
     fn filled_ticks_full_after_interval() {
-        // When elapsed exceeds the poll interval (poll due/running),
-        // bar should be full — reset happens when poll completes and timer resets.
         assert_eq!(
             filled_ticks(Duration::from_millis(5500), &PollState::Active),
             5
@@ -243,13 +277,10 @@ mod tests {
 
     #[test]
     fn filled_ticks_cycle_boundary() {
-        // At cycle start (0ms elapsed), bar must be empty — critical for the
-        // fix where last_poll_started resets at top of loop, not after poll.
         assert_eq!(filled_ticks(Duration::ZERO, &PollState::Active), 0);
         assert_eq!(filled_ticks(Duration::ZERO, &PollState::Idle), 0);
         assert_eq!(filled_ticks(Duration::ZERO, &PollState::LongIdle), 0);
 
-        // At exactly the interval, bar must be full (poll is due).
         assert_eq!(
             filled_ticks(Duration::from_secs(5), &PollState::Active),
             NUM_TICKS as usize
@@ -266,9 +297,6 @@ mod tests {
 
     #[test]
     fn filled_ticks_full_before_interval() {
-        // Bar must show full "=====" BEFORE the interval expires,
-        // so the UI can actually display it before the reset.
-        // At ~83% of interval, all 5 ticks should be filled.
         assert_eq!(
             filled_ticks(Duration::from_millis(4500), &PollState::Active),
             NUM_TICKS as usize
@@ -285,9 +313,32 @@ mod tests {
 
     #[test]
     fn tick_bar_formatting() {
-        assert_eq!(tick_bar(0), "-----");
-        assert_eq!(tick_bar(3), "===--");
-        assert_eq!(tick_bar(5), "=====");
+        let f = theme::TICK_FILLED;
+        let e = theme::TICK_EMPTY;
+        assert_eq!(tick_bar(0), format!("{e}{e}{e}{e}{e}"));
+        assert_eq!(tick_bar(3), format!("{f}{f}{f}{e}{e}"));
+        assert_eq!(tick_bar(5), format!("{f}{f}{f}{f}{f}"));
+    }
+
+    #[test]
+    fn tick_bar_uses_unicode_chars() {
+        let bar = tick_bar(3);
+        // Verify exact Unicode code points
+        let chars: Vec<char> = bar.chars().collect();
+        assert_eq!(chars[0], '\u{25AE}'); // ▮
+        assert_eq!(chars[1], '\u{25AE}');
+        assert_eq!(chars[2], '\u{25AE}');
+        assert_eq!(chars[3], '\u{25AF}'); // ▯
+        assert_eq!(chars[4], '\u{25AF}');
+    }
+
+    #[test]
+    fn separator_uses_box_drawing_char() {
+        let content = render_bar(&PollState::Idle, Duration::ZERO, None);
+        assert!(
+            content.contains('\u{2502}'),
+            "expected │ (U+2502) in: {content}"
+        );
     }
 
     fn render_bar_with_warnings(
@@ -304,11 +355,11 @@ mod tests {
             warnings,
             hook_status,
         };
-        let area = Rect::new(0, 0, 120, 1);
+        let area = Rect::new(0, 0, 120, 3);
         let mut buf = Buffer::empty(area);
         bar.render(area, &mut buf);
         (0..120)
-            .map(|x| buf.cell((x, 0)).unwrap().symbol().to_string())
+            .map(|x| buf.cell((x, 1)).unwrap().symbol().to_string())
             .collect()
     }
 
@@ -337,5 +388,45 @@ mod tests {
         );
         assert!(content.contains("h=install"), "got: {content}");
         assert!(content.contains("AWS: timeout"), "got: {content}");
+    }
+
+    #[test]
+    fn statusbar_renders_in_rounded_block() {
+        let bar = StatusBar {
+            poll_state: &PollState::Idle,
+            elapsed_since_poll: Duration::ZERO,
+            cooldown_remaining: None,
+            warnings: &[],
+            hook_status: &HookStatus::Installed,
+        };
+        let area = Rect::new(0, 0, 40, 3);
+        let mut buf = Buffer::empty(area);
+        bar.render(area, &mut buf);
+
+        // Row 0: top border with rounded corner ╭
+        let top_left = buf.cell((0, 0)).unwrap().symbol().to_string();
+        assert_eq!(top_left, "╭", "expected rounded top-left corner");
+
+        // Row 2: bottom border with rounded corner ╰
+        let bot_left = buf.cell((0, 2)).unwrap().symbol().to_string();
+        assert_eq!(bot_left, "╰", "expected rounded bottom-left corner");
+    }
+
+    #[test]
+    fn statusbar_block_border_color() {
+        let bar = StatusBar {
+            poll_state: &PollState::Idle,
+            elapsed_since_poll: Duration::ZERO,
+            cooldown_remaining: None,
+            warnings: &[],
+            hook_status: &HookStatus::Installed,
+        };
+        let area = Rect::new(0, 0, 40, 3);
+        let mut buf = Buffer::empty(area);
+        bar.render(area, &mut buf);
+
+        // Border cells should use theme::BORDER_STATUS color
+        let border_cell = buf.cell((0, 0)).unwrap();
+        assert_eq!(border_cell.fg, theme::BORDER_STATUS);
     }
 }

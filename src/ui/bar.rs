@@ -5,7 +5,9 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Widget;
 
 use super::theme;
-use crate::model::{format_finished_time, Bar, PipelineGroup, WorkflowCategory, WorkflowGroup};
+use crate::model::{
+    format_finished_time, Bar, BuildStatus, PipelineGroup, WorkflowCategory, WorkflowGroup,
+};
 
 /// Max chars for the name column
 pub const MAX_NAME_WIDTH: usize = 30;
@@ -55,7 +57,7 @@ impl Widget for BarWidget<'_> {
 
         let dot_prefix_len = if self.status_dot.is_some() { 2 } else { 0 };
         let name_col = self.name_width + 2;
-        let overhead = dot_prefix_len + name_col + 2 + ts_reserve;
+        let overhead = dot_prefix_len + name_col + ts_reserve;
         if (area.width as usize) <= overhead {
             return;
         }
@@ -76,10 +78,31 @@ impl Widget for BarWidget<'_> {
             spans.push(Span::styled("\u{25CF} ", Style::default().fg(dot_color)));
         }
         spans.push(Span::raw(format!("{name_display}  ")));
-        spans.push(Span::raw("["));
-        spans.push(Span::styled("|".repeat(filled), Style::default().fg(color)));
-        spans.push(Span::raw(" ".repeat(empty)));
-        spans.push(Span::raw("]"));
+        if !self.dim && self.bar.status == BuildStatus::Running && filled > 0 {
+            let tip_len = filled.min(2);
+            let main_len = filled - tip_len;
+            if main_len > 0 {
+                spans.push(Span::styled(
+                    theme::BAR_FILLED.to_string().repeat(main_len),
+                    Style::default().fg(color),
+                ));
+            }
+            spans.push(Span::styled(
+                theme::BAR_FILLED.to_string().repeat(tip_len),
+                Style::default().fg(theme::STATUS_RUNNING_TIP),
+            ));
+        } else if filled > 0 {
+            spans.push(Span::styled(
+                theme::BAR_FILLED.to_string().repeat(filled),
+                Style::default().fg(color),
+            ));
+        }
+        if empty > 0 {
+            spans.push(Span::styled(
+                theme::BAR_UNFILLED.to_string().repeat(empty),
+                Style::default().fg(theme::BAR_EMPTY),
+            ));
+        }
         match ts_str {
             Some(ts) => spans.push(Span::styled(
                 format!(" {ts} "),
@@ -224,8 +247,8 @@ mod tests {
             .map(|c| c.symbol().chars().next().unwrap_or(' '))
             .collect();
         assert!(content.starts_with("deploy"));
-        assert!(content.contains('['));
-        assert!(content.contains(']'));
+        // Idle bar has fill=0, so entire bar should be BAR_UNFILLED chars
+        assert!(content.contains(theme::BAR_UNFILLED));
     }
 
     #[test]
@@ -236,13 +259,13 @@ mod tests {
         let mut buf = Buffer::empty(area);
         widget.render(area, &mut buf);
 
-        let bracket_pos = buf
+        let filled_str = theme::BAR_FILLED.to_string();
+        let first_fill = buf
             .content()
             .iter()
-            .position(|c| c.symbol() == "[")
-            .unwrap();
-        let first_fill = &buf.content()[bracket_pos + 1];
-        assert_eq!(first_fill.symbol(), "|");
+            .find(|c| c.symbol() == filled_str)
+            .expect("should have BAR_FILLED char");
+        // Running bars have gradient — first fill char should be STATUS_RUNNING
         assert_eq!(first_fill.fg, theme::STATUS_RUNNING);
     }
 
@@ -254,12 +277,12 @@ mod tests {
         let mut buf = Buffer::empty(area);
         widget.render(area, &mut buf);
 
-        let bracket_pos = buf
+        let filled_str = theme::BAR_FILLED.to_string();
+        let first_fill = buf
             .content()
             .iter()
-            .position(|c| c.symbol() == "[")
-            .unwrap();
-        let first_fill = &buf.content()[bracket_pos + 1];
+            .find(|c| c.symbol() == filled_str)
+            .expect("should have BAR_FILLED char");
         assert_eq!(first_fill.fg, theme::STATUS_SUCCESS);
     }
 
@@ -271,12 +294,12 @@ mod tests {
         let mut buf = Buffer::empty(area);
         widget.render(area, &mut buf);
 
-        let bracket_pos = buf
+        let filled_str = theme::BAR_FILLED.to_string();
+        let first_fill = buf
             .content()
             .iter()
-            .position(|c| c.symbol() == "[")
-            .unwrap();
-        let first_fill = &buf.content()[bracket_pos + 1];
+            .find(|c| c.symbol() == filled_str)
+            .expect("should have BAR_FILLED char");
         assert_eq!(first_fill.fg, theme::STATUS_FAILED);
     }
 
@@ -510,13 +533,12 @@ mod tests {
         let mut buf = Buffer::empty(area);
         widget.render(area, &mut buf);
 
-        let bracket_pos = buf
+        let filled_str = theme::BAR_FILLED.to_string();
+        let first_fill = buf
             .content()
             .iter()
-            .position(|c| c.symbol() == "[")
-            .unwrap();
-        let first_fill = &buf.content()[bracket_pos + 1];
-        assert_eq!(first_fill.symbol(), "|");
+            .find(|c| c.symbol() == filled_str)
+            .expect("should have BAR_FILLED char");
         assert_eq!(first_fill.fg, theme::FG_DIM);
     }
 
@@ -546,13 +568,12 @@ mod tests {
         let mut buf = Buffer::empty(area);
         widget.render(area, &mut buf);
 
-        let bracket_pos = buf
+        let filled_str = theme::BAR_FILLED.to_string();
+        let first_fill = buf
             .content()
             .iter()
-            .position(|c| c.symbol() == "[")
-            .unwrap();
-        let first_fill = &buf.content()[bracket_pos + 1];
-        assert_eq!(first_fill.symbol(), "|");
+            .find(|c| c.symbol() == filled_str)
+            .expect("should have BAR_FILLED char");
         assert_eq!(first_fill.fg, theme::FG_DIM);
     }
 
@@ -564,13 +585,12 @@ mod tests {
         let mut buf = Buffer::empty(area);
         widget.render(area, &mut buf);
 
-        let bracket_pos = buf
+        let filled_str = theme::BAR_FILLED.to_string();
+        let first_fill = buf
             .content()
             .iter()
-            .position(|c| c.symbol() == "[")
-            .unwrap();
-        let first_fill = &buf.content()[bracket_pos + 1];
-        assert_eq!(first_fill.symbol(), "|");
+            .find(|c| c.symbol() == filled_str)
+            .expect("should have BAR_FILLED char");
         assert_eq!(first_fill.fg, theme::FG_DIM);
     }
 
@@ -582,14 +602,13 @@ mod tests {
         let mut buf = Buffer::empty(area);
         widget.render(area, &mut buf);
 
-        // Idle bar has fill=0, so no '|' chars — just verify it doesn't crash
+        // Idle bar has fill=0 — verify BAR_UNFILLED chars are present
         let content: String = buf
             .content()
             .iter()
             .map(|c| c.symbol().chars().next().unwrap_or(' '))
             .collect();
-        assert!(content.contains('['));
-        assert!(content.contains(']'));
+        assert!(content.contains(theme::BAR_UNFILLED));
     }
 
     #[test]
@@ -611,7 +630,7 @@ mod tests {
     #[test]
     fn bar_renders_nothing_for_narrow_area() {
         let name_width: usize = 10;
-        let overhead = name_width + 2 + 2; // name_col + 2
+        let overhead = name_width + 2; // name_col (no brackets)
         let bar = make_bar("build", BuildStatus::Running, 3);
         let widget = BarWidget::new(&bar, name_width, false);
         let area = Rect::new(0, 0, overhead as u16, 1);
@@ -872,10 +891,10 @@ mod tests {
             .iter()
             .map(|c| c.symbol().chars().next().unwrap_or(' '))
             .collect();
-        let after_bracket = content.split(']').last().unwrap_or("");
+        // Timestamp should contain HH:MM somewhere after the bar fill
         assert!(
-            after_bracket.contains(':'),
-            "expected HH:MM after bar, got: {content}"
+            content.contains(':'),
+            "expected HH:MM in bar, got: {content}"
         );
     }
 
@@ -901,10 +920,9 @@ mod tests {
             "expected trailing space after timestamp, got: '{content}'"
         );
         // Verify there's still a timestamp present
-        let after_bracket = content.split(']').last().unwrap_or("");
         assert!(
-            after_bracket.contains(':'),
-            "expected HH:MM after bar, got: {content}"
+            content.contains(':'),
+            "expected HH:MM in bar, got: {content}"
         );
     }
 
@@ -921,15 +939,14 @@ mod tests {
             .iter()
             .map(|c| c.symbol().chars().next().unwrap_or(' '))
             .collect();
-        let after_bracket = content.split(']').last().unwrap_or("");
         assert!(
-            !after_bracket.contains(':'),
+            !content.contains(':'),
             "no timestamp expected, got: {content}"
         );
     }
 
     #[test]
-    fn bars_with_and_without_timestamp_have_same_bracket_positions() {
+    fn bars_with_and_without_timestamp_have_same_bar_start() {
         use chrono::{TimeZone, Utc};
 
         let ts = Utc.with_ymd_and_hms(2026, 3, 18, 14, 28, 0).unwrap();
@@ -938,41 +955,145 @@ mod tests {
         let bar_without_ts = make_bar("build", BuildStatus::Succeeded, 5);
 
         let area = Rect::new(0, 0, 40, 1);
+        let filled_str = theme::BAR_FILLED.to_string();
 
         let mut buf_with = Buffer::empty(area);
         BarWidget::new(&bar_with_ts, 10, false).render(area, &mut buf_with);
-        let bracket_open_with = buf_with
+        let bar_start_with = buf_with
             .content()
             .iter()
-            .position(|c| c.symbol() == "[")
-            .unwrap();
-        let bracket_close_with = buf_with
-            .content()
-            .iter()
-            .position(|c| c.symbol() == "]")
-            .unwrap();
+            .position(|c| c.symbol() == filled_str)
+            .expect("should have BAR_FILLED");
 
         let mut buf_without = Buffer::empty(area);
         BarWidget::new(&bar_without_ts, 10, false).render(area, &mut buf_without);
-        let bracket_open_without = buf_without
+        let bar_start_without = buf_without
             .content()
             .iter()
-            .position(|c| c.symbol() == "[")
-            .unwrap();
-        let bracket_close_without = buf_without
-            .content()
-            .iter()
-            .position(|c| c.symbol() == "]")
-            .unwrap();
+            .position(|c| c.symbol() == filled_str)
+            .expect("should have BAR_FILLED");
 
         assert_eq!(
-            bracket_open_with, bracket_open_without,
-            "opening bracket should be at same position"
+            bar_start_with, bar_start_without,
+            "bar fill should start at same position regardless of timestamp"
         );
-        assert_eq!(
-            bracket_close_with, bracket_close_without,
-            "closing bracket should be at same position (stable bar length)"
+    }
+
+    #[test]
+    fn bar_empty_fill_uses_bar_empty_color() {
+        let bar = make_bar("build", BuildStatus::Running, 3);
+        let widget = BarWidget::new(&bar, 10, false);
+        let area = Rect::new(0, 0, 30, 1);
+        let mut buf = Buffer::empty(area);
+        widget.render(area, &mut buf);
+
+        let unfilled_str = theme::BAR_UNFILLED.to_string();
+        let unfilled_cell = buf
+            .content()
+            .iter()
+            .find(|c| c.symbol() == unfilled_str)
+            .expect("should have BAR_UNFILLED char");
+        assert_eq!(unfilled_cell.fg, theme::BAR_EMPTY);
+    }
+
+    #[test]
+    fn bar_has_no_brackets() {
+        let bar = make_bar("build", BuildStatus::Succeeded, 5);
+        let widget = BarWidget::new(&bar, 10, false);
+        let area = Rect::new(0, 0, 30, 1);
+        let mut buf = Buffer::empty(area);
+        widget.render(area, &mut buf);
+
+        let has_bracket = buf
+            .content()
+            .iter()
+            .any(|c| c.symbol() == "[" || c.symbol() == "]");
+        assert!(!has_bracket, "bar should not contain brackets");
+    }
+
+    #[test]
+    fn running_bar_gradient_tip() {
+        let bar = make_bar("build", BuildStatus::Running, 10);
+        let widget = BarWidget::new(&bar, 10, false);
+        let area = Rect::new(0, 0, 40, 1);
+        let mut buf = Buffer::empty(area);
+        widget.render(area, &mut buf);
+
+        let filled_str = theme::BAR_FILLED.to_string();
+        let filled_cells: Vec<_> = buf
+            .content()
+            .iter()
+            .filter(|c| c.symbol() == filled_str)
+            .collect();
+        assert!(
+            filled_cells.len() >= 3,
+            "need enough filled cells for gradient"
         );
+        // Last 2 filled chars should be tip color (orange)
+        let len = filled_cells.len();
+        assert_eq!(filled_cells[len - 1].fg, theme::STATUS_RUNNING_TIP);
+        assert_eq!(filled_cells[len - 2].fg, theme::STATUS_RUNNING_TIP);
+        // Earlier chars should be main running color (yellow)
+        assert_eq!(filled_cells[0].fg, theme::STATUS_RUNNING);
+    }
+
+    #[test]
+    fn running_bar_small_fill_all_tip() {
+        let bar = make_bar("build", BuildStatus::Running, 1);
+        let widget = BarWidget::new(&bar, 10, false);
+        let area = Rect::new(0, 0, 30, 1);
+        let mut buf = Buffer::empty(area);
+        widget.render(area, &mut buf);
+
+        let filled_str = theme::BAR_FILLED.to_string();
+        let filled_cells: Vec<_> = buf
+            .content()
+            .iter()
+            .filter(|c| c.symbol() == filled_str)
+            .collect();
+        assert_eq!(filled_cells.len(), 1);
+        // Single char should be tip color
+        assert_eq!(filled_cells[0].fg, theme::STATUS_RUNNING_TIP);
+    }
+
+    #[test]
+    fn non_running_bar_no_gradient() {
+        let bar = make_bar("build", BuildStatus::Succeeded, 5);
+        let widget = BarWidget::new(&bar, 10, false);
+        let area = Rect::new(0, 0, 30, 1);
+        let mut buf = Buffer::empty(area);
+        widget.render(area, &mut buf);
+
+        let filled_str = theme::BAR_FILLED.to_string();
+        let filled_cells: Vec<_> = buf
+            .content()
+            .iter()
+            .filter(|c| c.symbol() == filled_str)
+            .collect();
+        // All fill chars should have the same color
+        for cell in &filled_cells {
+            assert_eq!(cell.fg, theme::STATUS_SUCCESS);
+        }
+    }
+
+    #[test]
+    fn dim_running_bar_no_gradient() {
+        let bar = make_bar("build", BuildStatus::Running, 5);
+        let widget = BarWidget::new(&bar, 10, true);
+        let area = Rect::new(0, 0, 30, 1);
+        let mut buf = Buffer::empty(area);
+        widget.render(area, &mut buf);
+
+        let filled_str = theme::BAR_FILLED.to_string();
+        let filled_cells: Vec<_> = buf
+            .content()
+            .iter()
+            .filter(|c| c.symbol() == filled_str)
+            .collect();
+        // All fill chars should be dim — no gradient when dimmed
+        for cell in &filled_cells {
+            assert_eq!(cell.fg, theme::FG_DIM);
+        }
     }
 
     #[test]

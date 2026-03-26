@@ -201,7 +201,7 @@ pub fn run_ui(
                 constraints.push(Constraint::Length(1));
             }
             constraints.push(Constraint::Fill(1)); // remaining space
-            constraints.push(Constraint::Length(1)); // status bar
+            constraints.push(Constraint::Length(3)); // status bar (bordered block)
 
             let areas = Layout::vertical(constraints).split(size);
             let mut idx = 0;
