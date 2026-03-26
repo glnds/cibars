@@ -1,6 +1,7 @@
 pub mod bar;
 pub mod header;
 pub mod statusbar;
+pub mod theme;
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -11,7 +12,7 @@ use tokio::sync::Notify;
 use anyhow::Result;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use ratatui::layout::{Constraint, Layout};
-use ratatui::style::{Color, Style};
+use ratatui::style::Style;
 use ratatui::widgets::Paragraph;
 use ratatui::DefaultTerminal;
 
@@ -225,7 +226,7 @@ pub fn run_ui(
                     "No recent workflow runs found"
                 };
                 frame.render_widget(
-                    Paragraph::new(msg).style(Style::default().fg(Color::DarkGray)),
+                    Paragraph::new(msg).style(Style::default().fg(theme::FG_DIM)),
                     areas[idx],
                 );
             } else {
@@ -248,7 +249,7 @@ pub fn run_ui(
                     for bar in group.jobs.iter().filter(|j| !j.gone) {
                         let bar_dim = dim || group.gone;
                         let dot_color = if group.gone {
-                            Color::DarkGray
+                            theme::FG_DIM
                         } else {
                             bar.status.color()
                         };
@@ -275,7 +276,7 @@ pub fn run_ui(
                     let sep_text = format!("\u{2500}\u{2500}{label}{pad}");
                     let sep_line = ratatui::text::Line::from(ratatui::text::Span::styled(
                         sep_text,
-                        Style::default().fg(Color::DarkGray),
+                        Style::default().fg(theme::SEPARATOR),
                     ));
                     frame.render_widget(sep_line, areas[idx]);
                     idx += 1;
@@ -287,7 +288,7 @@ pub fn run_ui(
                     {
                         for bar in group.jobs.iter().filter(|j| !j.gone) {
                             frame.render_widget(
-                                BarWidget::new(bar, job_name_width, true).with_dot(Color::DarkGray),
+                                BarWidget::new(bar, job_name_width, true).with_dot(theme::FG_DIM),
                                 areas[idx],
                             );
                             idx += 1;
@@ -304,7 +305,7 @@ pub fn run_ui(
                     "No pipelines found in this account/region"
                 };
                 frame.render_widget(
-                    Paragraph::new(msg).style(Style::default().fg(Color::DarkGray)),
+                    Paragraph::new(msg).style(Style::default().fg(theme::FG_DIM)),
                     areas[idx],
                 );
             } else {
@@ -325,7 +326,7 @@ pub fn run_ui(
                     }
                     // Pipeline name header with status dot
                     let dot_color = if group.gone || group.pending_link {
-                        Color::DarkGray
+                        theme::FG_DIM
                     } else {
                         group.summary_status.color()
                     };

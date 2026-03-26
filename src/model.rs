@@ -17,12 +17,12 @@ pub enum BuildStatus {
 
 impl BuildStatus {
     pub fn color(&self) -> ratatui::style::Color {
-        use ratatui::style::Color;
+        use crate::ui::theme;
         match self {
-            Self::Running => Color::Yellow,
-            Self::Succeeded => Color::Green,
-            Self::Failed => Color::Red,
-            Self::Idle => Color::DarkGray,
+            Self::Running => theme::STATUS_RUNNING,
+            Self::Succeeded => theme::STATUS_SUCCESS,
+            Self::Failed => theme::STATUS_FAILED,
+            Self::Idle => theme::STATUS_IDLE,
         }
     }
 }
@@ -547,11 +547,11 @@ mod tests {
 
     #[test]
     fn build_status_color_values() {
-        use ratatui::style::Color;
-        assert_eq!(BuildStatus::Running.color(), Color::Yellow);
-        assert_eq!(BuildStatus::Succeeded.color(), Color::Green);
-        assert_eq!(BuildStatus::Failed.color(), Color::Red);
-        assert_eq!(BuildStatus::Idle.color(), Color::DarkGray);
+        use crate::ui::theme;
+        assert_eq!(BuildStatus::Running.color(), theme::STATUS_RUNNING);
+        assert_eq!(BuildStatus::Succeeded.color(), theme::STATUS_SUCCESS);
+        assert_eq!(BuildStatus::Failed.color(), theme::STATUS_FAILED);
+        assert_eq!(BuildStatus::Idle.color(), theme::STATUS_IDLE);
     }
 
     #[test]

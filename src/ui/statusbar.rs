@@ -2,10 +2,11 @@ use std::time::Duration;
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Style};
+use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Widget;
 
+use super::theme;
 use crate::config::HookStatus;
 use crate::poll_scheduler::PollState;
 
@@ -64,7 +65,7 @@ impl Widget for StatusBar<'_> {
             HookStatus::Missing | HookStatus::Incomplete => {
                 spans.push(Span::styled(
                     " | h=install pre-push hook",
-                    Style::default().fg(Color::Yellow),
+                    Style::default().fg(theme::STATUS_RUNNING),
                 ));
             }
             _ => {}
@@ -72,7 +73,10 @@ impl Widget for StatusBar<'_> {
 
         if !self.warnings.is_empty() {
             let warn_text = format!(" | {}", self.warnings.join("; "));
-            spans.push(Span::styled(warn_text, Style::default().fg(Color::Yellow)));
+            spans.push(Span::styled(
+                warn_text,
+                Style::default().fg(theme::STATUS_RUNNING),
+            ));
         }
 
         Line::from(spans).render(area, buf);

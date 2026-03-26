@@ -4,6 +4,7 @@ use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Widget;
 
+use super::theme;
 use crate::model::{format_finished_time, Bar, PipelineGroup, WorkflowCategory, WorkflowGroup};
 
 /// Max chars for the name column
@@ -33,7 +34,7 @@ impl<'a> BarWidget<'a> {
 
     fn status_color(&self) -> Color {
         if self.dim {
-            Color::DarkGray
+            theme::FG_DIM
         } else {
             self.bar.status.color()
         }
@@ -82,7 +83,7 @@ impl Widget for BarWidget<'_> {
         match ts_str {
             Some(ts) => spans.push(Span::styled(
                 format!(" {ts} "),
-                Style::default().fg(Color::DarkGray),
+                Style::default().fg(theme::FG_DIM),
             )),
             None => spans.push(Span::raw("       ")), // 7 spaces
         }
@@ -122,7 +123,7 @@ impl Widget for ActionsTitle<'_> {
 
         let mut spans = vec![Span::styled(
             "GitHub Actions ",
-            Style::default().fg(Color::Cyan),
+            Style::default().fg(theme::BORDER_ACTIONS),
         )];
 
         if !self.expanded {
@@ -131,7 +132,7 @@ impl Widget for ActionsTitle<'_> {
                 let visible_jobs: Vec<_> = group.jobs.iter().filter(|j| !j.gone).collect();
                 if visible_jobs.is_empty() {
                     let color = if group.gone || is_review {
-                        Color::DarkGray
+                        theme::FG_DIM
                     } else {
                         group.summary_status.color()
                     };
@@ -139,7 +140,7 @@ impl Widget for ActionsTitle<'_> {
                 } else {
                     for job in visible_jobs {
                         let color = if group.gone || is_review {
-                            Color::DarkGray
+                            theme::FG_DIM
                         } else {
                             job.status.color()
                         };
@@ -174,13 +175,13 @@ impl Widget for PipelinesTitle<'_> {
 
         let mut spans = vec![Span::styled(
             "CodePipelines ",
-            Style::default().fg(Color::Cyan),
+            Style::default().fg(theme::BORDER_PIPELINES),
         )];
 
         if !self.expanded {
             for group in self.groups {
                 let color = if group.gone || group.pending_link {
-                    Color::DarkGray
+                    theme::FG_DIM
                 } else {
                     group.summary_status.color()
                 };
@@ -196,6 +197,7 @@ impl Widget for PipelinesTitle<'_> {
 mod tests {
     use super::*;
     use crate::model::BuildStatus;
+    use crate::ui::theme;
 
     fn make_bar(name: &str, status: BuildStatus, fill: usize) -> Bar {
         Bar {
@@ -241,7 +243,7 @@ mod tests {
             .unwrap();
         let first_fill = &buf.content()[bracket_pos + 1];
         assert_eq!(first_fill.symbol(), "|");
-        assert_eq!(first_fill.fg, Color::Yellow);
+        assert_eq!(first_fill.fg, theme::STATUS_RUNNING);
     }
 
     #[test]
@@ -258,7 +260,7 @@ mod tests {
             .position(|c| c.symbol() == "[")
             .unwrap();
         let first_fill = &buf.content()[bracket_pos + 1];
-        assert_eq!(first_fill.fg, Color::Green);
+        assert_eq!(first_fill.fg, theme::STATUS_SUCCESS);
     }
 
     #[test]
@@ -275,7 +277,7 @@ mod tests {
             .position(|c| c.symbol() == "[")
             .unwrap();
         let first_fill = &buf.content()[bracket_pos + 1];
-        assert_eq!(first_fill.fg, Color::Red);
+        assert_eq!(first_fill.fg, theme::STATUS_FAILED);
     }
 
     #[test]
@@ -345,8 +347,8 @@ mod tests {
             .filter(|c| c.symbol() == "\u{25CF}")
             .collect();
         assert_eq!(dots.len(), 2);
-        assert_eq!(dots[0].fg, Color::Green);
-        assert_eq!(dots[1].fg, Color::Yellow);
+        assert_eq!(dots[0].fg, theme::STATUS_SUCCESS);
+        assert_eq!(dots[1].fg, theme::STATUS_RUNNING);
     }
 
     #[test]
@@ -372,10 +374,10 @@ mod tests {
             .filter(|c| c.symbol() == "\u{25CF}")
             .collect();
         assert_eq!(dots.len(), 4);
-        assert_eq!(dots[0].fg, Color::Red);
-        assert_eq!(dots[1].fg, Color::DarkGray);
-        assert_eq!(dots[2].fg, Color::Green);
-        assert_eq!(dots[3].fg, Color::Yellow);
+        assert_eq!(dots[0].fg, theme::STATUS_FAILED);
+        assert_eq!(dots[1].fg, theme::STATUS_IDLE);
+        assert_eq!(dots[2].fg, theme::STATUS_SUCCESS);
+        assert_eq!(dots[3].fg, theme::STATUS_RUNNING);
     }
 
     fn make_pipe_group(name: &str, summary_status: BuildStatus) -> PipelineGroup {
@@ -412,8 +414,8 @@ mod tests {
             .collect();
         // One dot per pipeline group
         assert_eq!(dots.len(), 2);
-        assert_eq!(dots[0].fg, Color::Green);
-        assert_eq!(dots[1].fg, Color::Yellow);
+        assert_eq!(dots[0].fg, theme::STATUS_SUCCESS);
+        assert_eq!(dots[1].fg, theme::STATUS_RUNNING);
     }
 
     #[test]
@@ -434,10 +436,10 @@ mod tests {
             .filter(|c| c.symbol() == "\u{25CF}")
             .collect();
         assert_eq!(dots.len(), 4);
-        assert_eq!(dots[0].fg, Color::Red);
-        assert_eq!(dots[1].fg, Color::DarkGray);
-        assert_eq!(dots[2].fg, Color::Green);
-        assert_eq!(dots[3].fg, Color::Yellow);
+        assert_eq!(dots[0].fg, theme::STATUS_FAILED);
+        assert_eq!(dots[1].fg, theme::STATUS_IDLE);
+        assert_eq!(dots[2].fg, theme::STATUS_SUCCESS);
+        assert_eq!(dots[3].fg, theme::STATUS_RUNNING);
     }
 
     #[test]
@@ -456,7 +458,7 @@ mod tests {
             .filter(|c| c.symbol() == "\u{25CF}")
             .collect();
         assert_eq!(dots.len(), 1);
-        assert_eq!(dots[0].fg, Color::DarkGray);
+        assert_eq!(dots[0].fg, theme::FG_DIM);
     }
 
     #[test]
@@ -475,8 +477,8 @@ mod tests {
             .collect();
         assert_eq!(dots.len(), 2);
         // Dots should retain status colors even when dim=true
-        assert_eq!(dots[0].fg, Color::Green);
-        assert_eq!(dots[1].fg, Color::Yellow);
+        assert_eq!(dots[0].fg, theme::STATUS_SUCCESS);
+        assert_eq!(dots[1].fg, theme::STATUS_RUNNING);
     }
 
     #[test]
@@ -496,8 +498,8 @@ mod tests {
             .collect();
         assert_eq!(dots.len(), 2);
         // Dots should retain status colors even when dim=true
-        assert_eq!(dots[0].fg, Color::Green);
-        assert_eq!(dots[1].fg, Color::Yellow);
+        assert_eq!(dots[0].fg, theme::STATUS_SUCCESS);
+        assert_eq!(dots[1].fg, theme::STATUS_RUNNING);
     }
 
     #[test]
@@ -515,7 +517,7 @@ mod tests {
             .unwrap();
         let first_fill = &buf.content()[bracket_pos + 1];
         assert_eq!(first_fill.symbol(), "|");
-        assert_eq!(first_fill.fg, Color::DarkGray);
+        assert_eq!(first_fill.fg, theme::FG_DIM);
     }
 
     #[test]
@@ -551,7 +553,7 @@ mod tests {
             .unwrap();
         let first_fill = &buf.content()[bracket_pos + 1];
         assert_eq!(first_fill.symbol(), "|");
-        assert_eq!(first_fill.fg, Color::DarkGray);
+        assert_eq!(first_fill.fg, theme::FG_DIM);
     }
 
     #[test]
@@ -569,7 +571,7 @@ mod tests {
             .unwrap();
         let first_fill = &buf.content()[bracket_pos + 1];
         assert_eq!(first_fill.symbol(), "|");
-        assert_eq!(first_fill.fg, Color::DarkGray);
+        assert_eq!(first_fill.fg, theme::FG_DIM);
     }
 
     #[test]
@@ -640,7 +642,7 @@ mod tests {
             .filter(|c| c.symbol() == "\u{25CF}")
             .collect();
         assert_eq!(dots.len(), 1);
-        assert_eq!(dots[0].fg, Color::Green);
+        assert_eq!(dots[0].fg, theme::STATUS_SUCCESS);
     }
 
     #[test]
@@ -660,10 +662,10 @@ mod tests {
             .filter(|c| c.symbol() == "\u{25CF}")
             .collect();
         assert_eq!(dots.len(), 2);
-        // CI dot: full color (Green for Succeeded)
-        assert_eq!(dots[0].fg, Color::Green);
-        // Review dot: dimmed (DarkGray regardless of status)
-        assert_eq!(dots[1].fg, Color::DarkGray);
+        // CI dot: full color
+        assert_eq!(dots[0].fg, theme::STATUS_SUCCESS);
+        // Review dot: dimmed regardless of status
+        assert_eq!(dots[1].fg, theme::FG_DIM);
     }
 
     #[test]
@@ -683,13 +685,13 @@ mod tests {
             .filter(|c| c.symbol() == "\u{25CF}")
             .collect();
         assert_eq!(dots.len(), 1);
-        assert_eq!(dots[0].fg, Color::DarkGray);
+        assert_eq!(dots[0].fg, theme::FG_DIM);
     }
 
     #[test]
     fn bar_renders_with_status_dot_prefix() {
         let bar = make_bar("deploy", BuildStatus::Succeeded, 3);
-        let widget = BarWidget::new(&bar, 10, false).with_dot(Color::Green);
+        let widget = BarWidget::new(&bar, 10, false).with_dot(theme::STATUS_SUCCESS);
         let area = Rect::new(0, 0, 30, 1);
         let mut buf = Buffer::empty(area);
         widget.render(area, &mut buf);
@@ -710,7 +712,7 @@ mod tests {
             .iter()
             .find(|c| c.symbol() == "\u{25CF}")
             .unwrap();
-        assert_eq!(dot_cell.fg, Color::Green);
+        assert_eq!(dot_cell.fg, theme::STATUS_SUCCESS);
     }
 
     #[test]
@@ -828,11 +830,7 @@ mod tests {
             .filter(|c| c.symbol() == "\u{25CF}")
             .collect();
         assert_eq!(dots.len(), 1);
-        assert_eq!(
-            dots[0].fg,
-            Color::DarkGray,
-            "pending_link should dim the dot to DarkGray"
-        );
+        assert_eq!(dots[0].fg, theme::FG_DIM, "pending_link should dim the dot");
     }
 
     #[test]
@@ -853,7 +851,7 @@ mod tests {
         assert_eq!(dots.len(), 1);
         assert_eq!(
             dots[0].fg,
-            Color::Green,
+            theme::STATUS_SUCCESS,
             "without pending_link, dot should show status color"
         );
     }
@@ -981,7 +979,7 @@ mod tests {
     fn bar_dot_never_dimmed() {
         let bar = make_bar("build", BuildStatus::Running, 3);
         // dim=true but dot should retain its color
-        let widget = BarWidget::new(&bar, 10, true).with_dot(Color::Yellow);
+        let widget = BarWidget::new(&bar, 10, true).with_dot(theme::STATUS_RUNNING);
         let area = Rect::new(0, 0, 30, 1);
         let mut buf = Buffer::empty(area);
         widget.render(area, &mut buf);
@@ -991,6 +989,10 @@ mod tests {
             .iter()
             .find(|c| c.symbol() == "\u{25CF}")
             .expect("dot should be present");
-        assert_eq!(dot_cell.fg, Color::Yellow, "dot should not be dimmed");
+        assert_eq!(
+            dot_cell.fg,
+            theme::STATUS_RUNNING,
+            "dot should not be dimmed"
+        );
     }
 }

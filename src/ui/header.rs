@@ -1,10 +1,11 @@
 use chrono::Local;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Widget;
 
+use super::theme;
 use crate::app::SourceHealth;
 
 pub struct Header<'a> {
@@ -21,8 +22,11 @@ impl Widget for Header<'_> {
         // Profile span: red with suffix when auth failed
         let profile_spans: Vec<Span> = match self.aws_health {
             SourceHealth::AuthFailed { .. } => vec![
-                Span::styled(self.profile, Style::default().fg(Color::Red)),
-                Span::styled(" \u{26A0} SSO expired", Style::default().fg(Color::Red)),
+                Span::styled(self.profile, Style::default().fg(theme::STATUS_FAILED)),
+                Span::styled(
+                    " \u{26A0} SSO expired",
+                    Style::default().fg(theme::STATUS_FAILED),
+                ),
             ],
             SourceHealth::Healthy => vec![Span::raw(self.profile)],
         };
@@ -35,7 +39,7 @@ impl Widget for Header<'_> {
                     env!("VERGEN_GIT_COMMIT_COUNT"),
                 ),
                 Style::default()
-                    .fg(Color::Cyan)
+                    .fg(theme::BORDER_HEADER)
                     .add_modifier(Modifier::BOLD),
             ),
             Span::raw(" | "),
@@ -47,7 +51,7 @@ impl Widget for Header<'_> {
             Span::raw(" | "),
             Span::raw(self.repo),
             Span::raw(" | "),
-            Span::styled(format!("{time}"), Style::default().fg(Color::DarkGray)),
+            Span::styled(format!("{time}"), Style::default().fg(theme::FG_DIM)),
         ]);
 
         Line::from(spans).render(area, buf);
@@ -58,6 +62,7 @@ impl Widget for Header<'_> {
 mod tests {
     use super::*;
     use crate::app::SourceHealth;
+    use crate::ui::theme;
     use ratatui::buffer::Buffer;
     use ratatui::layout::Rect;
     use ratatui::style::{Color, Modifier};
@@ -103,7 +108,7 @@ mod tests {
         let content = buffer_text(&buf);
         let profile_pos = content.find("my-profile").expect("profile not found");
         let cell = &buf.content()[profile_pos];
-        assert_eq!(cell.fg, Color::Red);
+        assert_eq!(cell.fg, theme::STATUS_FAILED);
     }
 
     #[test]
@@ -139,7 +144,7 @@ mod tests {
         let content = buffer_text(&buf);
         let version_start = content.find("cibars").expect("version string not found");
         let cell = &buf.content()[version_start];
-        assert_eq!(cell.fg, Color::Cyan);
+        assert_eq!(cell.fg, theme::BORDER_HEADER);
         assert!(
             cell.modifier.contains(Modifier::BOLD),
             "expected BOLD modifier"
@@ -154,7 +159,7 @@ mod tests {
         let last_sep = content.rfind(" | ").expect("no separator found");
         let ts_start = last_sep + 3;
         let cell = &buf.content()[ts_start];
-        assert_eq!(cell.fg, Color::DarkGray);
+        assert_eq!(cell.fg, theme::FG_DIM);
     }
 
     #[test]
