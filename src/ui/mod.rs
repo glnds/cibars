@@ -558,10 +558,7 @@ pub fn run_ui(
                         handle_hook_install(&app);
                     }
                     KeyCode::Char('l') => {
-                        let discovering = app
-                            .lock()
-                            .map(|a| a.linkage_discovering)
-                            .unwrap_or(true);
+                        let discovering = app.lock().map(|a| a.linkage_discovering).unwrap_or(true);
                         if !discovering {
                             link_notify.notify_one();
                         }

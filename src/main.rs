@@ -109,6 +109,40 @@ async fn discover_links(aws: &dyn PipelineClient, gh: &dyn ActionsClient) -> Lin
     link_map
 }
 
+/// Update each WorkflowGroup's linked_pipeline from the LinkMap.
+fn sync_linked_pipelines(app: &Arc<Mutex<App>>, link_map: &LinkMap) {
+    let mut a = app.lock().expect("app mutex poisoned");
+    for wg in &mut a.workflow_groups {
+        wg.linked_pipeline = link_map
+            .links()
+            .iter()
+            .find(|l| l.workflow_name == wg.name)
+            .map(|l| l.pipeline_name.clone());
+    }
+}
+
+/// Run link discovery, persist cache, and update app state.
+async fn run_discovery(
+    aws: &dyn PipelineClient,
+    gh: &dyn ActionsClient,
+    app: &Arc<Mutex<App>>,
+    cache_path: &std::path::Path,
+) -> LinkMap {
+    app.lock().expect("app mutex poisoned").linkage_discovering = true;
+    let link_map = discover_links(aws, gh).await;
+
+    if !link_map.links().is_empty() {
+        let cache = link_map.to_cache(&chrono::Utc::now().to_rfc3339());
+        if let Err(e) = linkage::save_link_cache(cache_path, &cache) {
+            tracing::warn!(error = %e, "failed to save link cache");
+        }
+    }
+
+    sync_linked_pipelines(app, &link_map);
+    app.lock().expect("app mutex poisoned").linkage_discovering = false;
+    link_map
+}
+
 async fn run_poll_orchestrator(
     app: Arc<Mutex<App>>,
     config: Config,
@@ -116,6 +150,7 @@ async fn run_poll_orchestrator(
     boost_notify: Arc<tokio::sync::Notify>,
     link_notify: Arc<tokio::sync::Notify>,
     mut sigusr1: tokio::signal::unix::Signal,
+    cwd: std::path::PathBuf,
 ) -> Result<()> {
     let (owner, repo) = config
         .github_repo
@@ -131,6 +166,7 @@ async fn run_poll_orchestrator(
     let mut aws_client: Option<poller::aws::AwsPipelineClient> = None;
     let mut scheduler = PollScheduler::new();
     let mut link_map = LinkMap::new();
+    let cache_path = cwd.join(".cibars-links.toml");
     let mut stopped_runs = std::collections::HashMap::new();
     let mut force_next_aws = false;
 
@@ -158,11 +194,31 @@ async fn run_poll_orchestrator(
         let need_aws = scheduler.should_poll_aws();
         let poll_aws = need_aws || force_aws;
 
-        // Lazy-init AWS on first need + run link discovery
+        // Lazy-init AWS on first need + cache-first link discovery
         if need_aws && aws_client.is_none() {
             tracing::info!("initializing AWS client (first active poll)");
             let client = init_aws_client(&config).await;
-            link_map = discover_links(&client, &gh_client).await;
+
+            // Cache-first: try loading from disk
+            match linkage::load_link_cache(&cache_path) {
+                Ok(Some(cache)) => {
+                    link_map.load_from_cache(cache);
+                    sync_linked_pipelines(&app, &link_map);
+                    tracing::info!(
+                        links = link_map.links().len(),
+                        "loaded link cache from disk"
+                    );
+                }
+                Ok(None) => {
+                    link_map = run_discovery(&client, &gh_client, &app, &cache_path).await;
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "corrupt link cache, re-discovering");
+                    let _ = std::fs::remove_file(&cache_path);
+                    link_map = run_discovery(&client, &gh_client, &app, &cache_path).await;
+                }
+            }
+
             aws_client = Some(client);
         }
 
@@ -202,6 +258,13 @@ async fn run_poll_orchestrator(
         // Apply linkage: mark GH workflows as Succeeded when linked CP starts Running
         linkage::apply_links(&app, &mut link_map, &mut stopped_runs);
 
+        // Sync linked_pipeline on workflow groups and check health
+        sync_linked_pipelines(&app, &link_map);
+        {
+            let mut a = app.lock().expect("app mutex poisoned");
+            a.check_linkage_health(&link_map);
+        }
+
         // Transition + update App display state
         let any_running = app.lock().expect("app mutex poisoned").has_any_running();
         scheduler.transition(any_running);
@@ -239,7 +302,15 @@ async fn run_poll_orchestrator(
             }
             _ = link_notify.notified() => {
                 tracing::info!("link re-discovery triggered by 'l' key");
-                // Actual re-discovery logic will be added in Task 7
+                link_map.clear();
+                if let Some(aws) = aws_client.as_ref() {
+                    link_map = run_discovery(aws, &gh_client, &app, &cache_path).await;
+                }
+                {
+                    let mut a = app.lock().expect("app mutex poisoned");
+                    a.linkage_broken = false;
+                    a.check_linkage_health(&link_map);
+                }
             }
             _ = tokio::time::sleep(remaining) => {}
         }
@@ -282,10 +353,18 @@ fn main() -> Result<()> {
     let poll_config = config.clone();
     let poll_boost = boost_notify.clone();
     let poll_link = link_notify.clone();
+    let poll_cwd = cwd.clone();
     rt.spawn(async move {
-        if let Err(e) =
-            run_poll_orchestrator(poll_app, poll_config, token, poll_boost, poll_link, sigusr1)
-                .await
+        if let Err(e) = run_poll_orchestrator(
+            poll_app,
+            poll_config,
+            token,
+            poll_boost,
+            poll_link,
+            sigusr1,
+            poll_cwd,
+        )
+        .await
         {
             tracing::error!("poll orchestrator failed: {e:#}");
         }
