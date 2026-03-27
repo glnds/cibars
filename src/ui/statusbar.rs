@@ -21,6 +21,8 @@ pub struct StatusBar<'a> {
     pub warnings: &'a [String],
     pub hook_status: &'a HookStatus,
     pub boost_pressed_at: Option<Instant>,
+    pub linkage_broken: bool,
+    pub linkage_discovering: bool,
 }
 
 /// Compute how many ticks are filled based on elapsed time and state interval.
@@ -99,6 +101,24 @@ impl Widget for StatusBar<'_> {
             _ => {}
         }
 
+        // Linkage status
+        if self.linkage_discovering {
+            spans.push(dim_sep.clone());
+            spans.push(Span::styled(
+                "\u{27F3} relinking...",
+                Style::default().fg(theme::POLL_SCAN),
+            ));
+        } else if self.linkage_broken {
+            spans.push(dim_sep.clone());
+            spans.push(Span::styled(
+                "l=relink \u{26A0}",
+                Style::default().fg(theme::STATUS_RUNNING),
+            ));
+        } else {
+            spans.push(dim_sep.clone());
+            spans.push(Span::styled("l=relink", Style::default().fg(theme::FG_DIM)));
+        }
+
         if !self.warnings.is_empty() {
             spans.push(dim_sep);
             spans.push(Span::styled(
@@ -135,6 +155,8 @@ mod tests {
             warnings: &[],
             hook_status,
             boost_pressed_at: None,
+            linkage_broken: false,
+            linkage_discovering: false,
         };
         let area = Rect::new(0, 0, 120, 3);
         let mut buf = Buffer::empty(area);
@@ -344,6 +366,8 @@ mod tests {
             warnings,
             hook_status,
             boost_pressed_at: None,
+            linkage_broken: false,
+            linkage_discovering: false,
         };
         let area = Rect::new(0, 0, 120, 3);
         let mut buf = Buffer::empty(area);
@@ -389,6 +413,8 @@ mod tests {
             warnings: &[],
             hook_status: &HookStatus::Installed,
             boost_pressed_at: None,
+            linkage_broken: false,
+            linkage_discovering: false,
         };
         let area = Rect::new(0, 0, 40, 3);
         let mut buf = Buffer::empty(area);
@@ -412,6 +438,8 @@ mod tests {
             warnings: &[],
             hook_status: &HookStatus::Installed,
             boost_pressed_at: Some(Instant::now()),
+            linkage_broken: false,
+            linkage_discovering: false,
         };
         let area = Rect::new(0, 0, 120, 3);
         let mut buf = Buffer::empty(area);
@@ -445,6 +473,8 @@ mod tests {
             warnings: &[],
             hook_status: &HookStatus::Installed,
             boost_pressed_at: Some(expired),
+            linkage_broken: false,
+            linkage_discovering: false,
         };
         let area = Rect::new(0, 0, 120, 3);
         let mut buf = Buffer::empty(area);
@@ -473,6 +503,8 @@ mod tests {
             warnings: &[],
             hook_status: &HookStatus::Installed,
             boost_pressed_at: None,
+            linkage_broken: false,
+            linkage_discovering: false,
         };
         let area = Rect::new(0, 0, 120, 3);
         let mut buf = Buffer::empty(area);
@@ -492,6 +524,46 @@ mod tests {
         );
     }
 
+    fn render_bar_with_linkage(linkage_broken: bool, linkage_discovering: bool) -> String {
+        let bar = StatusBar {
+            poll_state: &PollState::Idle,
+            elapsed_since_poll: Duration::ZERO,
+            cooldown_remaining: None,
+            warnings: &[],
+            hook_status: &HookStatus::Installed,
+            boost_pressed_at: None,
+            linkage_broken,
+            linkage_discovering,
+        };
+        let area = Rect::new(0, 0, 120, 3);
+        let mut buf = Buffer::empty(area);
+        bar.render(area, &mut buf);
+        (0..120)
+            .map(|x| buf.cell((x, 1)).unwrap().symbol().to_string())
+            .collect()
+    }
+
+    #[test]
+    fn shows_relink_hint_normally() {
+        let content = render_bar_with_linkage(false, false);
+        assert!(content.contains("l=relink"), "got: {content}");
+        assert!(!content.contains("\u{26A0}"), "got: {content}");
+    }
+
+    #[test]
+    fn shows_relink_warning_when_broken() {
+        let content = render_bar_with_linkage(true, false);
+        assert!(content.contains("l=relink"), "got: {content}");
+        assert!(content.contains("\u{26A0}"), "got: {content}");
+    }
+
+    #[test]
+    fn shows_relinking_spinner_when_discovering() {
+        let content = render_bar_with_linkage(false, true);
+        assert!(content.contains("relinking"), "got: {content}");
+        assert!(!content.contains("l=relink"), "got: {content}");
+    }
+
     fn render_buf(state: &PollState, elapsed: Duration, cooldown: Option<Duration>) -> Buffer {
         let bar = StatusBar {
             poll_state: state,
@@ -500,6 +572,8 @@ mod tests {
             warnings: &[],
             hook_status: &HookStatus::Installed,
             boost_pressed_at: None,
+            linkage_broken: false,
+            linkage_discovering: false,
         };
         let area = Rect::new(0, 0, 120, 3);
         let mut buf = Buffer::empty(area);
@@ -566,6 +640,8 @@ mod tests {
             warnings: &[],
             hook_status: &HookStatus::Installed,
             boost_pressed_at: None,
+            linkage_broken: false,
+            linkage_discovering: false,
         };
         let area = Rect::new(0, 0, 40, 3);
         let mut buf = Buffer::empty(area);

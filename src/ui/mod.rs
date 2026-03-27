@@ -500,6 +500,8 @@ pub fn run_ui(
                     warnings: &app.warnings,
                     hook_status: &app.hook_status,
                     boost_pressed_at: app.boost_pressed_at,
+                    linkage_broken: app.linkage_broken,
+                    linkage_discovering: app.linkage_discovering,
                 },
                 areas[4],
             );
