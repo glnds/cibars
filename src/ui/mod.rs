@@ -701,6 +701,7 @@ mod tests {
                 summary_status: BuildStatus::Running,
                 run_id: None,
                 category: WorkflowCategory::default(),
+                linked_pipeline: None,
             },
             WorkflowGroup {
                 name: "Deploy".to_string(),
@@ -709,6 +710,7 @@ mod tests {
                 summary_status: BuildStatus::Succeeded,
                 run_id: None,
                 category: WorkflowCategory::default(),
+                linked_pipeline: None,
             },
         ];
 
@@ -735,6 +737,7 @@ mod tests {
                 summary_status: BuildStatus::Idle,
                 run_id: None,
                 category: WorkflowCategory::default(),
+                linked_pipeline: None,
             },
             WorkflowGroup {
                 name: "wf2".to_string(),
@@ -743,6 +746,7 @@ mod tests {
                 summary_status: BuildStatus::Idle,
                 run_id: None,
                 category: WorkflowCategory::default(),
+                linked_pipeline: None,
             },
         ];
         assert_eq!(all_jobs_name_width(&groups), 18); // 16 + 2
@@ -795,6 +799,7 @@ mod tests {
             summary_status: BuildStatus::Idle,
             run_id: None,
             category: WorkflowCategory::CI,
+            linked_pipeline: None,
         };
         let review = WorkflowGroup {
             name: "Claude Code Review".to_string(),
@@ -803,6 +808,7 @@ mod tests {
             summary_status: BuildStatus::Idle,
             run_id: None,
             category: WorkflowCategory::Review,
+            linked_pipeline: None,
         };
         let groups = vec![&ci, &review];
         // 1 CI job + 1 separator + 1 review job = 3
@@ -818,6 +824,7 @@ mod tests {
             summary_status: BuildStatus::Idle,
             run_id: None,
             category: WorkflowCategory::CI,
+            linked_pipeline: None,
         };
         let groups = vec![&ci];
         assert_eq!(count_action_rows(&groups), 1);
@@ -835,6 +842,7 @@ mod tests {
             summary_status: BuildStatus::Idle,
             run_id: None,
             category: WorkflowCategory::CI,
+            linked_pipeline: None,
         };
         let ci2 = WorkflowGroup {
             name: "Deploy".to_string(),
@@ -843,6 +851,7 @@ mod tests {
             summary_status: BuildStatus::Idle,
             run_id: None,
             category: WorkflowCategory::CI,
+            linked_pipeline: None,
         };
         let groups = vec![&ci1, &ci2];
         // 3 CI bars, no spacers
@@ -862,6 +871,7 @@ mod tests {
             summary_status: BuildStatus::Idle,
             run_id: None,
             category: WorkflowCategory::CI,
+            linked_pipeline: None,
         };
         let groups = vec![&ci];
         // 3 jobs
@@ -877,6 +887,7 @@ mod tests {
             summary_status: BuildStatus::Idle,
             run_id: None,
             category: WorkflowCategory::CI,
+            linked_pipeline: None,
         };
         let groups = vec![&ci];
         assert_eq!(count_action_rows(&groups), 1);
@@ -891,6 +902,7 @@ mod tests {
             summary_status: BuildStatus::Idle,
             run_id: None,
             category: WorkflowCategory::CI,
+            linked_pipeline: None,
         };
         let ci2 = WorkflowGroup {
             name: "Deploy".to_string(),
@@ -899,6 +911,7 @@ mod tests {
             summary_status: BuildStatus::Idle,
             run_id: None,
             category: WorkflowCategory::CI,
+            linked_pipeline: None,
         };
         let review = WorkflowGroup {
             name: "Review".to_string(),
@@ -907,6 +920,7 @@ mod tests {
             summary_status: BuildStatus::Idle,
             run_id: None,
             category: WorkflowCategory::Review,
+            linked_pipeline: None,
         };
         let groups = vec![&ci1, &ci2, &review];
         // 2 CI + 1 separator + 1 review = 4
@@ -996,6 +1010,7 @@ mod tests {
                 summary_status: BuildStatus::Succeeded,
                 run_id: None,
                 category: WorkflowCategory::Review,
+                linked_pipeline: None,
             },
             WorkflowGroup {
                 name: "CI".to_string(),
@@ -1004,6 +1019,7 @@ mod tests {
                 summary_status: BuildStatus::Idle,
                 run_id: None,
                 category: WorkflowCategory::CI,
+                linked_pipeline: None,
             },
         ];
         let sorted = sorted_workflow_groups(&groups);
@@ -1021,6 +1037,7 @@ mod tests {
                 summary_status: BuildStatus::Idle,
                 run_id: None,
                 category: WorkflowCategory::CI,
+                linked_pipeline: None,
             },
             WorkflowGroup {
                 name: "aaa-running".to_string(),
@@ -1029,6 +1046,7 @@ mod tests {
                 summary_status: BuildStatus::Running,
                 run_id: None,
                 category: WorkflowCategory::CI,
+                linked_pipeline: None,
             },
             WorkflowGroup {
                 name: "review-running".to_string(),
@@ -1037,6 +1055,7 @@ mod tests {
                 summary_status: BuildStatus::Running,
                 run_id: None,
                 category: WorkflowCategory::Review,
+                linked_pipeline: None,
             },
             WorkflowGroup {
                 name: "review-idle".to_string(),
@@ -1045,6 +1064,7 @@ mod tests {
                 summary_status: BuildStatus::Idle,
                 run_id: None,
                 category: WorkflowCategory::Review,
+                linked_pipeline: None,
             },
         ];
         let sorted = sorted_workflow_groups(&groups);
@@ -1065,6 +1085,7 @@ mod tests {
                 summary_status: BuildStatus::Idle,
                 run_id: None,
                 category: WorkflowCategory::default(),
+                linked_pipeline: None,
             },
             WorkflowGroup {
                 name: "aaa-running".to_string(),
@@ -1073,6 +1094,7 @@ mod tests {
                 summary_status: BuildStatus::Running,
                 run_id: None,
                 category: WorkflowCategory::default(),
+                linked_pipeline: None,
             },
         ];
         let sorted = sorted_workflow_groups(&groups);
@@ -1126,6 +1148,7 @@ mod tests {
             summary_status: BuildStatus::Running,
             run_id: None,
             category: WorkflowCategory::CI,
+            linked_pipeline: None,
         };
         let groups = vec![&group];
         let area = Rect::new(0, 0, 40, 1);
@@ -1209,6 +1232,7 @@ mod tests {
             summary_status: BuildStatus::Failed,
             run_id: None,
             category: WorkflowCategory::CI,
+            linked_pipeline: None,
         };
         let groups = vec![&group];
         let area = Rect::new(0, 0, 40, 1);

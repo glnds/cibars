@@ -152,6 +152,7 @@ mod tests {
             summary_status: BuildStatus::Running,
             run_id: None,
             category: WorkflowCategory::default(),
+            linked_pipeline: None,
         });
         assert!(app.has_any_running());
     }
@@ -168,6 +169,7 @@ mod tests {
             summary_status: BuildStatus::Succeeded,
             run_id: None,
             category: WorkflowCategory::default(),
+            linked_pipeline: None,
         });
         assert!(app.has_any_running());
     }
@@ -200,6 +202,7 @@ mod tests {
             summary_status: BuildStatus::Succeeded,
             run_id: None,
             category: WorkflowCategory::default(),
+            linked_pipeline: None,
         });
         assert!(!app.has_any_running());
     }

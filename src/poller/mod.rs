@@ -367,6 +367,7 @@ fn update_workflow_summaries(app: &mut App, summaries: &[WorkflowRunSummary]) {
                 summary_status: summary.status,
                 run_id: Some(summary.run_id),
                 category: WorkflowCategory::default(),
+                linked_pipeline: None,
             });
         }
     }
@@ -1068,6 +1069,7 @@ mod tests {
             summary_status: BuildStatus::Idle,
             run_id: None,
             category: WorkflowCategory::default(),
+            linked_pipeline: None,
         });
         app.workflow_groups.push(WorkflowGroup {
             name: "Claude Code Review".into(),
@@ -1076,6 +1078,7 @@ mod tests {
             summary_status: BuildStatus::Idle,
             run_id: None,
             category: WorkflowCategory::default(),
+            linked_pipeline: None,
         });
 
         let config = Config::try_from_args(&[

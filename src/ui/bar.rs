@@ -351,6 +351,7 @@ mod tests {
             summary_status: BuildStatus::Running,
             run_id: None,
             category: WorkflowCategory::CI,
+            linked_pipeline: None,
         }
     }
 

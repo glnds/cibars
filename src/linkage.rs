@@ -438,6 +438,7 @@ mod tests {
             summary_status: BuildStatus::Running,
             run_id: Some(100),
             category: WorkflowCategory::default(),
+            linked_pipeline: None,
         });
         // CP pipeline just started Running
         app.pipeline_groups.push(PipelineGroup {
@@ -481,6 +482,7 @@ mod tests {
             summary_status: BuildStatus::Running,
             run_id: Some(100),
             category: WorkflowCategory::default(),
+            linked_pipeline: None,
         });
         app.pipeline_groups.push(PipelineGroup {
             name: "deploy-pipe".into(),
@@ -514,6 +516,7 @@ mod tests {
             summary_status: BuildStatus::Running,
             run_id: Some(100),
             category: WorkflowCategory::default(),
+            linked_pipeline: None,
         });
         let mut lint_job = Bar::new("lint".into());
         lint_job.set_status(BuildStatus::Running);
@@ -524,6 +527,7 @@ mod tests {
             summary_status: BuildStatus::Running,
             run_id: Some(200),
             category: WorkflowCategory::default(),
+            linked_pipeline: None,
         });
         app.pipeline_groups.push(PipelineGroup {
             name: "deploy-pipe".into(),
@@ -559,6 +563,7 @@ mod tests {
                 summary_status: BuildStatus::Running,
                 run_id: Some(100 + i as u64),
                 category: WorkflowCategory::default(),
+                linked_pipeline: None,
             });
         }
         for name in &["frontend-pipe", "backend-pipe"] {
@@ -603,6 +608,7 @@ mod tests {
             summary_status: BuildStatus::Succeeded, // Already done
             run_id: Some(100),
             category: WorkflowCategory::default(),
+            linked_pipeline: None,
         });
         app.pipeline_groups.push(PipelineGroup {
             name: "deploy-pipe".into(),
@@ -636,6 +642,7 @@ mod tests {
             summary_status: BuildStatus::Running,
             run_id: Some(200), // new run
             category: WorkflowCategory::default(),
+            linked_pipeline: None,
         });
         app.pipeline_groups.push(PipelineGroup {
             name: "deploy-pipe".into(),
@@ -719,6 +726,7 @@ mod tests {
             summary_status: BuildStatus::Running,
             run_id: None,
             category: WorkflowCategory::default(),
+            linked_pipeline: None,
         });
         app.pipeline_groups.push(PipelineGroup {
             name: "deploy-pipe".into(),
@@ -755,6 +763,7 @@ mod tests {
             summary_status: BuildStatus::Running,
             run_id: Some(100),
             category: WorkflowCategory::default(),
+            linked_pipeline: None,
         });
         app.pipeline_groups.push(PipelineGroup {
             name: "deploy-pipe".into(),
@@ -786,6 +795,7 @@ mod tests {
             summary_status: BuildStatus::Succeeded,
             run_id: Some(100),
             category: WorkflowCategory::default(),
+            linked_pipeline: None,
         });
         let app = Arc::new(Mutex::new(app));
         let mut link_map = LinkMap::new();
@@ -825,6 +835,7 @@ mod tests {
             summary_status: BuildStatus::Running,
             run_id: Some(100),
             category: WorkflowCategory::default(),
+            linked_pipeline: None,
         });
         app.pipeline_groups.push(PipelineGroup {
             name: "deploy-pipe".into(),
@@ -859,6 +870,7 @@ mod tests {
             summary_status: BuildStatus::Running,
             run_id: Some(100),
             category: WorkflowCategory::default(),
+            linked_pipeline: None,
         });
         app.pipeline_groups.push(PipelineGroup {
             name: "deploy-pipe".into(),
@@ -891,6 +903,7 @@ mod tests {
             summary_status: BuildStatus::Running,
             run_id: Some(100),
             category: WorkflowCategory::default(),
+            linked_pipeline: None,
         });
         app.pipeline_groups.push(PipelineGroup {
             name: "unlinked-pipe".into(),
@@ -921,6 +934,7 @@ mod tests {
             summary_status: BuildStatus::Succeeded,
             run_id: Some(100),
             category: WorkflowCategory::default(),
+            linked_pipeline: None,
         });
         app.pipeline_groups.push(PipelineGroup {
             name: "deploy-pipe".into(),

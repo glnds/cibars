@@ -122,6 +122,8 @@ pub struct WorkflowGroup {
     /// The GH Actions run_id currently represented by this group.
     pub run_id: Option<u64>,
     pub category: WorkflowCategory,
+    /// Name of the linked CodePipeline (set by orchestrator from LinkMap).
+    pub linked_pipeline: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -450,6 +452,7 @@ mod tests {
             summary_status: BuildStatus::Idle,
             run_id: None,
             category: WorkflowCategory::CI,
+            linked_pipeline: None,
         };
         assert_eq!(group.name, "CI");
         assert!(group.jobs.is_empty());
@@ -466,6 +469,7 @@ mod tests {
             summary_status: BuildStatus::Idle,
             run_id: None,
             category: WorkflowCategory::Review,
+            linked_pipeline: None,
         };
         assert_eq!(group.category, WorkflowCategory::Review);
     }
@@ -479,6 +483,7 @@ mod tests {
             summary_status: BuildStatus::Running,
             run_id: None,
             category: WorkflowCategory::CI,
+            linked_pipeline: None,
         };
         assert_eq!(group.jobs.len(), 2);
         assert_eq!(group.jobs[0].name, "build");
@@ -494,6 +499,7 @@ mod tests {
             summary_status: BuildStatus::Idle,
             run_id: None,
             category: WorkflowCategory::CI,
+            linked_pipeline: None,
         };
         group.gone = true;
         assert!(group.gone);
