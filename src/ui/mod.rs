@@ -222,6 +222,7 @@ pub fn run_ui(
     region: &str,
     repo: &str,
     boost_notify: Arc<Notify>,
+    link_notify: Arc<Notify>,
     term_flag: &AtomicBool,
 ) -> Result<()> {
     let mut last_animation = Instant::now();
@@ -555,6 +556,15 @@ pub fn run_ui(
                     }
                     KeyCode::Char('h') => {
                         handle_hook_install(&app);
+                    }
+                    KeyCode::Char('l') => {
+                        let discovering = app
+                            .lock()
+                            .map(|a| a.linkage_discovering)
+                            .unwrap_or(true);
+                        if !discovering {
+                            link_notify.notify_one();
+                        }
                     }
                     _ => {}
                 }

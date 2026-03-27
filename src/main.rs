@@ -114,6 +114,7 @@ async fn run_poll_orchestrator(
     config: Config,
     token: String,
     boost_notify: Arc<tokio::sync::Notify>,
+    link_notify: Arc<tokio::sync::Notify>,
     mut sigusr1: tokio::signal::unix::Signal,
 ) -> Result<()> {
     let (owner, repo) = config
@@ -236,6 +237,10 @@ async fn run_poll_orchestrator(
                 a.poll_state = scheduler.state();
                 tracing::info!(state = ?scheduler.state(), "boost triggered by SIGUSR1");
             }
+            _ = link_notify.notified() => {
+                tracing::info!("link re-discovery triggered by 'l' key");
+                // Actual re-discovery logic will be added in Task 7
+            }
             _ = tokio::time::sleep(remaining) => {}
         }
     }
@@ -261,6 +266,7 @@ fn main() -> Result<()> {
 
     // Notify for boost (manual poll trigger, zero overhead)
     let boost_notify = Arc::new(tokio::sync::Notify::new());
+    let link_notify = Arc::new(tokio::sync::Notify::new());
 
     // SIGTERM handling: set flag checked by UI loop
     let term_flag = Arc::new(AtomicBool::new(false));
@@ -275,9 +281,11 @@ fn main() -> Result<()> {
     let poll_app = app.clone();
     let poll_config = config.clone();
     let poll_boost = boost_notify.clone();
+    let poll_link = link_notify.clone();
     rt.spawn(async move {
         if let Err(e) =
-            run_poll_orchestrator(poll_app, poll_config, token, poll_boost, sigusr1).await
+            run_poll_orchestrator(poll_app, poll_config, token, poll_boost, poll_link, sigusr1)
+                .await
         {
             tracing::error!("poll orchestrator failed: {e:#}");
         }
@@ -292,6 +300,7 @@ fn main() -> Result<()> {
         &config.region,
         &config.github_repo,
         boost_notify,
+        link_notify,
         &term_flag,
     );
     ratatui::restore();
