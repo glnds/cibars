@@ -68,15 +68,23 @@ impl ActionsClient for GitHubActionsClient {
                 .await
                 .context("failed to list workflow runs")?;
 
+            let prev_count = latest_per_workflow.len();
             parse_workflow_runs(&resp, &mut latest_per_workflow, self.branch.as_deref());
+            let new_count = latest_per_workflow.len();
 
             let total_count = resp["total_count"].as_u64().unwrap_or(0);
             let fetched = resp["workflow_runs"]
                 .as_array()
                 .map_or(0, |a| a.len() as u64);
 
-            // Stop when this page is incomplete or we've fetched everything.
-            if fetched < 100 || (page as u64) * 100 >= total_count || page >= MAX_PAGES {
+            // No new workflows on this page — all subsequent pages are older, stop.
+            let no_new_workflows = new_count == prev_count;
+
+            if fetched < 100
+                || (page as u64) * 100 >= total_count
+                || page >= MAX_PAGES
+                || no_new_workflows
+            {
                 break;
             }
             page += 1;
@@ -100,7 +108,7 @@ impl ActionsClient for GitHubActionsClient {
 
     async fn fetch_run_jobs(&self, run_id: u64) -> Result<Vec<JobInfo>> {
         let route = format!(
-            "/repos/{}/{}/actions/runs/{run_id}/jobs",
+            "/repos/{}/{}/actions/runs/{run_id}/jobs?per_page=100",
             self.owner, self.repo,
         );
         let resp: serde_json::Value = self
@@ -153,14 +161,23 @@ impl ActionsClient for GitHubActionsClient {
             })
             .collect();
 
+        // Fetch all workflow files concurrently
+        let futs = yaml_paths.iter().map(|path| {
+            let file_route = format!("/repos/{}/{}/contents/{path}", self.owner, self.repo);
+            async move {
+                let result = self
+                    .octocrab
+                    .get::<serde_json::Value, _, _>(&file_route, None::<&()>)
+                    .await;
+                (path.as_str(), result)
+            }
+        });
+
+        let results = futures::future::join_all(futs).await;
+
         let mut workflow_files = Vec::new();
-        for path in &yaml_paths {
-            let file_route = format!("/repos/{}/{}/contents/{path}", self.owner, self.repo,);
-            match self
-                .octocrab
-                .get::<serde_json::Value, _, _>(&file_route, None::<&()>)
-                .await
-            {
+        for (path, result) in results {
+            match result {
                 Ok(file_resp) => {
                     let content = file_resp["content"]
                         .as_str()
@@ -195,13 +212,16 @@ impl ActionsClient for GitHubActionsClient {
     }
 }
 
+/// Compiled once, reused across all `extract_s3_paths` calls.
+static S3_PATH_RE: std::sync::LazyLock<regex::Regex> =
+    std::sync::LazyLock::new(|| regex::Regex::new(r"s3://([^/\s]+)/(\S+)").expect("valid regex"));
+
 /// Extract S3 paths from shell commands in workflow YAML `run` steps.
 /// Looks for `aws s3 cp` and `aws s3 sync` commands with `s3://bucket/key` patterns.
 pub fn extract_s3_paths(yaml_content: &str) -> Vec<S3Upload> {
-    let re = regex::Regex::new(r"s3://([^/\s]+)/(\S+)").expect("valid regex");
     let mut uploads = Vec::new();
 
-    for cap in re.captures_iter(yaml_content) {
+    for cap in S3_PATH_RE.captures_iter(yaml_content) {
         let bucket = cap[1].to_string();
         let key = cap[2].to_string();
         // Deduplicate
@@ -625,6 +645,56 @@ jobs:
         let mut latest = std::collections::HashMap::new();
         parse_workflow_runs(&resp, &mut latest, None);
         assert_eq!(latest.len(), 2);
+    }
+
+    // --- Issue 2: early-exit stale page detection ---
+
+    #[test]
+    fn parse_workflow_runs_returns_no_new_on_stale_page() {
+        // First page: discover "CI" workflow
+        let page1 = serde_json::json!({
+            "workflow_runs": [
+                {"name": "CI", "id": 10, "status": "completed", "conclusion": "success"}
+            ]
+        });
+        let mut latest = std::collections::HashMap::new();
+        parse_workflow_runs(&page1, &mut latest, None);
+        assert_eq!(latest.len(), 1);
+
+        // Second page: only has older "CI" run — no new workflows added
+        let page2 = serde_json::json!({
+            "workflow_runs": [
+                {"name": "CI", "id": 5, "status": "completed", "conclusion": "failure"}
+            ]
+        });
+        let prev_count = latest.len();
+        parse_workflow_runs(&page2, &mut latest, None);
+        let new_count = latest.len();
+        // Stale page: no new workflow names discovered
+        assert_eq!(prev_count, new_count);
+    }
+
+    #[test]
+    fn parse_workflow_runs_detects_new_on_fresh_page() {
+        let page1 = serde_json::json!({
+            "workflow_runs": [
+                {"name": "CI", "id": 10, "status": "completed", "conclusion": "success"}
+            ]
+        });
+        let mut latest = std::collections::HashMap::new();
+        parse_workflow_runs(&page1, &mut latest, None);
+
+        // Second page has a new workflow "Deploy"
+        let page2 = serde_json::json!({
+            "workflow_runs": [
+                {"name": "Deploy", "id": 8, "status": "completed", "conclusion": "success"}
+            ]
+        });
+        let prev_count = latest.len();
+        parse_workflow_runs(&page2, &mut latest, None);
+        let new_count = latest.len();
+        // Fresh page: new workflow discovered
+        assert!(new_count > prev_count);
     }
 
     #[test]
