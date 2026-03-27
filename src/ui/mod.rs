@@ -52,9 +52,20 @@ fn all_pipeline_stages_name_width(groups: &[PipelineGroup]) -> usize {
     (max_stage + 4).min(bar::MAX_NAME_WIDTH)
 }
 
-/// Sort pipeline groups: those with running stages first, then alphabetical
-fn sorted_pipeline_groups(groups: &[PipelineGroup]) -> Vec<&PipelineGroup> {
-    let mut sorted: Vec<&PipelineGroup> = groups.iter().collect();
+/// Sort pipeline groups: those with running stages first, then alphabetical.
+/// Excludes pipelines that are linked to a workflow (they render in Actions block).
+fn sorted_pipeline_groups<'a>(
+    groups: &'a [PipelineGroup],
+    workflow_groups: &[WorkflowGroup],
+) -> Vec<&'a PipelineGroup> {
+    let linked: std::collections::HashSet<&str> = workflow_groups
+        .iter()
+        .filter_map(|wg| wg.linked_pipeline.as_deref())
+        .collect();
+    let mut sorted: Vec<&PipelineGroup> = groups
+        .iter()
+        .filter(|g| !linked.contains(g.name.as_str()))
+        .collect();
     sorted.sort_by(|a, b| {
         let a_running = a.stages.iter().any(|s| s.status == BuildStatus::Running);
         let b_running = b.stages.iter().any(|s| s.status == BuildStatus::Running);
@@ -246,7 +257,7 @@ pub fn run_ui(
             let sorted_wf_groups: Vec<&WorkflowGroup> =
                 sorted_workflow_groups(&app.workflow_groups);
             let sorted_pipe_groups: Vec<&PipelineGroup> =
-                sorted_pipeline_groups(&app.pipeline_groups);
+                sorted_pipeline_groups(&app.pipeline_groups, &app.workflow_groups);
 
             let has_actions = !sorted_wf_groups.is_empty();
             let has_pipelines = !sorted_pipe_groups.is_empty();
@@ -256,9 +267,27 @@ pub fn run_ui(
                 let ci_jobs: usize = sorted_wf_groups
                     .iter()
                     .filter(|g| g.category == WorkflowCategory::CI)
-                    .flat_map(|g| g.jobs.iter())
-                    .filter(|j| !j.gone)
-                    .count();
+                    .map(|g| {
+                        let job_count = g.jobs.iter().filter(|j| !j.gone).count();
+                        let pipeline_rows = if let Some(ref pipe_name) = g.linked_pipeline {
+                            if let Some(pg) =
+                                app.pipeline_groups.iter().find(|p| p.name == *pipe_name)
+                            {
+                                let visible_stages = pg.stages.iter().filter(|s| !s.gone).count();
+                                if visible_stages > 0 {
+                                    1 + visible_stages // header + stages
+                                } else {
+                                    1 // just header
+                                }
+                            } else {
+                                0
+                            }
+                        } else {
+                            0
+                        };
+                        job_count + pipeline_rows
+                    })
+                    .sum();
                 let review_jobs: usize = sorted_wf_groups
                     .iter()
                     .filter(|g| g.category == WorkflowCategory::Review)
@@ -364,6 +393,51 @@ pub fn run_ui(
                             inner_areas[row],
                         );
                         row += 1;
+                    }
+
+                    // Render linked pipeline indented under this workflow
+                    if let Some(ref pipe_name) = group.linked_pipeline {
+                        if let Some(pg) = app.pipeline_groups.iter().find(|p| p.name == *pipe_name)
+                        {
+                            if row < inner_areas.len() {
+                                // Pipeline header: "  └─ ● pipeline-name"
+                                let dot_color = if pg.pending_link || pg.gone {
+                                    theme::FG_DIM
+                                } else {
+                                    pg.summary_status.color()
+                                };
+                                let header_line = Line::from(vec![
+                                    Span::styled(
+                                        "  \u{2514}\u{2500} ",
+                                        Style::default().fg(theme::FG_DIM),
+                                    ),
+                                    Span::styled("\u{25CF} ", Style::default().fg(dot_color)),
+                                    Span::styled(&pg.name, Style::default().fg(dot_color)),
+                                ]);
+                                frame.render_widget(header_line, inner_areas[row]);
+                                row += 1;
+                            }
+
+                            let stage_name_width =
+                                all_pipeline_stages_name_width(&app.pipeline_groups);
+                            for stage in pg.stages.iter().filter(|s| !s.gone) {
+                                if row >= inner_areas.len() {
+                                    break;
+                                }
+                                let bar_dim = dim || pg.gone || pg.pending_link;
+                                let stage_area = Rect::new(
+                                    inner_areas[row].x + 4,
+                                    inner_areas[row].y,
+                                    inner_areas[row].width.saturating_sub(4),
+                                    1,
+                                );
+                                frame.render_widget(
+                                    BarWidget::new(stage, stage_name_width, bar_dim),
+                                    stage_area,
+                                );
+                                row += 1;
+                            }
+                        }
                     }
                 }
 
@@ -695,7 +769,7 @@ mod tests {
                 pending_link: false,
             },
         ];
-        let sorted = sorted_pipeline_groups(&groups);
+        let sorted = sorted_pipeline_groups(&groups, &[]);
         assert_eq!(sorted[0].name, "aaa-running");
         assert_eq!(sorted[1].name, "zzz-idle");
     }
@@ -1295,6 +1369,38 @@ mod tests {
         app.lock().unwrap().poll_state = PollState::Watching;
         assert!(!handle_boost(&app));
         assert_eq!(app.lock().unwrap().poll_state, PollState::Watching);
+    }
+
+    #[test]
+    fn sorted_pipeline_groups_filters_linked() {
+        let pipelines = vec![
+            PipelineGroup {
+                name: "linked-pipe".into(),
+                stages: vec![],
+                gone: false,
+                summary_status: BuildStatus::Idle,
+                pending_link: false,
+            },
+            PipelineGroup {
+                name: "unlinked-pipe".into(),
+                stages: vec![],
+                gone: false,
+                summary_status: BuildStatus::Idle,
+                pending_link: false,
+            },
+        ];
+        let workflows = vec![WorkflowGroup {
+            name: "CI".into(),
+            jobs: vec![],
+            gone: false,
+            summary_status: BuildStatus::Idle,
+            run_id: None,
+            category: WorkflowCategory::CI,
+            linked_pipeline: Some("linked-pipe".into()),
+        }];
+        let sorted = sorted_pipeline_groups(&pipelines, &workflows);
+        assert_eq!(sorted.len(), 1);
+        assert_eq!(sorted[0].name, "unlinked-pipe");
     }
 
     #[test]
