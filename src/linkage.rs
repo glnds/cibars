@@ -2,8 +2,32 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
+use serde::{Deserialize, Serialize};
+
 use crate::app::App;
 use crate::model::BuildStatus;
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct CachedLink {
+    pub pipeline_name: String,
+    pub workflow_name: String,
+    pub s3_bucket: String,
+    pub s3_key: String,
+    pub source: CachedLinkSource,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub enum CachedLinkSource {
+    YamlDiscovered,
+    RuntimeCorrelated,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct LinkCache {
+    pub schema_version: u32,
+    pub discovered_at: String,
+    pub links: Vec<CachedLink>,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LinkSource {
@@ -129,6 +153,51 @@ impl LinkMap {
     /// All current links (for logging/debugging).
     pub fn links(&self) -> &[PipelineLink] {
         &self.links
+    }
+
+    /// Populate from a loaded cache (replaces any existing links).
+    pub fn load_from_cache(&mut self, cache: LinkCache) {
+        self.links.clear();
+        for cl in cache.links {
+            self.links.push(PipelineLink {
+                pipeline_name: cl.pipeline_name,
+                workflow_name: cl.workflow_name,
+                s3_bucket: cl.s3_bucket,
+                s3_key: cl.s3_key,
+                source: match cl.source {
+                    CachedLinkSource::YamlDiscovered => LinkSource::YamlDiscovered,
+                    CachedLinkSource::RuntimeCorrelated => LinkSource::RuntimeCorrelated,
+                },
+            });
+        }
+    }
+
+    /// Serialize current links to a cache struct.
+    pub fn to_cache(&self, discovered_at: &str) -> LinkCache {
+        LinkCache {
+            schema_version: 1,
+            discovered_at: discovered_at.to_string(),
+            links: self
+                .links
+                .iter()
+                .map(|l| CachedLink {
+                    pipeline_name: l.pipeline_name.clone(),
+                    workflow_name: l.workflow_name.clone(),
+                    s3_bucket: l.s3_bucket.clone(),
+                    s3_key: l.s3_key.clone(),
+                    source: match l.source {
+                        LinkSource::YamlDiscovered => CachedLinkSource::YamlDiscovered,
+                        LinkSource::RuntimeCorrelated => CachedLinkSource::RuntimeCorrelated,
+                    },
+                })
+                .collect(),
+        }
+    }
+
+    /// Remove all links and recent completions (before re-discovery).
+    pub fn clear(&mut self) {
+        self.links.clear();
+        self.recent_completions.clear();
     }
 
     fn prune_expired(&mut self) {
@@ -821,6 +890,87 @@ mod tests {
     #[test]
     fn s3_keys_slash_only() {
         assert!(!s3_keys_match("/", "my-app"));
+    }
+
+    // --- cache serialization tests ---
+
+    #[test]
+    fn to_cache_empty_link_map() {
+        let map = LinkMap::new();
+        let cache = map.to_cache("2026-03-27T00:00:00Z");
+        assert_eq!(cache.schema_version, 1);
+        assert_eq!(cache.discovered_at, "2026-03-27T00:00:00Z");
+        assert!(cache.links.is_empty());
+    }
+
+    #[test]
+    fn to_cache_preserves_yaml_link() {
+        let mut map = LinkMap::new();
+        map.add_discovered(
+            "my-pipe".into(),
+            "CI".into(),
+            "bucket".into(),
+            "key.zip".into(),
+        );
+        let cache = map.to_cache("2026-03-27T00:00:00Z");
+        assert_eq!(cache.links.len(), 1);
+        assert_eq!(cache.links[0].pipeline_name, "my-pipe");
+        assert_eq!(cache.links[0].workflow_name, "CI");
+        assert_eq!(cache.links[0].s3_bucket, "bucket");
+        assert_eq!(cache.links[0].s3_key, "key.zip");
+        assert!(matches!(
+            cache.links[0].source,
+            CachedLinkSource::YamlDiscovered
+        ));
+    }
+
+    #[test]
+    fn to_cache_preserves_runtime_link() {
+        let mut map = LinkMap::new();
+        map.record_workflow_completion("CI");
+        map.try_correlate("deploy-pipe");
+        let cache = map.to_cache("2026-03-27T00:00:00Z");
+        assert_eq!(cache.links.len(), 1);
+        assert!(matches!(
+            cache.links[0].source,
+            CachedLinkSource::RuntimeCorrelated
+        ));
+    }
+
+    #[test]
+    fn load_from_cache_round_trip() {
+        let mut map = LinkMap::new();
+        map.add_discovered("pipe-a".into(), "WF-A".into(), "b".into(), "k".into());
+        let cache = map.to_cache("2026-03-27T00:00:00Z");
+
+        let mut map2 = LinkMap::new();
+        map2.load_from_cache(cache);
+        assert_eq!(map2.workflow_for_pipeline("pipe-a"), Some("WF-A"));
+        assert_eq!(map2.links().len(), 1);
+    }
+
+    #[test]
+    fn load_from_cache_replaces_existing() {
+        let mut map = LinkMap::new();
+        map.add_discovered("old".into(), "OLD-WF".into(), "b".into(), "k".into());
+
+        let mut fresh = LinkMap::new();
+        fresh.add_discovered("new".into(), "NEW-WF".into(), "b2".into(), "k2".into());
+        let cache = fresh.to_cache("2026-03-27T00:00:00Z");
+
+        map.load_from_cache(cache);
+        assert_eq!(map.workflow_for_pipeline("old"), None);
+        assert_eq!(map.workflow_for_pipeline("new"), Some("NEW-WF"));
+    }
+
+    #[test]
+    fn clear_removes_links_and_completions() {
+        let mut map = LinkMap::new();
+        map.add_discovered("p".into(), "w".into(), "b".into(), "k".into());
+        map.record_workflow_completion("w");
+        map.clear();
+        assert!(map.links().is_empty());
+        assert_eq!(map.try_correlate("p"), None);
     }
 
     // --- pending_link tests ---
