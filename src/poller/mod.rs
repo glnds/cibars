@@ -1256,6 +1256,22 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn poll_success_transitions_unknown_to_healthy() {
+        use crate::app::SourceHealth;
+        let app = Arc::new(Mutex::new(App::new()));
+        // App starts with Unknown after step 1
+        assert_eq!(app.lock().unwrap().aws_health, SourceHealth::Unknown);
+
+        let pipes = MockPipelineClient {
+            pipelines: vec![mock_pipeline("deploy", BuildStatus::Succeeded, vec![])],
+        };
+        poll_pipelines_tick(&app, &pipes, "my-profile", false).await;
+
+        let a = app.lock().unwrap();
+        assert_eq!(a.aws_health, SourceHealth::Healthy);
+    }
+
+    #[tokio::test]
     async fn poll_success_clears_auth_failed() {
         use crate::app::SourceHealth;
         let app = Arc::new(Mutex::new(App::new()));

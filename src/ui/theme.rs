@@ -31,6 +31,9 @@ pub const BAR_UNFILLED: char = '\u{28FF}'; // ⣿
 // Boost flash color (btop hi_fg — keyboard shortcut highlight)
 pub const BOOST_FLASH: Color = Color::Rgb(255, 85, 85);
 
+// SSO status character
+pub const CHECK_MARK: char = '\u{2713}'; // ✓
+
 // Tick bar characters
 pub const TICK_FILLED: char = '\u{25AE}'; // ▮
 pub const TICK_EMPTY: char = '\u{25AF}'; // ▯
@@ -72,6 +75,11 @@ mod tests {
     fn tick_chars_are_correct_unicode() {
         assert_eq!(TICK_FILLED, '▮');
         assert_eq!(TICK_EMPTY, '▯');
+    }
+
+    #[test]
+    fn check_mark_is_correct_unicode() {
+        assert_eq!(CHECK_MARK, '✓');
     }
 
     #[test]

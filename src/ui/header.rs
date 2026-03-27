@@ -36,7 +36,7 @@ impl Widget for Header<'_> {
         let inner = block.inner(area);
         block.render(area, buf);
 
-        // Profile span: red with suffix when auth failed
+        // Profile span: color + icon reflects AWS SSO session state
         let profile_spans: Vec<Span> = match self.aws_health {
             SourceHealth::AuthFailed { .. } => vec![
                 Span::styled(self.profile, Style::default().fg(theme::STATUS_FAILED)),
@@ -45,7 +45,20 @@ impl Widget for Header<'_> {
                     Style::default().fg(theme::STATUS_FAILED),
                 ),
             ],
-            SourceHealth::Healthy => vec![Span::raw(self.profile)],
+            SourceHealth::Healthy => vec![
+                Span::raw(self.profile),
+                Span::styled(
+                    format!(" {}", theme::CHECK_MARK),
+                    Style::default().fg(theme::STATUS_SUCCESS),
+                ),
+            ],
+            SourceHealth::Unknown => vec![
+                Span::raw(self.profile),
+                Span::styled(
+                    format!(" {}", theme::CHECK_MARK),
+                    Style::default().fg(theme::FG_DIM),
+                ),
+            ],
         };
 
         let sep = Span::styled(" \u{2502} ", Style::default().fg(theme::SEPARATOR));
@@ -169,11 +182,19 @@ mod tests {
     #[test]
     fn renders_timestamp_in_dark_gray() {
         let buf = render_header("p", "r", "o/r");
-        let content = row_text(&buf, 1);
-        // Timestamp is after the last separator (│)
-        let last_sep = content.rfind(" \u{2502} ").expect("no separator found");
-        let ts_start = last_sep + 3;
-        let cell = &buf.content()[buf.area().width as usize + ts_start];
+        // Find 3rd separator (after profile, region, repo) — skip border │
+        let width = buf.area().width as usize;
+        let row_start = width; // row 1
+        let cells = &buf.content()[row_start..row_start + width];
+        let sep_positions: Vec<usize> = cells
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| c.symbol() == "\u{2502}" && c.fg == theme::SEPARATOR)
+            .map(|(i, _)| i)
+            .collect();
+        assert!(sep_positions.len() >= 3, "expected ≥3 separators");
+        let ts_start = sep_positions[2] + 2; // skip "│ "
+        let cell = &buf.content()[row_start + ts_start];
         assert_eq!(cell.fg, theme::FG_DIM);
     }
 
@@ -220,5 +241,32 @@ mod tests {
         // Top-left corner cell should have BORDER_HEADER color
         let cell = &buf.content()[0];
         assert_eq!(cell.fg, theme::BORDER_HEADER);
+    }
+
+    /// Find cell index of a character in a buffer row (char offset, not byte offset).
+    fn find_cell_pos(buf: &Buffer, row: u16, needle: char) -> Option<usize> {
+        let width = buf.area().width as usize;
+        let start = row as usize * width;
+        buf.content()[start..start + width]
+            .iter()
+            .position(|c| c.symbol().starts_with(needle))
+    }
+
+    #[test]
+    fn renders_dim_checkmark_when_unknown() {
+        let health = SourceHealth::Unknown;
+        let buf = render_header_with_health("my-profile", "eu-west-1", "owner/repo", &health);
+        let check_pos = find_cell_pos(&buf, 1, '\u{2713}').expect("✓ not found in row");
+        let cell = &buf.content()[buf.area().width as usize + check_pos];
+        assert_eq!(cell.fg, theme::FG_DIM);
+    }
+
+    #[test]
+    fn renders_green_checkmark_when_healthy() {
+        let health = SourceHealth::Healthy;
+        let buf = render_header_with_health("my-profile", "eu-west-1", "owner/repo", &health);
+        let check_pos = find_cell_pos(&buf, 1, '\u{2713}').expect("✓ not found in row");
+        let cell = &buf.content()[buf.area().width as usize + check_pos];
+        assert_eq!(cell.fg, theme::STATUS_SUCCESS);
     }
 }

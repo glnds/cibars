@@ -149,7 +149,7 @@ async fn run_poll_orchestrator(
                         .unsigned_abs();
                     elapsed >= 300 // 5 minutes
                 }
-                SourceHealth::Healthy => false,
+                SourceHealth::Unknown | SourceHealth::Healthy => false,
             }
         };
         force_next_aws = false; // consumed
