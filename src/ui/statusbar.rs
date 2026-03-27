@@ -24,7 +24,8 @@ pub struct StatusBar<'a> {
 }
 
 /// Compute how many ticks are filled based on elapsed time and state interval.
-/// Returns NUM_TICKS when elapsed >= interval (poll due/running; resets naturally on completion).
+/// Uses modular arithmetic so ticks cycle every interval — even during slow
+/// API polls that exceed the interval, the bar keeps cycling visually.
 fn filled_ticks(elapsed: Duration, state: &PollState) -> usize {
     let interval_ms: u64 = match state {
         PollState::Idle => 30_000,
@@ -32,11 +33,9 @@ fn filled_ticks(elapsed: Duration, state: &PollState) -> usize {
         PollState::Watching | PollState::Active | PollState::Cooldown => 5_000,
     };
     let elapsed_ms = elapsed.as_millis() as u64;
-    if elapsed_ms >= interval_ms {
-        return NUM_TICKS as usize;
-    }
+    let cycle_elapsed = elapsed_ms % interval_ms;
     let tick_duration_ms = interval_ms / (NUM_TICKS + 1);
-    (elapsed_ms / tick_duration_ms).min(NUM_TICKS) as usize
+    (cycle_elapsed / tick_duration_ms).min(NUM_TICKS) as usize
 }
 
 impl Widget for StatusBar<'_> {
@@ -189,11 +188,11 @@ mod tests {
     }
 
     #[test]
-    fn idle_at_interval_shows_full() {
-        // At exactly the interval boundary, bar should be full (poll is due)
+    fn idle_at_interval_wraps_to_empty() {
+        // At exactly the interval boundary, modular wraps → all empty (new cycle)
         let content = render_bar(&PollState::Idle, Duration::from_secs(30), None);
-        let filled5: String = std::iter::repeat(theme::TICK_FILLED).take(5).collect();
-        assert!(content.contains(&filled5), "got: {content}");
+        let empty5: String = std::iter::repeat(theme::TICK_EMPTY).take(5).collect();
+        assert!(content.contains(&empty5), "got: {content}");
     }
 
     #[test]
@@ -246,15 +245,18 @@ mod tests {
     }
 
     #[test]
-    fn filled_ticks_full_after_interval() {
+    fn filled_ticks_wraps_after_interval() {
+        // 5500ms Active: 5500 % 5000 = 500ms → 500/833 = 0 ticks (new cycle)
         assert_eq!(
             filled_ticks(Duration::from_millis(5500), &PollState::Active),
-            5
+            0
         );
-        assert_eq!(filled_ticks(Duration::from_secs(35), &PollState::Idle), 5);
+        // 35s Idle: 35000 % 30000 = 5000ms → 5000/5000 = 1 tick
+        assert_eq!(filled_ticks(Duration::from_secs(35), &PollState::Idle), 1);
+        // 999s Active: 999000 % 5000 = 4000ms → 4000/833 = 4 ticks
         assert_eq!(
             filled_ticks(Duration::from_secs(999), &PollState::Active),
-            5
+            4
         );
     }
 
@@ -289,21 +291,17 @@ mod tests {
 
     #[test]
     fn filled_ticks_cycle_boundary() {
+        // Zero elapsed → 0 ticks in all states
         assert_eq!(filled_ticks(Duration::ZERO, &PollState::Active), 0);
         assert_eq!(filled_ticks(Duration::ZERO, &PollState::Idle), 0);
         assert_eq!(filled_ticks(Duration::ZERO, &PollState::LongIdle), 0);
 
-        assert_eq!(
-            filled_ticks(Duration::from_secs(5), &PollState::Active),
-            NUM_TICKS as usize
-        );
-        assert_eq!(
-            filled_ticks(Duration::from_secs(30), &PollState::Idle),
-            NUM_TICKS as usize
-        );
+        // At exact interval boundary, modular wraps to 0 (new cycle)
+        assert_eq!(filled_ticks(Duration::from_secs(5), &PollState::Active), 0);
+        assert_eq!(filled_ticks(Duration::from_secs(30), &PollState::Idle), 0);
         assert_eq!(
             filled_ticks(Duration::from_secs(300), &PollState::LongIdle),
-            NUM_TICKS as usize
+            0
         );
     }
 
