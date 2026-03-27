@@ -40,6 +40,10 @@ pub struct App {
     pub aws_health: SourceHealth,
     /// When boost key was last pressed, for visual flash feedback.
     pub boost_pressed_at: Option<Instant>,
+    /// True when cached link map has stale references.
+    pub linkage_broken: bool,
+    /// True while discover_links() is running.
+    pub linkage_discovering: bool,
 }
 
 impl App {
@@ -63,6 +67,8 @@ impl App {
             hook_status: HookStatus::NoGitDir,
             aws_health: SourceHealth::Unknown,
             boost_pressed_at: None,
+            linkage_broken: false,
+            linkage_discovering: false,
         }
     }
 
@@ -71,6 +77,31 @@ impl App {
             self.warnings.remove(0);
         }
         self.warnings.push(msg);
+    }
+
+    /// Compare link map against live data. Only meaningful after initial
+    /// loading is complete (both pipelines and actions fetched at least once).
+    pub fn check_linkage_health(&mut self, link_map: &crate::linkage::LinkMap) {
+        if self.loading_pipelines || self.loading_actions {
+            return;
+        }
+        if link_map.links().is_empty() {
+            self.linkage_broken = false;
+            return;
+        }
+        let ghost_pipeline = link_map.links().iter().any(|l| {
+            !self
+                .pipeline_groups
+                .iter()
+                .any(|pg| pg.name == l.pipeline_name)
+        });
+        let ghost_workflow = link_map.links().iter().any(|l| {
+            !self
+                .workflow_groups
+                .iter()
+                .any(|wg| wg.name == l.workflow_name)
+        });
+        self.linkage_broken = ghost_pipeline || ghost_workflow;
     }
 
     pub fn has_any_running(&self) -> bool {
@@ -251,5 +282,99 @@ mod tests {
         assert_eq!(new_app.loading_pipelines, default_app.loading_pipelines);
         assert_eq!(new_app.loading_actions, default_app.loading_actions);
         assert_eq!(new_app.actions_expanded, default_app.actions_expanded);
+    }
+
+    use crate::linkage::LinkMap;
+
+    #[test]
+    fn check_linkage_health_skips_while_loading() {
+        let mut app = App::new();
+        let mut link_map = LinkMap::new();
+        link_map.add_discovered("pipe".into(), "wf".into(), "b".into(), "k".into());
+        // loading_pipelines is true by default
+        app.check_linkage_health(&link_map);
+        assert!(!app.linkage_broken, "should not flag broken while loading");
+    }
+
+    #[test]
+    fn check_linkage_health_empty_links_not_broken() {
+        let mut app = App::new();
+        app.loading_pipelines = false;
+        app.loading_actions = false;
+        let link_map = LinkMap::new();
+        app.check_linkage_health(&link_map);
+        assert!(!app.linkage_broken);
+    }
+
+    #[test]
+    fn check_linkage_health_ghost_pipeline() {
+        let mut app = App::new();
+        app.loading_pipelines = false;
+        app.loading_actions = false;
+        app.workflow_groups.push(WorkflowGroup {
+            name: "CI".into(),
+            jobs: vec![],
+            gone: false,
+            summary_status: BuildStatus::Idle,
+            run_id: None,
+            category: WorkflowCategory::default(),
+            linked_pipeline: None,
+        });
+        let mut link_map = LinkMap::new();
+        link_map.add_discovered("missing-pipe".into(), "CI".into(), "b".into(), "k".into());
+        app.check_linkage_health(&link_map);
+        assert!(app.linkage_broken, "ghost pipeline should flag broken");
+    }
+
+    #[test]
+    fn check_linkage_health_ghost_workflow() {
+        let mut app = App::new();
+        app.loading_pipelines = false;
+        app.loading_actions = false;
+        app.pipeline_groups.push(PipelineGroup {
+            name: "deploy".into(),
+            stages: vec![],
+            gone: false,
+            summary_status: BuildStatus::Idle,
+            pending_link: false,
+        });
+        let mut link_map = LinkMap::new();
+        link_map.add_discovered("deploy".into(), "missing-wf".into(), "b".into(), "k".into());
+        app.check_linkage_health(&link_map);
+        assert!(app.linkage_broken, "ghost workflow should flag broken");
+    }
+
+    #[test]
+    fn check_linkage_health_all_present() {
+        let mut app = App::new();
+        app.loading_pipelines = false;
+        app.loading_actions = false;
+        app.workflow_groups.push(WorkflowGroup {
+            name: "CI".into(),
+            jobs: vec![],
+            gone: false,
+            summary_status: BuildStatus::Idle,
+            run_id: None,
+            category: WorkflowCategory::default(),
+            linked_pipeline: None,
+        });
+        app.pipeline_groups.push(PipelineGroup {
+            name: "deploy".into(),
+            stages: vec![],
+            gone: false,
+            summary_status: BuildStatus::Idle,
+            pending_link: false,
+        });
+        let mut link_map = LinkMap::new();
+        link_map.add_discovered("deploy".into(), "CI".into(), "b".into(), "k".into());
+        app.check_linkage_health(&link_map);
+        assert!(!app.linkage_broken, "all present should not be broken");
+    }
+
+    #[test]
+    fn app_starts_with_linkage_defaults() {
+        let app = App::new();
+        assert!(!app.linkage_broken);
+        assert!(!app.linkage_discovering);
     }
 }
