@@ -486,6 +486,7 @@ pub fn run_ui(
                     cooldown_remaining: app.cooldown_remaining,
                     warnings: &app.warnings,
                     hook_status: &app.hook_status,
+                    boost_pressed_at: app.boost_pressed_at,
                 },
                 areas[4],
             );
@@ -535,6 +536,7 @@ pub fn run_ui(
                     KeyCode::Char('b') => {
                         tracing::info!("UI: boost key pressed");
                         boost_notify.notify_one();
+                        app.lock().unwrap().boost_pressed_at = Some(Instant::now());
                     }
                     KeyCode::Char('h') => {
                         handle_hook_install(&app);

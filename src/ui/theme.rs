@@ -28,6 +28,9 @@ pub const SEPARATOR: Color = Color::Rgb(48, 48, 48);
 pub const BAR_FILLED: char = '\u{28FF}'; // ⣿
 pub const BAR_UNFILLED: char = '\u{28FF}'; // ⣿
 
+// Boost flash color (btop hi_fg — keyboard shortcut highlight)
+pub const BOOST_FLASH: Color = Color::Rgb(255, 85, 85);
+
 // Tick bar characters
 pub const TICK_FILLED: char = '\u{25AE}'; // ▮
 pub const TICK_EMPTY: char = '\u{25AF}'; // ▯
@@ -69,6 +72,11 @@ mod tests {
     fn tick_chars_are_correct_unicode() {
         assert_eq!(TICK_FILLED, '▮');
         assert_eq!(TICK_EMPTY, '▯');
+    }
+
+    #[test]
+    fn boost_flash_is_correct_rgb() {
+        assert_eq!(BOOST_FLASH, Color::Rgb(255, 85, 85));
     }
 
     #[test]

@@ -37,6 +37,8 @@ pub struct App {
     pub hook_status: HookStatus,
     /// AWS authentication health state.
     pub aws_health: SourceHealth,
+    /// When boost key was last pressed, for visual flash feedback.
+    pub boost_pressed_at: Option<Instant>,
 }
 
 impl App {
@@ -59,6 +61,7 @@ impl App {
             cooldown_remaining: None,
             hook_status: HookStatus::NoGitDir,
             aws_health: SourceHealth::Healthy,
+            boost_pressed_at: None,
         }
     }
 
@@ -229,6 +232,12 @@ mod tests {
             pending_link: false,
         });
         assert!(app.has_any_running());
+    }
+
+    #[test]
+    fn app_starts_with_no_boost() {
+        let app = App::new();
+        assert!(app.boost_pressed_at.is_none());
     }
 
     #[test]

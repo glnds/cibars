@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
@@ -10,6 +10,8 @@ use super::theme;
 use crate::config::HookStatus;
 use crate::poll_scheduler::PollState;
 
+const BOOST_FLASH_DURATION: Duration = Duration::from_millis(750);
+
 const NUM_TICKS: u64 = 5;
 
 pub struct StatusBar<'a> {
@@ -18,6 +20,7 @@ pub struct StatusBar<'a> {
     pub cooldown_remaining: Option<Duration>,
     pub warnings: &'a [String],
     pub hook_status: &'a HookStatus,
+    pub boost_pressed_at: Option<Instant>,
 }
 
 /// Compute how many ticks are filled based on elapsed time and state interval.
@@ -72,8 +75,21 @@ impl Widget for StatusBar<'_> {
             spans.push(Span::raw(format!("Cooldown: {}s", cd.as_secs())));
         }
 
+        let boost_active = self
+            .boost_pressed_at
+            .is_some_and(|t| t.elapsed() < BOOST_FLASH_DURATION);
+
         spans.push(dim_sep.clone());
-        spans.push(Span::raw("e=expand b=boost q=quit"));
+        spans.push(Span::raw("e=expand "));
+        if boost_active {
+            spans.push(Span::styled(
+                "b=boost",
+                Style::default().fg(theme::BOOST_FLASH),
+            ));
+        } else {
+            spans.push(Span::raw("b=boost"));
+        }
+        spans.push(Span::raw(" q=quit"));
 
         match self.hook_status {
             HookStatus::Missing | HookStatus::Incomplete => {
@@ -121,6 +137,7 @@ mod tests {
             cooldown_remaining: cooldown,
             warnings: &[],
             hook_status,
+            boost_pressed_at: None,
         };
         let area = Rect::new(0, 0, 120, 3);
         let mut buf = Buffer::empty(area);
@@ -354,6 +371,7 @@ mod tests {
             cooldown_remaining: cooldown,
             warnings,
             hook_status,
+            boost_pressed_at: None,
         };
         let area = Rect::new(0, 0, 120, 3);
         let mut buf = Buffer::empty(area);
@@ -398,6 +416,7 @@ mod tests {
             cooldown_remaining: None,
             warnings: &[],
             hook_status: &HookStatus::Installed,
+            boost_pressed_at: None,
         };
         let area = Rect::new(0, 0, 40, 3);
         let mut buf = Buffer::empty(area);
@@ -413,6 +432,95 @@ mod tests {
     }
 
     #[test]
+    fn boost_flash_active() {
+        let bar = StatusBar {
+            poll_state: &PollState::Idle,
+            elapsed_since_poll: Duration::ZERO,
+            cooldown_remaining: None,
+            warnings: &[],
+            hook_status: &HookStatus::Installed,
+            boost_pressed_at: Some(Instant::now()),
+        };
+        let area = Rect::new(0, 0, 120, 3);
+        let mut buf = Buffer::empty(area);
+        bar.render(area, &mut buf);
+
+        // Find "b" of "b=boost" by scanning cells in row 1
+        let b_col = (0u16..120)
+            .find(|&x| {
+                buf.cell((x, 1)).unwrap().symbol() == "b"
+                    && buf.cell((x + 1, 1)).unwrap().symbol() == "="
+            })
+            .expect("b=boost not found");
+        for offset in 0..7 {
+            let cell = buf.cell((b_col + offset, 1)).unwrap();
+            assert_eq!(
+                cell.fg,
+                theme::BOOST_FLASH,
+                "cell at offset {offset} ('{}') should be BOOST_FLASH",
+                cell.symbol()
+            );
+        }
+    }
+
+    #[test]
+    fn boost_flash_expired() {
+        let expired = Instant::now() - Duration::from_secs(2);
+        let bar = StatusBar {
+            poll_state: &PollState::Idle,
+            elapsed_since_poll: Duration::ZERO,
+            cooldown_remaining: None,
+            warnings: &[],
+            hook_status: &HookStatus::Installed,
+            boost_pressed_at: Some(expired),
+        };
+        let area = Rect::new(0, 0, 120, 3);
+        let mut buf = Buffer::empty(area);
+        bar.render(area, &mut buf);
+
+        let b_col = (0u16..120)
+            .find(|&x| {
+                buf.cell((x, 1)).unwrap().symbol() == "b"
+                    && buf.cell((x + 1, 1)).unwrap().symbol() == "="
+            })
+            .expect("b=boost not found");
+        let cell = buf.cell((b_col, 1)).unwrap();
+        assert_ne!(
+            cell.fg,
+            theme::BOOST_FLASH,
+            "expired flash should not use BOOST_FLASH"
+        );
+    }
+
+    #[test]
+    fn boost_flash_none() {
+        let bar = StatusBar {
+            poll_state: &PollState::Idle,
+            elapsed_since_poll: Duration::ZERO,
+            cooldown_remaining: None,
+            warnings: &[],
+            hook_status: &HookStatus::Installed,
+            boost_pressed_at: None,
+        };
+        let area = Rect::new(0, 0, 120, 3);
+        let mut buf = Buffer::empty(area);
+        bar.render(area, &mut buf);
+
+        let b_col = (0u16..120)
+            .find(|&x| {
+                buf.cell((x, 1)).unwrap().symbol() == "b"
+                    && buf.cell((x + 1, 1)).unwrap().symbol() == "="
+            })
+            .expect("b=boost not found");
+        let cell = buf.cell((b_col, 1)).unwrap();
+        assert_ne!(
+            cell.fg,
+            theme::BOOST_FLASH,
+            "no flash should not use BOOST_FLASH"
+        );
+    }
+
+    #[test]
     fn statusbar_block_border_color() {
         let bar = StatusBar {
             poll_state: &PollState::Idle,
@@ -420,6 +528,7 @@ mod tests {
             cooldown_remaining: None,
             warnings: &[],
             hook_status: &HookStatus::Installed,
+            boost_pressed_at: None,
         };
         let area = Rect::new(0, 0, 40, 3);
         let mut buf = Buffer::empty(area);
