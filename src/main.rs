@@ -165,14 +165,31 @@ async fn run_poll_orchestrator(
             aws_client = Some(client);
         }
 
-        // Poll: parallel when both, GH-only otherwise
-        if let Some(aws) = aws_client.as_ref().filter(|_| poll_aws) {
-            tokio::join!(
-                poller::poll_actions_tick(&app, &gh_client),
-                poller::poll_pipelines_tick(&app, aws, &config.aws_profile, force_aws),
-            );
-        } else {
-            poller::poll_actions_tick(&app, &gh_client).await;
+        // Poll with boost/SIGUSR1 interruption — if a signal arrives
+        // mid-API-call, cancel the poll and restart in Watching mode.
+        let interrupted = tokio::select! {
+            biased;
+            _ = boost_notify.notified() => true,
+            _ = sigusr1.recv() => true,
+            _ = async {
+                if let Some(aws) = aws_client.as_ref().filter(|_| poll_aws) {
+                    tokio::join!(
+                        poller::poll_actions_tick(&app, &gh_client),
+                        poller::poll_pipelines_tick(&app, aws, &config.aws_profile, force_aws),
+                    );
+                } else {
+                    poller::poll_actions_tick(&app, &gh_client).await;
+                }
+            } => false,
+        };
+
+        if interrupted {
+            scheduler.boost();
+            force_next_aws = true;
+            let mut a = app.lock().expect("app mutex poisoned");
+            a.poll_state = scheduler.state();
+            tracing::info!(state = ?scheduler.state(), "boost interrupted poll cycle");
+            continue;
         }
 
         // Classify workflows by category (CI vs Review)

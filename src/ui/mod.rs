@@ -89,6 +89,19 @@ fn toggle_expand(app: &Arc<Mutex<App>>) {
     }
 }
 
+/// Handle boost key: optimistically update poll state to Watching.
+/// Returns true if state was changed (Idle/LongIdle → Watching).
+fn handle_boost(app: &Arc<Mutex<App>>) -> bool {
+    if let Ok(mut a) = app.lock() {
+        a.boost_pressed_at = Some(Instant::now());
+        if matches!(a.poll_state, PollState::Idle | PollState::LongIdle) {
+            a.poll_state = PollState::Watching;
+            return true;
+        }
+    }
+    false
+}
+
 /// Handle the 'h' key press: install pre-push hook if needed.
 /// Returns true if installation was attempted.
 fn handle_hook_install(app: &Arc<Mutex<App>>) -> bool {
@@ -536,7 +549,7 @@ pub fn run_ui(
                     KeyCode::Char('b') => {
                         tracing::info!("UI: boost key pressed");
                         boost_notify.notify_one();
-                        app.lock().unwrap().boost_pressed_at = Some(Instant::now());
+                        handle_boost(&app);
                     }
                     KeyCode::Char('h') => {
                         handle_hook_install(&app);
@@ -1208,6 +1221,47 @@ mod tests {
             .collect();
         assert_eq!(dots[0].fg, theme::STATUS_SUCCESS);
         assert_eq!(dots[1].fg, theme::STATUS_FAILED);
+    }
+
+    #[test]
+    fn handle_boost_idle_to_watching() {
+        let app = Arc::new(Mutex::new(App::new()));
+        app.lock().unwrap().poll_state = PollState::Idle;
+        assert!(handle_boost(&app));
+        assert_eq!(app.lock().unwrap().poll_state, PollState::Watching);
+        assert!(app.lock().unwrap().boost_pressed_at.is_some());
+    }
+
+    #[test]
+    fn handle_boost_long_idle_to_watching() {
+        let app = Arc::new(Mutex::new(App::new()));
+        app.lock().unwrap().poll_state = PollState::LongIdle;
+        assert!(handle_boost(&app));
+        assert_eq!(app.lock().unwrap().poll_state, PollState::Watching);
+    }
+
+    #[test]
+    fn handle_boost_noop_in_active() {
+        let app = Arc::new(Mutex::new(App::new()));
+        app.lock().unwrap().poll_state = PollState::Active;
+        assert!(!handle_boost(&app));
+        assert_eq!(app.lock().unwrap().poll_state, PollState::Active);
+    }
+
+    #[test]
+    fn handle_boost_noop_in_cooldown() {
+        let app = Arc::new(Mutex::new(App::new()));
+        app.lock().unwrap().poll_state = PollState::Cooldown;
+        assert!(!handle_boost(&app));
+        assert_eq!(app.lock().unwrap().poll_state, PollState::Cooldown);
+    }
+
+    #[test]
+    fn handle_boost_noop_in_watching() {
+        let app = Arc::new(Mutex::new(App::new()));
+        app.lock().unwrap().poll_state = PollState::Watching;
+        assert!(!handle_boost(&app));
+        assert_eq!(app.lock().unwrap().poll_state, PollState::Watching);
     }
 
     #[test]
