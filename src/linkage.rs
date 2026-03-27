@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
+use anyhow::Context;
 use serde::{Deserialize, Serialize};
 
 use crate::app::App;
@@ -206,8 +207,6 @@ impl LinkMap {
             .retain(|(_, t)| t.elapsed() < cutoff);
     }
 }
-
-use anyhow::Context;
 
 /// Load link cache from disk. Returns None if file doesn't exist or
 /// has an unknown schema version.

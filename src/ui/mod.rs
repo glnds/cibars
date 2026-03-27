@@ -1423,4 +1423,26 @@ mod tests {
             "const MIN_HEIGHT should not exist — no terminal size gate"
         );
     }
+
+    #[test]
+    fn sorted_pipeline_groups_no_links_returns_all() {
+        let pipelines = vec![
+            PipelineGroup {
+                name: "pipe-a".into(),
+                stages: vec![],
+                gone: false,
+                summary_status: BuildStatus::Idle,
+                pending_link: false,
+            },
+            PipelineGroup {
+                name: "pipe-b".into(),
+                stages: vec![],
+                gone: false,
+                summary_status: BuildStatus::Idle,
+                pending_link: false,
+            },
+        ];
+        let sorted = sorted_pipeline_groups(&pipelines, &[]);
+        assert_eq!(sorted.len(), 2);
+    }
 }
