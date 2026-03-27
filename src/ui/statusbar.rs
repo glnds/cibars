@@ -39,16 +39,6 @@ fn filled_ticks(elapsed: Duration, state: &PollState) -> usize {
     (elapsed_ms / tick_duration_ms).min(NUM_TICKS) as usize
 }
 
-/// Build the tick bar string: filled '▮' + remaining '▯'.
-fn tick_bar(filled: usize) -> String {
-    let remaining = (NUM_TICKS as usize).saturating_sub(filled);
-    format!(
-        "{}{}",
-        theme::TICK_FILLED.to_string().repeat(filled),
-        theme::TICK_EMPTY.to_string().repeat(remaining)
-    )
-}
-
 impl Widget for StatusBar<'_> {
     fn render(self, area: Rect, buf: &mut Buffer) {
         let block = Block::bordered()
@@ -57,18 +47,26 @@ impl Widget for StatusBar<'_> {
         let inner = block.inner(area);
         block.render(area, buf);
 
-        let label = match self.poll_state {
-            PollState::Idle => "Slow",
-            PollState::LongIdle => "Long",
-            PollState::Watching | PollState::Active | PollState::Cooldown => "Fast",
+        let (label, color) = match self.poll_state {
+            PollState::Idle => ("Slow", theme::POLL_SLOW),
+            PollState::LongIdle => ("Sleep", theme::POLL_SLEEP),
+            PollState::Watching => ("Scan:GH", theme::POLL_SCAN),
+            PollState::Active => ("Fast", theme::POLL_FAST),
+            PollState::Cooldown => ("Cool", theme::POLL_COOL),
         };
 
         let filled = filled_ticks(self.elapsed_since_poll, self.poll_state);
-        let bar = tick_bar(filled);
+        let remaining = (NUM_TICKS as usize).saturating_sub(filled);
+        let filled_str: String = std::iter::repeat_n(theme::TICK_FILLED, filled).collect();
+        let empty_str: String = std::iter::repeat_n(theme::TICK_EMPTY, remaining).collect();
 
         let dim_sep = Span::styled(" \u{2502} ", Style::default().fg(theme::SEPARATOR));
 
-        let mut spans = vec![Span::raw(format!("{label} {bar}"))];
+        let mut spans = vec![
+            Span::styled(format!("{label} "), Style::default().fg(color)),
+            Span::styled(filled_str, Style::default().fg(color)),
+            Span::styled(empty_str, Style::default().fg(theme::FG_DIM)),
+        ];
 
         if let Some(cd) = self.cooldown_remaining {
             spans.push(dim_sep.clone());
@@ -163,14 +161,13 @@ mod tests {
     }
 
     #[test]
-    fn cooldown_shows_fast_polling_with_timer() {
+    fn cooldown_shows_cool_with_timer() {
         let content = render_bar(
             &PollState::Cooldown,
             Duration::ZERO,
             Some(Duration::from_secs(42)),
         );
-        assert!(content.contains("Fast"), "got: {content}");
-        assert!(!content.contains("Polling:"), "got: {content}");
+        assert!(content.contains("Cool"), "got: {content}");
         assert!(content.contains("Cooldown: 42s"), "got: {content}");
     }
 
@@ -227,17 +224,15 @@ mod tests {
     }
 
     #[test]
-    fn watching_shows_fast_polling() {
+    fn watching_shows_scan_gh() {
         let content = render_bar(&PollState::Watching, Duration::ZERO, None);
-        assert!(content.contains("Fast"), "got: {content}");
-        assert!(!content.contains("Polling:"), "got: {content}");
+        assert!(content.contains("Scan:GH"), "got: {content}");
     }
 
     #[test]
-    fn long_idle_shows_long_polling() {
+    fn long_idle_shows_sleep() {
         let content = render_bar(&PollState::LongIdle, Duration::ZERO, None);
-        assert!(content.contains("Long"), "got: {content}");
-        assert!(!content.contains("Polling:"), "got: {content}");
+        assert!(content.contains("Sleep"), "got: {content}");
     }
 
     #[test]
@@ -326,27 +321,6 @@ mod tests {
             filled_ticks(Duration::from_secs(260), &PollState::LongIdle),
             NUM_TICKS as usize
         );
-    }
-
-    #[test]
-    fn tick_bar_formatting() {
-        let f = theme::TICK_FILLED;
-        let e = theme::TICK_EMPTY;
-        assert_eq!(tick_bar(0), format!("{e}{e}{e}{e}{e}"));
-        assert_eq!(tick_bar(3), format!("{f}{f}{f}{e}{e}"));
-        assert_eq!(tick_bar(5), format!("{f}{f}{f}{f}{f}"));
-    }
-
-    #[test]
-    fn tick_bar_uses_unicode_chars() {
-        let bar = tick_bar(3);
-        // Verify exact Unicode code points
-        let chars: Vec<char> = bar.chars().collect();
-        assert_eq!(chars[0], '\u{25AE}'); // ▮
-        assert_eq!(chars[1], '\u{25AE}');
-        assert_eq!(chars[2], '\u{25AE}');
-        assert_eq!(chars[3], '\u{25AF}'); // ▯
-        assert_eq!(chars[4], '\u{25AF}');
     }
 
     #[test]
@@ -518,6 +492,71 @@ mod tests {
             theme::BOOST_FLASH,
             "no flash should not use BOOST_FLASH"
         );
+    }
+
+    fn render_buf(state: &PollState, elapsed: Duration, cooldown: Option<Duration>) -> Buffer {
+        let bar = StatusBar {
+            poll_state: state,
+            elapsed_since_poll: elapsed,
+            cooldown_remaining: cooldown,
+            warnings: &[],
+            hook_status: &HookStatus::Installed,
+            boost_pressed_at: None,
+        };
+        let area = Rect::new(0, 0, 120, 3);
+        let mut buf = Buffer::empty(area);
+        bar.render(area, &mut buf);
+        buf
+    }
+
+    /// Find first cell in row 1 matching a char and return its fg color.
+    fn label_color(buf: &Buffer, ch: &str) -> ratatui::style::Color {
+        let col = (1u16..119)
+            .find(|&x| buf.cell((x, 1)).unwrap().symbol() == ch)
+            .unwrap_or_else(|| panic!("'{ch}' not found in row 1"));
+        buf.cell((col, 1)).unwrap().fg
+    }
+
+    #[test]
+    fn poll_state_label_colors() {
+        let cases: Vec<(PollState, &str, ratatui::style::Color)> = vec![
+            (PollState::Idle, "S", theme::POLL_SLOW),
+            (PollState::LongIdle, "S", theme::POLL_SLEEP),
+            (PollState::Watching, "S", theme::POLL_SCAN),
+            (PollState::Active, "F", theme::POLL_FAST),
+            (PollState::Cooldown, "C", theme::POLL_COOL),
+        ];
+        for (state, first_char, expected_color) in cases {
+            let buf = render_buf(&state, Duration::ZERO, None);
+            let color = label_color(&buf, first_char);
+            assert_eq!(
+                color, expected_color,
+                "state {state:?}: expected {expected_color:?}, got {color:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn filled_ticks_use_state_color() {
+        // Active with 2s elapsed → 2 filled ticks, should be POLL_FAST colored
+        let buf = render_buf(&PollState::Active, Duration::from_secs(2), None);
+        // Find first tick char
+        let tick_col = (1u16..119)
+            .find(|&x| buf.cell((x, 1)).unwrap().symbol() == "\u{25AE}")
+            .expect("filled tick not found");
+        let tick_color = buf.cell((tick_col, 1)).unwrap().fg;
+        assert_eq!(tick_color, theme::POLL_FAST);
+    }
+
+    #[test]
+    fn empty_ticks_use_dim_color() {
+        // Active with 0 elapsed → all empty ticks
+        let buf = render_buf(&PollState::Active, Duration::ZERO, None);
+        let tick_col = (1u16..119)
+            .find(|&x| buf.cell((x, 1)).unwrap().symbol() == "\u{25AF}")
+            .expect("empty tick not found");
+        let tick_color = buf.cell((tick_col, 1)).unwrap().fg;
+        assert_eq!(tick_color, theme::FG_DIM);
     }
 
     #[test]

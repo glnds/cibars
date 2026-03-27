@@ -21,6 +21,13 @@ pub const STATUS_RUNNING_TIP: Color = Color::Rgb(240, 80, 80);
 pub const STATUS_FAILED: Color = Color::Rgb(255, 64, 64);
 pub const STATUS_IDLE: Color = Color::Rgb(85, 85, 85);
 
+// Poll state colors (btop-inspired urgency gradient)
+pub const POLL_SLEEP: Color = Color::Rgb(85, 85, 85); // LongIdle — inactive_fg
+pub const POLL_SLOW: Color = Color::Rgb(135, 135, 95); // Idle — mem_box
+pub const POLL_SCAN: Color = Color::Rgb(72, 151, 212); // Watching — temp_start
+pub const POLL_FAST: Color = Color::Rgb(240, 80, 80); // Active — cpu_end
+pub const POLL_COOL: Color = Color::Rgb(95, 135, 135); // Cooldown — cpu_box
+
 // Separator color
 pub const SEPARATOR: Color = Color::Rgb(48, 48, 48);
 
@@ -91,5 +98,14 @@ mod tests {
     fn bar_empty_and_separator_colors() {
         assert_eq!(BAR_EMPTY, Color::Rgb(48, 48, 48));
         assert_eq!(SEPARATOR, Color::Rgb(48, 48, 48));
+    }
+
+    #[test]
+    fn poll_state_colors_are_correct_rgb() {
+        assert_eq!(POLL_SLEEP, Color::Rgb(85, 85, 85));
+        assert_eq!(POLL_SLOW, Color::Rgb(135, 135, 95));
+        assert_eq!(POLL_SCAN, Color::Rgb(72, 151, 212));
+        assert_eq!(POLL_FAST, Color::Rgb(240, 80, 80));
+        assert_eq!(POLL_COOL, Color::Rgb(95, 135, 135));
     }
 }
