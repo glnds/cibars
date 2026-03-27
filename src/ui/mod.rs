@@ -226,6 +226,7 @@ fn render_collapsed_pipelines(
     Line::from(spans).render(area, buf);
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn run_ui(
     app: Arc<Mutex<App>>,
     mut terminal: DefaultTerminal,
