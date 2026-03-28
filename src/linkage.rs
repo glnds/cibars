@@ -287,6 +287,36 @@ pub async fn discover_links(aws: &dyn PipelineClient, gh: &dyn ActionsClient) ->
         }
     };
 
+    // Log discovery inputs for diagnostics
+    let s3_pipeline_count = definitions.iter().filter(|d| d.source_s3.is_some()).count();
+    tracing::info!(
+        pipelines = pipeline_names.len(),
+        with_s3_source = s3_pipeline_count,
+        workflow_files = workflow_files.len(),
+        total_s3_uploads = workflow_files.iter().map(|wf| wf.s3_uploads.len()).sum::<usize>(),
+        "link discovery inputs"
+    );
+    for def in &definitions {
+        if let Some(s3) = &def.source_s3 {
+            tracing::debug!(
+                pipeline = %def.name,
+                bucket = %s3.bucket,
+                key = %s3.object_key,
+                "pipeline S3 source"
+            );
+        }
+    }
+    for wf in &workflow_files {
+        for upload in &wf.s3_uploads {
+            tracing::debug!(
+                workflow = %wf.name,
+                bucket = %upload.bucket,
+                key = %upload.key,
+                "workflow S3 upload"
+            );
+        }
+    }
+
     // Match: CP source S3 key matches GH upload S3 key
     for def in &definitions {
         if let Some(s3) = &def.source_s3 {

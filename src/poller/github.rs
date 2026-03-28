@@ -216,12 +216,19 @@ impl ActionsClient for GitHubActionsClient {
 static S3_PATH_RE: std::sync::LazyLock<regex::Regex> =
     std::sync::LazyLock::new(|| regex::Regex::new(r"s3://([^/\s]+)/(\S+)").expect("valid regex"));
 
+/// Regex to collapse `${{ ... }}` GitHub Actions expressions into `GHEXPR`
+/// so that spaces inside expressions don't break the S3 URI regex.
+static GH_EXPR_RE: std::sync::LazyLock<regex::Regex> =
+    std::sync::LazyLock::new(|| regex::Regex::new(r"\$\{\{[^}]*\}\}").expect("valid regex"));
+
 /// Extract S3 paths from shell commands in workflow YAML `run` steps.
 /// Looks for `aws s3 cp` and `aws s3 sync` commands with `s3://bucket/key` patterns.
+/// Handles `${{ vars.X }}` GitHub Actions expressions by collapsing them first.
 pub fn extract_s3_paths(yaml_content: &str) -> Vec<S3Upload> {
     let mut uploads = Vec::new();
+    let cleaned = GH_EXPR_RE.replace_all(yaml_content, "GHEXPR");
 
-    for cap in S3_PATH_RE.captures_iter(yaml_content) {
+    for cap in S3_PATH_RE.captures_iter(&cleaned) {
         let bucket = cap[1].to_string();
         let key = cap[2].to_string();
         // Deduplicate
@@ -487,6 +494,24 @@ mod tests {
         let uploads = extract_s3_paths(yaml);
         assert_eq!(uploads.len(), 1);
         assert_eq!(uploads[0].bucket, "${AWS_ACCOUNT_ID}-deploy");
+    }
+
+    #[test]
+    fn extract_s3_with_github_actions_expression_in_bucket() {
+        let yaml =
+            "run: aws s3 cp dist.zip s3://attracr-ci-artifacts-${{ vars.AWS_ACCOUNT_ID }}/frontend/frontend-artifacts.zip";
+        let uploads = extract_s3_paths(yaml);
+        assert_eq!(uploads.len(), 1, "should match despite ${{}} spaces");
+        assert_eq!(uploads[0].key, "frontend/frontend-artifacts.zip");
+    }
+
+    #[test]
+    fn extract_s3_with_multiple_github_actions_expressions() {
+        let yaml =
+            "run: aws s3 cp app.zip s3://${{ vars.BUCKET }}-${{ vars.ENV }}/deploy/app.zip";
+        let uploads = extract_s3_paths(yaml);
+        assert_eq!(uploads.len(), 1);
+        assert_eq!(uploads[0].key, "deploy/app.zip");
     }
 
     // --- parse_workflow_yaml tests ---
