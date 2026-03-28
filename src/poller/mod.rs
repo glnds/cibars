@@ -34,11 +34,13 @@ pub struct ActionState {
 }
 
 /// Pipeline definition (source config), from GetPipeline API.
+#[derive(Clone)]
 pub struct PipelineDefinition {
     pub name: String,
     pub source_s3: Option<S3Source>,
 }
 
+#[derive(Clone)]
 pub struct S3Source {
     pub bucket: String,
     pub object_key: String,
@@ -52,11 +54,13 @@ pub struct JobInfo {
 }
 
 /// Parsed GH workflow file with S3 upload targets.
+#[derive(Clone)]
 pub struct WorkflowFile {
     pub name: String,
     pub s3_uploads: Vec<S3Upload>,
 }
 
+#[derive(Clone)]
 pub struct S3Upload {
     pub bucket: String,
     pub key: String,
