@@ -108,11 +108,6 @@ impl App {
         self.linkage_broken = ghost_pipeline || ghost_workflow;
     }
 
-    /// True when pipeline-centric UI should be used (linkage with job assignments).
-    pub fn has_pipeline_centric_layout(&self) -> bool {
-        self.job_assignment.is_some()
-    }
-
     pub fn has_any_running(&self) -> bool {
         self.pipeline_groups.iter().any(|g| {
             g.summary_status == BuildStatus::Running
@@ -385,21 +380,5 @@ mod tests {
         let app = App::new();
         assert!(!app.linkage_broken);
         assert!(!app.linkage_discovering);
-    }
-
-    #[test]
-    fn has_pipeline_centric_layout_default_false() {
-        let app = App::new();
-        assert!(!app.has_pipeline_centric_layout());
-    }
-
-    #[test]
-    fn has_pipeline_centric_layout_with_assignment() {
-        let mut app = App::new();
-        app.job_assignment = Some(crate::linkage::JobAssignment {
-            pipeline_jobs: std::collections::HashMap::new(),
-            shared_jobs: Vec::new(),
-        });
-        assert!(app.has_pipeline_centric_layout());
     }
 }
