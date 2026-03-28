@@ -3,10 +3,12 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use anyhow::Context;
+use chrono::Utc;
 use serde::{Deserialize, Serialize};
 
 use crate::app::App;
 use crate::model::BuildStatus;
+use crate::poller::{ActionsClient, PipelineClient};
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct CachedLink {
@@ -246,6 +248,99 @@ pub fn s3_keys_match(cp_key: &str, gh_key: &str) -> bool {
     }
 
     cp == gh || gh.starts_with(cp) || cp.starts_with(gh)
+}
+
+/// Discover GH workflow <-> CP pipeline links by matching S3 source configs.
+pub async fn discover_links(aws: &dyn PipelineClient, gh: &dyn ActionsClient) -> LinkMap {
+    let mut link_map = LinkMap::new();
+
+    let pipeline_names = match aws.list_pipeline_names().await {
+        Ok(names) => names,
+        Err(e) => {
+            tracing::warn!(error = %e, "failed to list pipelines for link discovery");
+            return link_map;
+        }
+    };
+
+    // Fetch pipeline definitions in parallel
+    let def_futs: Vec<_> = pipeline_names
+        .iter()
+        .map(|n| aws.get_pipeline_definition(n))
+        .collect();
+    let definitions: Vec<_> = futures::future::join_all(def_futs)
+        .await
+        .into_iter()
+        .filter_map(|r| match r {
+            Ok(d) => Some(d),
+            Err(e) => {
+                tracing::warn!(error = %e, "failed to get pipeline definition");
+                None
+            }
+        })
+        .collect();
+
+    let workflow_files = match gh.fetch_workflow_files().await {
+        Ok(wf) => wf,
+        Err(e) => {
+            tracing::warn!(error = %e, "failed to fetch workflow files for link discovery");
+            return link_map;
+        }
+    };
+
+    // Match: CP source S3 key matches GH upload S3 key
+    for def in &definitions {
+        if let Some(s3) = &def.source_s3 {
+            for wf in &workflow_files {
+                for upload in &wf.s3_uploads {
+                    if s3_keys_match(&s3.object_key, &upload.key) {
+                        link_map.add_discovered(
+                            def.name.clone(),
+                            wf.name.clone(),
+                            s3.bucket.clone(),
+                            s3.object_key.clone(),
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    tracing::info!(links = link_map.links().len(), "link discovery complete");
+    link_map
+}
+
+/// Update each WorkflowGroup's linked_pipeline from the LinkMap.
+pub fn sync_linked_pipelines(app: &Arc<Mutex<App>>, link_map: &LinkMap) {
+    let mut a = app.lock().expect("app mutex poisoned");
+    for wg in &mut a.workflow_groups {
+        wg.linked_pipeline = link_map
+            .links()
+            .iter()
+            .find(|l| l.workflow_name == wg.name)
+            .map(|l| l.pipeline_name.clone());
+    }
+}
+
+/// Run link discovery, persist cache, and update app state.
+pub async fn run_discovery(
+    aws: &dyn PipelineClient,
+    gh: &dyn ActionsClient,
+    app: &Arc<Mutex<App>>,
+    cache_path: &std::path::Path,
+) -> LinkMap {
+    app.lock().expect("app mutex poisoned").linkage_discovering = true;
+    let link_map = discover_links(aws, gh).await;
+
+    if !link_map.links().is_empty() {
+        let cache = link_map.to_cache(&Utc::now().to_rfc3339());
+        if let Err(e) = save_link_cache(cache_path, &cache) {
+            tracing::warn!(error = %e, "failed to save link cache");
+        }
+    }
+
+    sync_linked_pipelines(app, &link_map);
+    app.lock().expect("app mutex poisoned").linkage_discovering = false;
+    link_map
 }
 
 /// After polling, apply GH→CP links:
