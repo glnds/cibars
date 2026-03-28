@@ -58,12 +58,27 @@ pub struct JobInfo {
 pub struct WorkflowFile {
     pub name: String,
     pub s3_uploads: Vec<S3Upload>,
+    /// Per-job S3 info extracted from YAML AST (empty for non-YAML sources).
+    pub jobs: Vec<JobS3Info>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct S3Upload {
     pub bucket: String,
     pub key: String,
+}
+
+/// Per-job S3 upload info extracted from workflow YAML AST.
+#[derive(Clone, Debug)]
+pub struct JobS3Info {
+    /// YAML job key (e.g., "build-backend")
+    pub job_id: String,
+    /// Display name from `name:` field (e.g., "Build Backend")
+    pub job_name: String,
+    /// S3 uploads found in this job's `run:` steps
+    pub s3_uploads: Vec<S3Upload>,
+    /// Job IDs this job depends on (from `needs:`)
+    pub needs: Vec<String>,
 }
 
 /// Workflow summary from the runs API (no jobs yet).

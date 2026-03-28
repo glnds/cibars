@@ -252,7 +252,69 @@ pub fn parse_workflow_yaml(filename: &str, content: &str) -> Option<WorkflowFile
         .to_string();
 
     let s3_uploads = extract_s3_paths(content);
-    Some(WorkflowFile { name, s3_uploads })
+    let jobs = extract_jobs_s3_info(&yaml);
+    Some(WorkflowFile {
+        name,
+        s3_uploads,
+        jobs,
+    })
+}
+
+/// Extract per-job S3 upload info from a parsed YAML workflow.
+/// Traverses `yaml["jobs"]` to extract each job's S3 uploads and `needs:` deps.
+pub fn extract_jobs_s3_info(yaml: &serde_yaml::Value) -> Vec<super::JobS3Info> {
+    let jobs_map = match yaml.get("jobs").and_then(|j| j.as_mapping()) {
+        Some(m) => m,
+        None => return Vec::new(),
+    };
+
+    let mut result = Vec::new();
+    for (key, value) in jobs_map {
+        let job_id = match key.as_str() {
+            Some(s) => s.to_string(),
+            None => continue,
+        };
+
+        let job_name = value
+            .get("name")
+            .and_then(|n| n.as_str())
+            .unwrap_or(&job_id)
+            .to_string();
+
+        // Extract `needs:` — can be a string or a sequence
+        let needs = match value.get("needs") {
+            Some(serde_yaml::Value::String(s)) => vec![s.clone()],
+            Some(serde_yaml::Value::Sequence(seq)) => seq
+                .iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect(),
+            _ => Vec::new(),
+        };
+
+        // Extract S3 paths from all `run:` steps in this job
+        let mut s3_uploads = Vec::new();
+        if let Some(steps) = value.get("steps").and_then(|s| s.as_sequence()) {
+            for step in steps {
+                if let Some(run_cmd) = step.get("run").and_then(|r| r.as_str()) {
+                    for upload in extract_s3_paths(run_cmd) {
+                        if !s3_uploads.iter().any(|u: &super::S3Upload| {
+                            u.bucket == upload.bucket && u.key == upload.key
+                        }) {
+                            s3_uploads.push(upload);
+                        }
+                    }
+                }
+            }
+        }
+
+        result.push(super::JobS3Info {
+            job_id,
+            job_name,
+            s3_uploads,
+            needs,
+        });
+    }
+    result
 }
 
 /// Extract `completed_at` timestamp from a GitHub Actions job JSON object.
@@ -729,6 +791,139 @@ jobs:
         let mut latest = std::collections::HashMap::new();
         parse_workflow_runs(&resp, &mut latest, None);
         assert!(latest.contains_key("unknown"));
+    }
+
+    // --- extract_jobs_s3_info tests ---
+
+    #[test]
+    fn extract_jobs_s3_info_multi_job_workflow() {
+        let yaml = r#"
+name: CI
+on: push
+jobs:
+  validate-cfn:
+    name: Validate CloudFormation
+    runs-on: ubuntu-latest
+    steps:
+      - run: cfn-lint templates/*.yaml
+  test-backend:
+    name: Backend Tests
+    runs-on: ubuntu-latest
+    steps:
+      - run: cargo test
+  build-backend:
+    name: Build Backend
+    needs: [validate-cfn, test-backend]
+    runs-on: ubuntu-latest
+    steps:
+      - run: aws s3 cp backend.zip s3://bucket/backend/source.zip
+  build-frontend:
+    name: Build Frontend
+    needs: [validate-cfn, test-backend]
+    runs-on: ubuntu-latest
+    steps:
+      - run: aws s3 cp frontend.zip s3://bucket/frontend/artifacts.zip
+"#;
+        let parsed: serde_yaml::Value = serde_yaml::from_str(yaml).unwrap();
+        let jobs = extract_jobs_s3_info(&parsed);
+
+        assert_eq!(jobs.len(), 4);
+
+        let cfn = jobs.iter().find(|j| j.job_id == "validate-cfn").unwrap();
+        assert_eq!(cfn.job_name, "Validate CloudFormation");
+        assert!(cfn.s3_uploads.is_empty());
+        assert!(cfn.needs.is_empty());
+
+        let test = jobs.iter().find(|j| j.job_id == "test-backend").unwrap();
+        assert_eq!(test.job_name, "Backend Tests");
+        assert!(test.s3_uploads.is_empty());
+        assert!(test.needs.is_empty());
+
+        let build_be = jobs.iter().find(|j| j.job_id == "build-backend").unwrap();
+        assert_eq!(build_be.job_name, "Build Backend");
+        assert_eq!(build_be.s3_uploads.len(), 1);
+        assert_eq!(build_be.s3_uploads[0].key, "backend/source.zip");
+        assert_eq!(build_be.needs, vec!["validate-cfn", "test-backend"]);
+
+        let build_fe = jobs.iter().find(|j| j.job_id == "build-frontend").unwrap();
+        assert_eq!(build_fe.job_name, "Build Frontend");
+        assert_eq!(build_fe.s3_uploads.len(), 1);
+        assert_eq!(build_fe.s3_uploads[0].key, "frontend/artifacts.zip");
+        assert_eq!(build_fe.needs, vec!["validate-cfn", "test-backend"]);
+    }
+
+    #[test]
+    fn extract_jobs_s3_info_single_string_needs() {
+        let yaml = r#"
+name: Deploy
+on: push
+jobs:
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    steps:
+      - run: aws s3 cp out.zip s3://bucket/key.zip
+  deploy:
+    name: Deploy
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo deploying
+"#;
+        let parsed: serde_yaml::Value = serde_yaml::from_str(yaml).unwrap();
+        let jobs = extract_jobs_s3_info(&parsed);
+
+        let deploy = jobs.iter().find(|j| j.job_id == "deploy").unwrap();
+        assert_eq!(deploy.needs, vec!["build"]);
+    }
+
+    #[test]
+    fn extract_jobs_s3_info_no_jobs() {
+        let yaml = r#"
+name: Empty
+on: push
+"#;
+        let parsed: serde_yaml::Value = serde_yaml::from_str(yaml).unwrap();
+        let jobs = extract_jobs_s3_info(&parsed);
+        assert!(jobs.is_empty());
+    }
+
+    #[test]
+    fn extract_jobs_s3_info_job_without_name_uses_id() {
+        let yaml = r#"
+name: CI
+on: push
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - run: cargo clippy
+"#;
+        let parsed: serde_yaml::Value = serde_yaml::from_str(yaml).unwrap();
+        let jobs = extract_jobs_s3_info(&parsed);
+
+        let lint = jobs.iter().find(|j| j.job_id == "lint").unwrap();
+        assert_eq!(lint.job_name, "lint");
+    }
+
+    #[test]
+    fn extract_jobs_s3_info_github_expression_in_s3() {
+        let yaml = r#"
+name: CI
+on: push
+jobs:
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    steps:
+      - run: aws s3 cp out.zip s3://bucket-${{ vars.ACCOUNT }}/app/out.zip
+"#;
+        let parsed: serde_yaml::Value = serde_yaml::from_str(yaml).unwrap();
+        let jobs = extract_jobs_s3_info(&parsed);
+
+        let build = jobs.iter().find(|j| j.job_id == "build").unwrap();
+        assert_eq!(build.s3_uploads.len(), 1);
+        assert_eq!(build.s3_uploads[0].key, "app/out.zip");
     }
 
     // --- parse_job_completed_at tests ---

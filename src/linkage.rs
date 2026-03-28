@@ -17,6 +17,12 @@ pub struct CachedLink {
     pub s3_bucket: String,
     pub s3_key: String,
     pub source: CachedLinkSource,
+    /// Job IDs that directly upload to this pipeline's S3 source.
+    #[serde(default)]
+    pub job_ids: Vec<String>,
+    /// Job IDs that are upstream dependencies of `job_ids` (via `needs:` chain).
+    #[serde(default)]
+    pub dep_job_ids: Vec<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -46,6 +52,10 @@ pub struct PipelineLink {
     pub s3_bucket: String,
     pub s3_key: String,
     pub source: LinkSource,
+    /// Job IDs that directly upload to this pipeline's S3 source.
+    pub job_ids: Vec<String>,
+    /// Upstream dependency job IDs (via `needs:` chain).
+    pub dep_job_ids: Vec<String>,
 }
 
 pub struct LinkMap {
@@ -95,6 +105,8 @@ impl LinkMap {
             s3_bucket: bucket,
             s3_key: key,
             source: LinkSource::YamlDiscovered,
+            job_ids: Vec::new(),
+            dep_job_ids: Vec::new(),
         });
     }
 
@@ -146,6 +158,8 @@ impl LinkMap {
                 s3_bucket: String::new(),
                 s3_key: String::new(),
                 source: LinkSource::RuntimeCorrelated,
+                job_ids: Vec::new(),
+                dep_job_ids: Vec::new(),
             });
             return Some(wf_name);
         }
@@ -171,6 +185,8 @@ impl LinkMap {
                     CachedLinkSource::YamlDiscovered => LinkSource::YamlDiscovered,
                     CachedLinkSource::RuntimeCorrelated => LinkSource::RuntimeCorrelated,
                 },
+                job_ids: cl.job_ids,
+                dep_job_ids: cl.dep_job_ids,
             });
         }
     }
@@ -178,7 +194,7 @@ impl LinkMap {
     /// Serialize current links to a cache struct.
     pub fn to_cache(&self, discovered_at: &str) -> LinkCache {
         LinkCache {
-            schema_version: 1,
+            schema_version: 2,
             discovered_at: discovered_at.to_string(),
             links: self
                 .links
@@ -192,6 +208,8 @@ impl LinkMap {
                         LinkSource::YamlDiscovered => CachedLinkSource::YamlDiscovered,
                         LinkSource::RuntimeCorrelated => CachedLinkSource::RuntimeCorrelated,
                     },
+                    job_ids: l.job_ids.clone(),
+                    dep_job_ids: l.dep_job_ids.clone(),
                 })
                 .collect(),
         }
@@ -217,7 +235,7 @@ pub fn load_link_cache(path: &std::path::Path) -> anyhow::Result<Option<LinkCach
         Ok(contents) => {
             let cache: LinkCache =
                 toml::from_str(&contents).context("failed to parse .cibars-links.toml")?;
-            if cache.schema_version != 1 {
+            if cache.schema_version != 1 && cache.schema_version != 2 {
                 return Ok(None);
             }
             Ok(Some(cache))
@@ -502,6 +520,217 @@ fn set_pending_links(app: &mut App, link_map: &LinkMap) {
     }
 }
 
+/// Result of assigning workflow jobs to pipelines.
+#[derive(Debug, Clone)]
+pub struct JobAssignment {
+    /// Jobs assigned to exactly one pipeline, keyed by pipeline name.
+    /// Value is (workflow_name, ordered list of job display names).
+    pub pipeline_jobs: HashMap<String, (String, Vec<String>)>,
+    /// Jobs shared across multiple pipelines (or orphans).
+    /// (workflow_name, list of job display names).
+    pub shared_jobs: Vec<(String, Vec<String>)>,
+}
+
+/// Assign workflow jobs to pipelines using per-job S3 uploads and `needs:` chains.
+///
+/// Algorithm:
+/// 1. For each pipeline link, find jobs whose S3 uploads match the pipeline's S3 key
+/// 2. Walk the `needs:` graph backward to collect upstream dependencies
+/// 3. Jobs assigned to >1 pipeline → shared
+/// 4. Orphan jobs (not reachable from any pipeline) → shared
+/// 5. Jobs within each pipeline are topologically sorted (deps first, upload job last)
+pub fn assign_jobs_to_pipelines(
+    workflow_files: &[crate::poller::WorkflowFile],
+    link_map: &LinkMap,
+) -> JobAssignment {
+    use std::collections::{HashMap, HashSet};
+
+    // Build a map of (workflow_name) → Vec<JobS3Info> for quick lookup
+    let mut workflow_jobs_map: HashMap<&str, &[crate::poller::JobS3Info]> = HashMap::new();
+    for wf in workflow_files {
+        if !wf.jobs.is_empty() {
+            workflow_jobs_map.insert(&wf.name, &wf.jobs);
+        }
+    }
+
+    // For each pipeline, find which jobs belong to it
+    // Key: (workflow_name, job_id), Value: set of pipeline names
+    let mut job_to_pipelines: HashMap<(&str, &str), HashSet<&str>> = HashMap::new();
+    // Track which jobs belong to which pipeline (before shared detection)
+    let mut pipeline_job_ids: HashMap<&str, Vec<(&str, &str)>> = HashMap::new(); // pipeline -> [(wf_name, job_id)]
+
+    for link in link_map.links() {
+        let wf_name = link.workflow_name.as_str();
+        let jobs = match workflow_jobs_map.get(wf_name) {
+            Some(j) => *j,
+            None => continue,
+        };
+
+        // Step 1: Find jobs with matching S3 uploads
+        let mut matched_job_ids: HashSet<&str> = HashSet::new();
+        for job in jobs {
+            for upload in &job.s3_uploads {
+                if s3_keys_match(&link.s3_key, &upload.key) {
+                    matched_job_ids.insert(&job.job_id);
+                }
+            }
+        }
+
+        // Step 2: Walk needs: chain backward from matched jobs
+        let mut all_job_ids: HashSet<&str> = matched_job_ids.clone();
+        let mut frontier: Vec<&str> = matched_job_ids.iter().copied().collect();
+        while let Some(job_id) = frontier.pop() {
+            if let Some(job) = jobs.iter().find(|j| j.job_id == job_id) {
+                for dep in &job.needs {
+                    if all_job_ids.insert(dep.as_str()) {
+                        frontier.push(dep.as_str());
+                    }
+                }
+            }
+        }
+
+        let pipeline_name = link.pipeline_name.as_str();
+        for job_id in &all_job_ids {
+            job_to_pipelines
+                .entry((wf_name, job_id))
+                .or_default()
+                .insert(pipeline_name);
+        }
+        pipeline_job_ids
+            .entry(pipeline_name)
+            .or_default()
+            .extend(all_job_ids.iter().map(|jid| (wf_name, *jid)));
+    }
+
+    // Step 3: Split into shared vs pipeline-unique
+    let shared_job_keys: HashSet<(&str, &str)> = job_to_pipelines
+        .iter()
+        .filter(|(_, pipelines)| pipelines.len() > 1)
+        .map(|(key, _)| *key)
+        .collect();
+
+    // Step 4: Detect orphans (jobs in linked workflows but not assigned to any pipeline)
+    let mut all_assigned: HashSet<(&str, &str)> = HashSet::new();
+    for key in job_to_pipelines.keys() {
+        all_assigned.insert(*key);
+    }
+    let mut orphan_keys: Vec<(&str, &str)> = Vec::new();
+    for link in link_map.links() {
+        if let Some(jobs) = workflow_jobs_map.get(link.workflow_name.as_str()) {
+            for job in *jobs {
+                let key = (link.workflow_name.as_str(), job.job_id.as_str());
+                if !all_assigned.contains(&key) {
+                    orphan_keys.push(key);
+                }
+            }
+        }
+    }
+
+    // Build shared jobs list: shared + orphans, grouped by workflow
+    let mut shared_by_wf: HashMap<&str, Vec<&str>> = HashMap::new();
+    for (wf_name, job_id) in shared_job_keys.iter().chain(orphan_keys.iter()) {
+        shared_by_wf.entry(wf_name).or_default().push(job_id);
+    }
+
+    // Topological sort helper for job ordering within a group
+    fn topo_sort_jobs<'a>(
+        job_ids: &[&'a str],
+        jobs: &'a [crate::poller::JobS3Info],
+    ) -> Vec<&'a str> {
+        // Build adjacency: job_id → jobs it depends on (that are in our set)
+        let id_set: HashSet<&str> = job_ids.iter().copied().collect();
+        let mut in_degree: HashMap<&str, usize> = HashMap::new();
+        let mut dependents: HashMap<&str, Vec<&str>> = HashMap::new();
+
+        for jid in &id_set {
+            in_degree.entry(jid).or_insert(0);
+        }
+        for job in jobs {
+            if !id_set.contains(job.job_id.as_str()) {
+                continue;
+            }
+            for dep in &job.needs {
+                if id_set.contains(dep.as_str()) {
+                    *in_degree.entry(job.job_id.as_str()).or_insert(0) += 1;
+                    dependents
+                        .entry(dep.as_str())
+                        .or_default()
+                        .push(job.job_id.as_str());
+                }
+            }
+        }
+
+        let mut queue: Vec<&str> = in_degree
+            .iter()
+            .filter(|(_, &deg)| deg == 0)
+            .map(|(&id, _)| id)
+            .collect();
+        queue.sort(); // Stable alphabetical for determinism
+        let mut result = Vec::new();
+        while let Some(jid) = queue.pop() {
+            result.push(jid);
+            if let Some(deps) = dependents.get(jid) {
+                for &dep in deps {
+                    if let Some(deg) = in_degree.get_mut(dep) {
+                        *deg -= 1;
+                        if *deg == 0 {
+                            queue.push(dep);
+                            queue.sort();
+                        }
+                    }
+                }
+            }
+        }
+        result
+    }
+
+    // Build pipeline_jobs: only unique (non-shared) jobs, topo-sorted
+    let mut pipeline_jobs: HashMap<String, (String, Vec<String>)> = HashMap::new();
+    for link in link_map.links() {
+        let pipeline_name = &link.pipeline_name;
+        let wf_name = link.workflow_name.as_str();
+        if let Some(jobs) = workflow_jobs_map.get(wf_name) {
+            let unique_ids: Vec<&str> = pipeline_job_ids
+                .get(pipeline_name.as_str())
+                .map(|ids| {
+                    ids.iter()
+                        .filter(|(_, jid)| !shared_job_keys.contains(&(wf_name, *jid)))
+                        .map(|(_, jid)| *jid)
+                        .collect()
+                })
+                .unwrap_or_default();
+
+            let sorted = topo_sort_jobs(&unique_ids, jobs);
+            let names: Vec<String> = sorted
+                .iter()
+                .filter_map(|jid| jobs.iter().find(|j| j.job_id == *jid))
+                .map(|j| j.job_name.clone())
+                .collect();
+
+            pipeline_jobs.insert(pipeline_name.clone(), (link.workflow_name.clone(), names));
+        }
+    }
+
+    // Build shared_jobs, topo-sorted per workflow
+    let mut shared_jobs: Vec<(String, Vec<String>)> = Vec::new();
+    for (wf_name, job_ids) in &shared_by_wf {
+        if let Some(jobs) = workflow_jobs_map.get(*wf_name) {
+            let sorted = topo_sort_jobs(job_ids, jobs);
+            let names: Vec<String> = sorted
+                .iter()
+                .filter_map(|jid| jobs.iter().find(|j| j.job_id == *jid))
+                .map(|j| j.job_name.clone())
+                .collect();
+            shared_jobs.push((wf_name.to_string(), names));
+        }
+    }
+
+    JobAssignment {
+        pipeline_jobs,
+        shared_jobs,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -584,10 +813,32 @@ mod tests {
         save_link_cache(&path, &cache).unwrap();
 
         let loaded = load_link_cache(&path).unwrap().unwrap();
-        assert_eq!(loaded.schema_version, 1);
+        assert_eq!(loaded.schema_version, 2);
         assert_eq!(loaded.discovered_at, "2026-03-27T12:00:00Z");
         assert_eq!(loaded.links.len(), 1);
         assert_eq!(loaded.links[0].pipeline_name, "deploy");
+    }
+
+    #[test]
+    fn load_v1_cache_with_serde_default() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".cibars-links.toml");
+        let v1_content = r#"
+schema_version = 1
+discovered_at = "2026-03-27T12:00:00Z"
+
+[[links]]
+pipeline_name = "deploy"
+workflow_name = "CI"
+s3_bucket = "bucket"
+s3_key = "art.zip"
+source = "YamlDiscovered"
+"#;
+        std::fs::write(&path, v1_content).unwrap();
+        let loaded = load_link_cache(&path).unwrap().unwrap();
+        assert_eq!(loaded.schema_version, 1);
+        assert_eq!(loaded.links[0].job_ids, Vec::<String>::new());
+        assert_eq!(loaded.links[0].dep_job_ids, Vec::<String>::new());
     }
 
     #[test]
@@ -1176,7 +1427,7 @@ mod tests {
     fn to_cache_empty_link_map() {
         let map = LinkMap::new();
         let cache = map.to_cache("2026-03-27T00:00:00Z");
-        assert_eq!(cache.schema_version, 1);
+        assert_eq!(cache.schema_version, 2);
         assert_eq!(cache.discovered_at, "2026-03-27T00:00:00Z");
         assert!(cache.links.is_empty());
     }
@@ -1718,5 +1969,200 @@ jobs:
             a.check_linkage_health(&link_map);
             assert!(a.linkage_broken, "ghost pipeline should set linkage_broken");
         }
+    }
+
+    // --- assign_jobs_to_pipelines tests ---
+
+    use crate::poller::JobS3Info;
+
+    fn make_workflow_file(name: &str, jobs: Vec<JobS3Info>) -> WorkflowFile {
+        let s3_uploads: Vec<S3Upload> = jobs.iter().flat_map(|j| j.s3_uploads.clone()).collect();
+        WorkflowFile {
+            name: name.to_string(),
+            s3_uploads,
+            jobs,
+        }
+    }
+
+    fn make_job(id: &str, name: &str, needs: &[&str], s3: &[(&str, &str)]) -> JobS3Info {
+        JobS3Info {
+            job_id: id.to_string(),
+            job_name: name.to_string(),
+            needs: needs.iter().map(|s| s.to_string()).collect(),
+            s3_uploads: s3
+                .iter()
+                .map(|(b, k)| S3Upload {
+                    bucket: b.to_string(),
+                    key: k.to_string(),
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn assign_diamond_dependency_pattern() {
+        // Mirrors attracr CI: shared deps feed two build jobs
+        let wf = make_workflow_file(
+            "CI",
+            vec![
+                make_job("validate-cfn", "Validate CloudFormation", &[], &[]),
+                make_job("test-backend", "Backend Tests", &[], &[]),
+                make_job("test-frontend", "Frontend Tests", &[], &[]),
+                make_job(
+                    "build-backend",
+                    "Build Backend",
+                    &["validate-cfn", "test-backend", "test-frontend"],
+                    &[("bucket", "backend/source.zip")],
+                ),
+                make_job(
+                    "build-frontend",
+                    "Build Frontend",
+                    &["validate-cfn", "test-backend", "test-frontend"],
+                    &[("bucket", "frontend/artifacts.zip")],
+                ),
+            ],
+        );
+
+        let mut link_map = LinkMap::new();
+        link_map.add_discovered(
+            "attracr-backend".into(),
+            "CI".into(),
+            "bucket".into(),
+            "backend/source.zip".into(),
+        );
+        link_map.add_discovered(
+            "attracr-frontend".into(),
+            "CI".into(),
+            "bucket".into(),
+            "frontend/artifacts.zip".into(),
+        );
+
+        let assignment = assign_jobs_to_pipelines(&[wf], &link_map);
+
+        // Shared: validate-cfn, test-backend, test-frontend (needed by both)
+        assert_eq!(assignment.shared_jobs.len(), 1); // one workflow
+        let (wf_name, shared_names) = &assignment.shared_jobs[0];
+        assert_eq!(wf_name, "CI");
+        assert_eq!(shared_names.len(), 3);
+        assert!(shared_names.contains(&"Validate CloudFormation".to_string()));
+        assert!(shared_names.contains(&"Backend Tests".to_string()));
+        assert!(shared_names.contains(&"Frontend Tests".to_string()));
+
+        // Backend pipeline: only Build Backend
+        let (_, be_jobs) = &assignment.pipeline_jobs["attracr-backend"];
+        assert_eq!(be_jobs, &["Build Backend"]);
+
+        // Frontend pipeline: only Build Frontend
+        let (_, fe_jobs) = &assignment.pipeline_jobs["attracr-frontend"];
+        assert_eq!(fe_jobs, &["Build Frontend"]);
+    }
+
+    #[test]
+    fn assign_single_pipeline_no_shared() {
+        // One pipeline linked to one workflow — all jobs should be in pipeline, none shared
+        let wf = make_workflow_file(
+            "Deploy",
+            vec![
+                make_job("test", "Run Tests", &[], &[]),
+                make_job("build", "Build", &["test"], &[("bucket", "app/build.zip")]),
+            ],
+        );
+
+        let mut link_map = LinkMap::new();
+        link_map.add_discovered(
+            "my-pipeline".into(),
+            "Deploy".into(),
+            "bucket".into(),
+            "app/build.zip".into(),
+        );
+
+        let assignment = assign_jobs_to_pipelines(&[wf], &link_map);
+
+        // No shared (only one pipeline uses these jobs)
+        assert!(
+            assignment.shared_jobs.is_empty()
+                || assignment.shared_jobs.iter().all(|(_, j)| j.is_empty())
+        );
+
+        // Pipeline gets both jobs in topo order
+        let (_, jobs) = &assignment.pipeline_jobs["my-pipeline"];
+        assert_eq!(jobs, &["Run Tests", "Build"]);
+    }
+
+    #[test]
+    fn assign_orphan_jobs_go_to_shared() {
+        // Job with no S3 and not in any needs chain → orphan → shared
+        let wf = make_workflow_file(
+            "CI",
+            vec![
+                make_job("lint", "Lint", &[], &[]),
+                make_job("build", "Build", &[], &[("bucket", "app/build.zip")]),
+            ],
+        );
+
+        let mut link_map = LinkMap::new();
+        link_map.add_discovered(
+            "my-pipeline".into(),
+            "CI".into(),
+            "bucket".into(),
+            "app/build.zip".into(),
+        );
+
+        let assignment = assign_jobs_to_pipelines(&[wf], &link_map);
+
+        // "lint" is orphan (build doesn't need it, it has no S3 upload)
+        let shared_names: Vec<&str> = assignment
+            .shared_jobs
+            .iter()
+            .flat_map(|(_, names)| names.iter().map(|s| s.as_str()))
+            .collect();
+        assert!(shared_names.contains(&"Lint"));
+
+        // "build" goes to pipeline
+        let (_, jobs) = &assignment.pipeline_jobs["my-pipeline"];
+        assert_eq!(jobs, &["Build"]);
+    }
+
+    #[test]
+    fn assign_topo_sort_respects_dependency_order() {
+        // Chain: a → b → c (c depends on b, b depends on a)
+        let wf = make_workflow_file(
+            "CI",
+            vec![
+                make_job("c", "Step C", &["b"], &[("bucket", "out.zip")]),
+                make_job("a", "Step A", &[], &[]),
+                make_job("b", "Step B", &["a"], &[]),
+            ],
+        );
+
+        let mut link_map = LinkMap::new();
+        link_map.add_discovered(
+            "pipe".into(),
+            "CI".into(),
+            "bucket".into(),
+            "out.zip".into(),
+        );
+
+        let assignment = assign_jobs_to_pipelines(&[wf], &link_map);
+        let (_, jobs) = &assignment.pipeline_jobs["pipe"];
+
+        // Should be: A, B, C (dependency order)
+        assert_eq!(jobs, &["Step A", "Step B", "Step C"]);
+    }
+
+    #[test]
+    fn assign_no_workflow_files_returns_empty() {
+        let mut link_map = LinkMap::new();
+        link_map.add_discovered(
+            "pipe".into(),
+            "CI".into(),
+            "bucket".into(),
+            "key.zip".into(),
+        );
+
+        let assignment = assign_jobs_to_pipelines(&[], &link_map);
+        assert!(
+            assignment.pipeline_jobs.is_empty() || assignment.pipeline_jobs["pipe"].1.is_empty()
+        );
     }
 }
