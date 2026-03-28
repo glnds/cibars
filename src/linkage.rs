@@ -473,8 +473,55 @@ fn set_pending_links(app: &mut App, link_map: &LinkMap) {
 mod tests {
     use super::*;
     use crate::model::{Bar, PipelineGroup, WorkflowCategory, WorkflowGroup};
+    use crate::poller::{
+        ActionsClient, JobInfo, PipelineClient, PipelineDefinition, PipelineState, S3Source,
+        S3Upload, WorkflowFile, WorkflowRunSummary,
+    };
     use std::collections::HashMap;
     use std::time::Duration;
+
+    struct LinkMockPipeline {
+        names: Vec<String>,
+        definitions: Vec<PipelineDefinition>,
+    }
+
+    #[async_trait::async_trait]
+    impl PipelineClient for LinkMockPipeline {
+        async fn list_pipeline_names(&self) -> anyhow::Result<Vec<String>> {
+            Ok(self.names.clone())
+        }
+        async fn get_pipeline_state(&self, _name: &str) -> anyhow::Result<PipelineState> {
+            anyhow::bail!("not used in discovery tests")
+        }
+        async fn get_pipeline_definition(&self, name: &str) -> anyhow::Result<PipelineDefinition> {
+            Ok(self
+                .definitions
+                .iter()
+                .find(|d| d.name == name)
+                .cloned()
+                .unwrap_or(PipelineDefinition {
+                    name: name.into(),
+                    source_s3: None,
+                }))
+        }
+    }
+
+    struct LinkMockActions {
+        workflow_files: Vec<WorkflowFile>,
+    }
+
+    #[async_trait::async_trait]
+    impl ActionsClient for LinkMockActions {
+        async fn list_latest_runs(&self) -> anyhow::Result<Vec<WorkflowRunSummary>> {
+            Ok(vec![])
+        }
+        async fn fetch_run_jobs(&self, _: u64) -> anyhow::Result<Vec<JobInfo>> {
+            Ok(vec![])
+        }
+        async fn fetch_workflow_files(&self) -> anyhow::Result<Vec<WorkflowFile>> {
+            Ok(self.workflow_files.clone())
+        }
+    }
 
     // --- load/save link cache tests ---
 
@@ -1294,5 +1341,305 @@ mod tests {
             !a.pipeline_groups[0].pending_link,
             "pending_link should be false when GH workflow Succeeded"
         );
+    }
+
+    // --- e2e discovery tests ---
+
+    #[tokio::test]
+    async fn discover_links_matches_s3_keys() {
+        let aws = LinkMockPipeline {
+            names: vec!["deploy-pipe".into()],
+            definitions: vec![PipelineDefinition {
+                name: "deploy-pipe".into(),
+                source_s3: Some(S3Source {
+                    bucket: "my-bucket".into(),
+                    object_key: "artifacts/app.zip".into(),
+                }),
+            }],
+        };
+        let gh = LinkMockActions {
+            workflow_files: vec![WorkflowFile {
+                name: "CI".into(),
+                s3_uploads: vec![S3Upload {
+                    bucket: "my-bucket".into(),
+                    key: "artifacts/app.zip".into(),
+                }],
+            }],
+        };
+
+        let link_map = super::discover_links(&aws, &gh).await;
+        assert_eq!(link_map.links().len(), 1);
+        assert_eq!(link_map.workflow_for_pipeline("deploy-pipe"), Some("CI"));
+    }
+
+    #[tokio::test]
+    async fn discover_links_no_match_different_keys() {
+        let aws = LinkMockPipeline {
+            names: vec!["pipe".into()],
+            definitions: vec![PipelineDefinition {
+                name: "pipe".into(),
+                source_s3: Some(S3Source {
+                    bucket: "b".into(),
+                    object_key: "path/a.zip".into(),
+                }),
+            }],
+        };
+        let gh = LinkMockActions {
+            workflow_files: vec![WorkflowFile {
+                name: "CI".into(),
+                s3_uploads: vec![S3Upload {
+                    bucket: "b".into(),
+                    key: "path/b.zip".into(),
+                }],
+            }],
+        };
+
+        let link_map = super::discover_links(&aws, &gh).await;
+        assert!(link_map.links().is_empty());
+    }
+
+    #[tokio::test]
+    async fn discover_links_multiple_pipelines_multiple_workflows() {
+        let aws = LinkMockPipeline {
+            names: vec!["frontend-pipe".into(), "backend-pipe".into()],
+            definitions: vec![
+                PipelineDefinition {
+                    name: "frontend-pipe".into(),
+                    source_s3: Some(S3Source {
+                        bucket: "b".into(),
+                        object_key: "fe/build.zip".into(),
+                    }),
+                },
+                PipelineDefinition {
+                    name: "backend-pipe".into(),
+                    source_s3: Some(S3Source {
+                        bucket: "b".into(),
+                        object_key: "be/build.zip".into(),
+                    }),
+                },
+            ],
+        };
+        let gh = LinkMockActions {
+            workflow_files: vec![
+                WorkflowFile {
+                    name: "Frontend CI".into(),
+                    s3_uploads: vec![S3Upload {
+                        bucket: "b".into(),
+                        key: "fe/build.zip".into(),
+                    }],
+                },
+                WorkflowFile {
+                    name: "Backend CI".into(),
+                    s3_uploads: vec![S3Upload {
+                        bucket: "b".into(),
+                        key: "be/build.zip".into(),
+                    }],
+                },
+            ],
+        };
+
+        let link_map = super::discover_links(&aws, &gh).await;
+        assert_eq!(link_map.links().len(), 2);
+        assert_eq!(
+            link_map.workflow_for_pipeline("frontend-pipe"),
+            Some("Frontend CI")
+        );
+        assert_eq!(
+            link_map.workflow_for_pipeline("backend-pipe"),
+            Some("Backend CI")
+        );
+    }
+
+    #[tokio::test]
+    async fn run_discovery_saves_cache_file() {
+        let aws = LinkMockPipeline {
+            names: vec!["deploy".into()],
+            definitions: vec![PipelineDefinition {
+                name: "deploy".into(),
+                source_s3: Some(S3Source {
+                    bucket: "b".into(),
+                    object_key: "art.zip".into(),
+                }),
+            }],
+        };
+        let gh = LinkMockActions {
+            workflow_files: vec![WorkflowFile {
+                name: "CI".into(),
+                s3_uploads: vec![S3Upload {
+                    bucket: "b".into(),
+                    key: "art.zip".into(),
+                }],
+            }],
+        };
+
+        let app = Arc::new(Mutex::new(App::new()));
+        let dir = tempfile::tempdir().unwrap();
+        let cache_path = dir.path().join(".cibars-links.toml");
+
+        let link_map = super::run_discovery(&aws, &gh, &app, &cache_path).await;
+        assert_eq!(link_map.links().len(), 1);
+
+        // Cache file should exist
+        assert!(cache_path.exists());
+
+        // Verify cache content
+        let loaded = super::load_link_cache(&cache_path).unwrap().unwrap();
+        assert_eq!(loaded.links.len(), 1);
+        assert_eq!(loaded.links[0].pipeline_name, "deploy");
+        assert_eq!(loaded.links[0].workflow_name, "CI");
+
+        // linkage_discovering should be false after completion
+        let a = app.lock().unwrap();
+        assert!(!a.linkage_discovering);
+    }
+
+    #[tokio::test]
+    async fn run_discovery_skips_cache_when_no_links() {
+        let aws = LinkMockPipeline {
+            names: vec!["pipe".into()],
+            definitions: vec![PipelineDefinition {
+                name: "pipe".into(),
+                source_s3: None,
+            }],
+        };
+        let gh = LinkMockActions {
+            workflow_files: vec![],
+        };
+
+        let app = Arc::new(Mutex::new(App::new()));
+        let dir = tempfile::tempdir().unwrap();
+        let cache_path = dir.path().join(".cibars-links.toml");
+
+        let link_map = super::run_discovery(&aws, &gh, &app, &cache_path).await;
+        assert!(link_map.links().is_empty());
+        assert!(
+            !cache_path.exists(),
+            "cache file should not be written when no links"
+        );
+    }
+
+    #[test]
+    fn sync_linked_pipelines_sets_field() {
+        let mut app = App::new();
+        app.workflow_groups.push(WorkflowGroup {
+            name: "CI".into(),
+            jobs: vec![],
+            gone: false,
+            summary_status: BuildStatus::Idle,
+            run_id: None,
+            category: WorkflowCategory::default(),
+            linked_pipeline: None,
+        });
+        app.workflow_groups.push(WorkflowGroup {
+            name: "Lint".into(),
+            jobs: vec![],
+            gone: false,
+            summary_status: BuildStatus::Idle,
+            run_id: None,
+            category: WorkflowCategory::default(),
+            linked_pipeline: None,
+        });
+        let app = Arc::new(Mutex::new(app));
+
+        let mut link_map = LinkMap::new();
+        link_map.add_discovered("deploy".into(), "CI".into(), "b".into(), "k".into());
+
+        super::sync_linked_pipelines(&app, &link_map);
+
+        let a = app.lock().unwrap();
+        assert_eq!(a.workflow_groups[0].linked_pipeline, Some("deploy".into()));
+        assert_eq!(
+            a.workflow_groups[1].linked_pipeline, None,
+            "unlinked workflow should remain None"
+        );
+    }
+
+    #[tokio::test]
+    async fn full_flow_discovery_apply_health() {
+        // Setup mocks with matching S3 keys
+        let aws = LinkMockPipeline {
+            names: vec!["deploy-pipe".into()],
+            definitions: vec![PipelineDefinition {
+                name: "deploy-pipe".into(),
+                source_s3: Some(S3Source {
+                    bucket: "b".into(),
+                    object_key: "art.zip".into(),
+                }),
+            }],
+        };
+        let gh = LinkMockActions {
+            workflow_files: vec![WorkflowFile {
+                name: "CI".into(),
+                s3_uploads: vec![S3Upload {
+                    bucket: "b".into(),
+                    key: "art.zip".into(),
+                }],
+            }],
+        };
+
+        // Discover links
+        let mut link_map = super::discover_links(&aws, &gh).await;
+        assert_eq!(link_map.workflow_for_pipeline("deploy-pipe"), Some("CI"));
+
+        // Setup App with Running states
+        let mut app_state = App::new();
+        let mut job = Bar::new("build".into());
+        job.set_status(BuildStatus::Running);
+        app_state.workflow_groups.push(WorkflowGroup {
+            name: "CI".into(),
+            jobs: vec![job],
+            gone: false,
+            summary_status: BuildStatus::Running,
+            run_id: Some(100),
+            category: WorkflowCategory::default(),
+            linked_pipeline: None,
+        });
+        app_state.pipeline_groups.push(PipelineGroup {
+            name: "deploy-pipe".into(),
+            stages: vec![],
+            gone: false,
+            summary_status: BuildStatus::Running,
+            pending_link: false,
+        });
+        app_state.loading_pipelines = false;
+        app_state.loading_actions = false;
+        let app = Arc::new(Mutex::new(app_state));
+
+        // Sync linked_pipeline field
+        super::sync_linked_pipelines(&app, &link_map);
+        {
+            let a = app.lock().unwrap();
+            assert_eq!(
+                a.workflow_groups[0].linked_pipeline,
+                Some("deploy-pipe".into())
+            );
+        }
+
+        // Apply links: should suppress GH workflow
+        let mut stopped_runs = HashMap::new();
+        apply_links(&app, &mut link_map, &mut stopped_runs);
+        {
+            let a = app.lock().unwrap();
+            assert_eq!(
+                a.workflow_groups[0].summary_status,
+                BuildStatus::Succeeded,
+                "linked GH workflow should be suppressed"
+            );
+        }
+
+        // Health check: all present → not broken
+        {
+            let mut a = app.lock().unwrap();
+            a.check_linkage_health(&link_map);
+            assert!(!a.linkage_broken);
+        }
+
+        // Simulate pipeline deletion → ghost pipeline → broken
+        {
+            let mut a = app.lock().unwrap();
+            a.pipeline_groups.clear();
+            a.check_linkage_health(&link_map);
+            assert!(a.linkage_broken, "ghost pipeline should set linkage_broken");
+        }
     }
 }
