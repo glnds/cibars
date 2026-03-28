@@ -293,7 +293,10 @@ pub async fn discover_links(aws: &dyn PipelineClient, gh: &dyn ActionsClient) ->
         pipelines = pipeline_names.len(),
         with_s3_source = s3_pipeline_count,
         workflow_files = workflow_files.len(),
-        total_s3_uploads = workflow_files.iter().map(|wf| wf.s3_uploads.len()).sum::<usize>(),
+        total_s3_uploads = workflow_files
+            .iter()
+            .map(|wf| wf.s3_uploads.len())
+            .sum::<usize>(),
         "link discovery inputs"
     );
     for def in &definitions {
@@ -536,8 +539,11 @@ mod tests {
         }
     }
 
+    /// Mock that takes raw YAML strings and runs them through the real
+    /// `parse_workflow_yaml` pipeline — exercises extract_s3_paths and all parsing.
     struct LinkMockActions {
-        workflow_files: Vec<WorkflowFile>,
+        /// (filename, raw YAML content) pairs — parsed via `parse_workflow_yaml`
+        workflow_yamls: Vec<(&'static str, &'static str)>,
     }
 
     #[async_trait::async_trait]
@@ -549,7 +555,13 @@ mod tests {
             Ok(vec![])
         }
         async fn fetch_workflow_files(&self) -> anyhow::Result<Vec<WorkflowFile>> {
-            Ok(self.workflow_files.clone())
+            use crate::poller::github::parse_workflow_yaml;
+            Ok(self
+                .workflow_yamls
+                .iter()
+                .filter_map(|(filename, content)| parse_workflow_yaml(filename, content))
+                .filter(|wf| !wf.s3_uploads.is_empty())
+                .collect())
         }
     }
 
@@ -1373,7 +1385,7 @@ mod tests {
         );
     }
 
-    // --- e2e discovery tests ---
+    // --- e2e discovery tests (raw YAML → parse → discover → cache → apply) ---
 
     #[tokio::test]
     async fn discover_links_matches_s3_keys() {
@@ -1388,13 +1400,10 @@ mod tests {
             }],
         };
         let gh = LinkMockActions {
-            workflow_files: vec![WorkflowFile {
-                name: "CI".into(),
-                s3_uploads: vec![S3Upload {
-                    bucket: "my-bucket".into(),
-                    key: "artifacts/app.zip".into(),
-                }],
-            }],
+            workflow_yamls: vec![(
+                "ci.yml",
+                "name: CI\non: push\njobs:\n  build:\n    runs-on: ubuntu-latest\n    steps:\n      - run: aws s3 cp app.zip s3://my-bucket/artifacts/app.zip\n",
+            )],
         };
 
         let link_map = super::discover_links(&aws, &gh).await;
@@ -1415,13 +1424,10 @@ mod tests {
             }],
         };
         let gh = LinkMockActions {
-            workflow_files: vec![WorkflowFile {
-                name: "CI".into(),
-                s3_uploads: vec![S3Upload {
-                    bucket: "b".into(),
-                    key: "path/b.zip".into(),
-                }],
-            }],
+            workflow_yamls: vec![(
+                "ci.yml",
+                "name: CI\non: push\njobs:\n  build:\n    runs-on: ubuntu-latest\n    steps:\n      - run: aws s3 cp x.zip s3://b/path/b.zip\n",
+            )],
         };
 
         let link_map = super::discover_links(&aws, &gh).await;
@@ -1450,21 +1456,15 @@ mod tests {
             ],
         };
         let gh = LinkMockActions {
-            workflow_files: vec![
-                WorkflowFile {
-                    name: "Frontend CI".into(),
-                    s3_uploads: vec![S3Upload {
-                        bucket: "b".into(),
-                        key: "fe/build.zip".into(),
-                    }],
-                },
-                WorkflowFile {
-                    name: "Backend CI".into(),
-                    s3_uploads: vec![S3Upload {
-                        bucket: "b".into(),
-                        key: "be/build.zip".into(),
-                    }],
-                },
+            workflow_yamls: vec![
+                (
+                    "frontend.yml",
+                    "name: Frontend CI\non: push\njobs:\n  build:\n    runs-on: ubuntu-latest\n    steps:\n      - run: aws s3 cp fe.zip s3://b/fe/build.zip\n",
+                ),
+                (
+                    "backend.yml",
+                    "name: Backend CI\non: push\njobs:\n  build:\n    runs-on: ubuntu-latest\n    steps:\n      - run: aws s3 cp be.zip s3://b/be/build.zip\n",
+                ),
             ],
         };
 
@@ -1481,6 +1481,59 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn discover_links_with_github_actions_expressions() {
+        // Real-world scenario: bucket name contains ${{ vars.AWS_ACCOUNT_ID }}
+        let aws = LinkMockPipeline {
+            names: vec!["backend-pipe".into(), "frontend-pipe".into()],
+            definitions: vec![
+                PipelineDefinition {
+                    name: "backend-pipe".into(),
+                    source_s3: Some(S3Source {
+                        bucket: "attracr-ci-artifacts-123456".into(),
+                        object_key: "backend/backend-source.zip".into(),
+                    }),
+                },
+                PipelineDefinition {
+                    name: "frontend-pipe".into(),
+                    source_s3: Some(S3Source {
+                        bucket: "attracr-ci-artifacts-123456".into(),
+                        object_key: "frontend/frontend-artifacts.zip".into(),
+                    }),
+                },
+            ],
+        };
+        let gh = LinkMockActions {
+            workflow_yamls: vec![(
+                "ci.yml",
+                r#"name: CI
+on: push
+jobs:
+  build-backend:
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          zip -r backend-source.zip infrastructure/ backend/
+          aws s3 cp backend-source.zip s3://attracr-ci-artifacts-${{ vars.AWS_ACCOUNT_ID }}/backend/backend-source.zip
+  build-frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          aws s3 cp frontend-artifacts.zip s3://attracr-ci-artifacts-${{ vars.AWS_ACCOUNT_ID }}/frontend/frontend-artifacts.zip
+"#,
+            )],
+        };
+
+        let link_map = super::discover_links(&aws, &gh).await;
+        assert_eq!(
+            link_map.links().len(),
+            2,
+            "should match despite ${{{{ }}}} in bucket name"
+        );
+        assert_eq!(link_map.workflow_for_pipeline("backend-pipe"), Some("CI"));
+        assert_eq!(link_map.workflow_for_pipeline("frontend-pipe"), Some("CI"));
+    }
+
+    #[tokio::test]
     async fn run_discovery_saves_cache_file() {
         let aws = LinkMockPipeline {
             names: vec!["deploy".into()],
@@ -1493,13 +1546,10 @@ mod tests {
             }],
         };
         let gh = LinkMockActions {
-            workflow_files: vec![WorkflowFile {
-                name: "CI".into(),
-                s3_uploads: vec![S3Upload {
-                    bucket: "b".into(),
-                    key: "art.zip".into(),
-                }],
-            }],
+            workflow_yamls: vec![(
+                "deploy.yml",
+                "name: CI\non: push\njobs:\n  d:\n    runs-on: ubuntu-latest\n    steps:\n      - run: aws s3 cp x s3://b/art.zip\n",
+            )],
         };
 
         let app = Arc::new(Mutex::new(App::new()));
@@ -1533,7 +1583,7 @@ mod tests {
             }],
         };
         let gh = LinkMockActions {
-            workflow_files: vec![],
+            workflow_yamls: vec![],
         };
 
         let app = Arc::new(Mutex::new(App::new()));
@@ -1586,7 +1636,7 @@ mod tests {
 
     #[tokio::test]
     async fn full_flow_discovery_apply_health() {
-        // Setup mocks with matching S3 keys
+        // Raw YAML with S3 upload
         let aws = LinkMockPipeline {
             names: vec!["deploy-pipe".into()],
             definitions: vec![PipelineDefinition {
@@ -1598,16 +1648,13 @@ mod tests {
             }],
         };
         let gh = LinkMockActions {
-            workflow_files: vec![WorkflowFile {
-                name: "CI".into(),
-                s3_uploads: vec![S3Upload {
-                    bucket: "b".into(),
-                    key: "art.zip".into(),
-                }],
-            }],
+            workflow_yamls: vec![(
+                "ci.yml",
+                "name: CI\non: push\njobs:\n  b:\n    runs-on: ubuntu-latest\n    steps:\n      - run: aws s3 cp x s3://b/art.zip\n",
+            )],
         };
 
-        // Discover links
+        // Discover links (exercises YAML parsing → S3 extraction → key matching)
         let mut link_map = super::discover_links(&aws, &gh).await;
         assert_eq!(link_map.workflow_for_pipeline("deploy-pipe"), Some("CI"));
 

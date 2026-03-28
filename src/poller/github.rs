@@ -507,8 +507,7 @@ mod tests {
 
     #[test]
     fn extract_s3_with_multiple_github_actions_expressions() {
-        let yaml =
-            "run: aws s3 cp app.zip s3://${{ vars.BUCKET }}-${{ vars.ENV }}/deploy/app.zip";
+        let yaml = "run: aws s3 cp app.zip s3://${{ vars.BUCKET }}-${{ vars.ENV }}/deploy/app.zip";
         let uploads = extract_s3_paths(yaml);
         assert_eq!(uploads.len(), 1);
         assert_eq!(uploads[0].key, "deploy/app.zip");
