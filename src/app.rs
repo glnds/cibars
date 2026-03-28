@@ -3,6 +3,7 @@ use std::time::Instant;
 use chrono::{DateTime, Utc};
 
 use crate::config::HookStatus;
+use crate::linkage::JobAssignment;
 use crate::model::{BuildStatus, PipelineGroup, WorkflowGroup};
 use crate::poll_scheduler::PollState;
 
@@ -44,6 +45,8 @@ pub struct App {
     pub linkage_broken: bool,
     /// True while discover_links() is running.
     pub linkage_discovering: bool,
+    /// Per-job assignment for pipeline-centric UI (set after link discovery).
+    pub job_assignment: Option<JobAssignment>,
 }
 
 impl App {
@@ -69,6 +72,7 @@ impl App {
             boost_pressed_at: None,
             linkage_broken: false,
             linkage_discovering: false,
+            job_assignment: None,
         }
     }
 
@@ -102,6 +106,11 @@ impl App {
                 .any(|wg| wg.name == l.workflow_name)
         });
         self.linkage_broken = ghost_pipeline || ghost_workflow;
+    }
+
+    /// True when pipeline-centric UI should be used (linkage with job assignments).
+    pub fn has_pipeline_centric_layout(&self) -> bool {
+        self.job_assignment.is_some()
     }
 
     pub fn has_any_running(&self) -> bool {
@@ -376,5 +385,21 @@ mod tests {
         let app = App::new();
         assert!(!app.linkage_broken);
         assert!(!app.linkage_discovering);
+    }
+
+    #[test]
+    fn has_pipeline_centric_layout_default_false() {
+        let app = App::new();
+        assert!(!app.has_pipeline_centric_layout());
+    }
+
+    #[test]
+    fn has_pipeline_centric_layout_with_assignment() {
+        let mut app = App::new();
+        app.job_assignment = Some(crate::linkage::JobAssignment {
+            pipeline_jobs: std::collections::HashMap::new(),
+            shared_jobs: Vec::new(),
+        });
+        assert!(app.has_pipeline_centric_layout());
     }
 }

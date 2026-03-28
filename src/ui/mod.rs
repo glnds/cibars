@@ -19,6 +19,7 @@ use ratatui::DefaultTerminal;
 
 use crate::app::App;
 use crate::config::HookStatus;
+use crate::linkage::JobAssignment;
 use crate::model::{BuildStatus, PipelineGroup, WorkflowCategory, WorkflowGroup};
 use crate::poll_scheduler::PollState;
 
@@ -226,6 +227,284 @@ fn render_collapsed_pipelines(
     Line::from(spans).render(area, buf);
 }
 
+/// A section in the pipeline-centric layout.
+struct PipelineCentricSection {
+    title: String,
+    border_color: ratatui::style::Color,
+    /// Row descriptors: (bar_ref_index_or_special, indent)
+    rows: Vec<PipelineCentricRow>,
+}
+
+enum PipelineCentricRow {
+    /// A workflow job bar by name (looked up from workflow_groups)
+    JobBar { job_name: String, dim: bool },
+    /// Pipeline header line "  └─ ● pipeline-name"
+    PipelineHeader { name: String },
+    /// Pipeline stage bar
+    StageBar {
+        pipeline_name: String,
+        stage_idx: usize,
+    },
+}
+
+/// Build pipeline-centric sections from job assignment + app state.
+fn build_pipeline_centric_sections(
+    assignment: &JobAssignment,
+    app: &App,
+) -> Vec<PipelineCentricSection> {
+    let mut sections = Vec::new();
+
+    // 1. Shared section (if any shared jobs)
+    for (wf_name, shared_names) in &assignment.shared_jobs {
+        if shared_names.is_empty() {
+            continue;
+        }
+        let mut rows = Vec::new();
+        for job_name in shared_names {
+            rows.push(PipelineCentricRow::JobBar {
+                job_name: job_name.clone(),
+                dim: false,
+            });
+        }
+        sections.push(PipelineCentricSection {
+            title: format!(" {wf_name} "),
+            border_color: theme::BORDER_ACTIONS,
+            rows,
+        });
+    }
+
+    // 2. Pipeline blocks (sorted: running first, then alphabetical)
+    let mut pipeline_names: Vec<&String> = assignment.pipeline_jobs.keys().collect();
+    pipeline_names.sort_by(|a, b| {
+        let a_running = app
+            .pipeline_groups
+            .iter()
+            .find(|g| g.name == **a)
+            .map(|g| g.summary_status == BuildStatus::Running)
+            .unwrap_or(false);
+        let b_running = app
+            .pipeline_groups
+            .iter()
+            .find(|g| g.name == **b)
+            .map(|g| g.summary_status == BuildStatus::Running)
+            .unwrap_or(false);
+        b_running.cmp(&a_running).then(a.cmp(b))
+    });
+
+    for pipeline_name in pipeline_names {
+        let (_, job_names) = &assignment.pipeline_jobs[pipeline_name];
+        let mut rows = Vec::new();
+
+        // Job bars
+        for job_name in job_names {
+            rows.push(PipelineCentricRow::JobBar {
+                job_name: job_name.clone(),
+                dim: false,
+            });
+        }
+
+        // Pipeline header + stages
+        if let Some(pg) = app
+            .pipeline_groups
+            .iter()
+            .find(|g| g.name == *pipeline_name)
+        {
+            rows.push(PipelineCentricRow::PipelineHeader {
+                name: pipeline_name.clone(),
+            });
+            for (idx, stage) in pg.stages.iter().enumerate() {
+                if !stage.gone {
+                    rows.push(PipelineCentricRow::StageBar {
+                        pipeline_name: pipeline_name.clone(),
+                        stage_idx: idx,
+                    });
+                }
+            }
+        }
+
+        sections.push(PipelineCentricSection {
+            title: format!(" {pipeline_name} "),
+            border_color: theme::BORDER_PIPELINES,
+            rows,
+        });
+    }
+
+    // 3. Reviews section
+    let review_groups: Vec<&WorkflowGroup> = app
+        .workflow_groups
+        .iter()
+        .filter(|g| g.category == WorkflowCategory::Review)
+        .collect();
+    let has_review_jobs = review_groups.iter().any(|g| g.jobs.iter().any(|j| !j.gone));
+    if has_review_jobs {
+        let mut rows = Vec::new();
+        for group in &review_groups {
+            for job in group.jobs.iter().filter(|j| !j.gone) {
+                rows.push(PipelineCentricRow::JobBar {
+                    job_name: job.name.clone(),
+                    dim: true,
+                });
+            }
+        }
+        sections.push(PipelineCentricSection {
+            title: " reviews ".to_string(),
+            border_color: theme::BORDER_ACTIONS,
+            rows,
+        });
+    }
+
+    sections
+}
+
+/// Render pipeline-centric layout into the frame.
+#[allow(clippy::too_many_arguments)]
+fn render_pipeline_centric(
+    frame: &mut ratatui::Frame,
+    app: &App,
+    sections: &[PipelineCentricSection],
+    profile: &str,
+    region: &str,
+    repo: &str,
+    dim: bool,
+) {
+    let size = frame.area();
+
+    // Compute section heights
+    let mut constraints: Vec<Constraint> = vec![Constraint::Length(3)]; // header
+    for section in sections {
+        let height = (2 + section.rows.len()) as u16; // borders + content
+        constraints.push(Constraint::Length(height));
+    }
+    constraints.push(Constraint::Fill(1)); // fill
+    constraints.push(Constraint::Length(3)); // statusbar
+
+    let areas = Layout::vertical(constraints).split(size);
+
+    // Header
+    frame.render_widget(
+        Header {
+            profile,
+            region,
+            repo,
+            aws_health: &app.aws_health,
+        },
+        areas[0],
+    );
+
+    // Compute name widths
+    let job_name_width = all_jobs_name_width(&app.workflow_groups);
+    let stage_name_width = all_pipeline_stages_name_width(&app.pipeline_groups);
+
+    // Render each pipeline-centric section
+    for (si, section) in sections.iter().enumerate() {
+        let area = areas[1 + si];
+        let block = Block::bordered()
+            .border_type(BorderType::Rounded)
+            .border_style(Style::default().fg(section.border_color))
+            .title(Span::styled(
+                &section.title,
+                Style::default().fg(section.border_color),
+            ));
+        let inner = block.inner(area);
+        block.render(area, frame.buffer_mut());
+
+        let row_constraints: Vec<Constraint> = (0..section.rows.len())
+            .map(|_| Constraint::Length(1))
+            .collect();
+        let row_areas = Layout::vertical(row_constraints).split(inner);
+
+        for (ri, row) in section.rows.iter().enumerate() {
+            if ri >= row_areas.len() {
+                break;
+            }
+            match row {
+                PipelineCentricRow::JobBar {
+                    job_name,
+                    dim: force_dim,
+                } => {
+                    // Find the bar in workflow_groups
+                    if let Some(bar) = app
+                        .workflow_groups
+                        .iter()
+                        .flat_map(|g| g.jobs.iter())
+                        .find(|b| b.name == *job_name)
+                    {
+                        let bar_dim = dim || *force_dim;
+                        let dot_color = if *force_dim {
+                            theme::FG_DIM
+                        } else {
+                            bar.status.color()
+                        };
+                        frame.render_widget(
+                            BarWidget::new(bar, job_name_width, bar_dim).with_dot(dot_color),
+                            row_areas[ri],
+                        );
+                    }
+                }
+                PipelineCentricRow::PipelineHeader { name } => {
+                    if let Some(pg) = app.pipeline_groups.iter().find(|g| g.name == *name) {
+                        let dot_color = if pg.pending_link || pg.gone {
+                            theme::FG_DIM
+                        } else {
+                            pg.summary_status.color()
+                        };
+                        let header_line = Line::from(vec![
+                            Span::styled("  \u{2514}\u{2500} ", Style::default().fg(theme::FG_DIM)),
+                            Span::styled("\u{25CF} ", Style::default().fg(dot_color)),
+                            Span::styled(name.as_str(), Style::default().fg(dot_color)),
+                        ]);
+                        frame.render_widget(header_line, row_areas[ri]);
+                    }
+                }
+                PipelineCentricRow::StageBar {
+                    pipeline_name,
+                    stage_idx,
+                } => {
+                    if let Some(pg) = app
+                        .pipeline_groups
+                        .iter()
+                        .find(|g| g.name == *pipeline_name)
+                    {
+                        if let Some(stage) = pg.stages.get(*stage_idx) {
+                            let bar_dim = dim || pg.gone || pg.pending_link;
+                            let stage_area = Rect::new(
+                                row_areas[ri].x + 4,
+                                row_areas[ri].y,
+                                row_areas[ri].width.saturating_sub(4),
+                                1,
+                            );
+                            frame.render_widget(
+                                BarWidget::new(stage, stage_name_width, bar_dim),
+                                stage_area,
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Statusbar is the last area
+    let status_area = areas[areas.len() - 1];
+    let elapsed = app
+        .last_poll_started
+        .map(|t| t.elapsed())
+        .unwrap_or_default();
+    frame.render_widget(
+        StatusBar {
+            poll_state: &app.poll_state,
+            elapsed_since_poll: elapsed,
+            cooldown_remaining: app.cooldown_remaining,
+            warnings: &app.warnings,
+            hook_status: &app.hook_status,
+            boost_pressed_at: app.boost_pressed_at,
+            linkage_broken: app.linkage_broken,
+            linkage_discovering: app.linkage_discovering,
+        },
+        status_area,
+    );
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn run_ui(
     app: Arc<Mutex<App>>,
@@ -254,6 +533,14 @@ pub fn run_ui(
 
             let app = app.lock().expect("app mutex poisoned");
             let dim = app.poll_state != PollState::Active;
+
+            // Pipeline-centric rendering path
+            if let Some(ref assignment) = app.job_assignment {
+                let sections = build_pipeline_centric_sections(assignment, &app);
+                render_pipeline_centric(frame, &app, &sections, profile, region, repo, dim);
+                drop(app);
+                return;
+            }
 
             let sorted_wf_groups: Vec<&WorkflowGroup> =
                 sorted_workflow_groups(&app.workflow_groups);

@@ -269,14 +269,18 @@ pub fn s3_keys_match(cp_key: &str, gh_key: &str) -> bool {
 }
 
 /// Discover GH workflow <-> CP pipeline links by matching S3 source configs.
-pub async fn discover_links(aws: &dyn PipelineClient, gh: &dyn ActionsClient) -> LinkMap {
+/// Returns the link map and the workflow files used for discovery.
+pub async fn discover_links(
+    aws: &dyn PipelineClient,
+    gh: &dyn ActionsClient,
+) -> (LinkMap, Vec<crate::poller::WorkflowFile>) {
     let mut link_map = LinkMap::new();
 
     let pipeline_names = match aws.list_pipeline_names().await {
         Ok(names) => names,
         Err(e) => {
             tracing::warn!(error = %e, "failed to list pipelines for link discovery");
-            return link_map;
+            return (link_map, Vec::new());
         }
     };
 
@@ -301,7 +305,7 @@ pub async fn discover_links(aws: &dyn PipelineClient, gh: &dyn ActionsClient) ->
         Ok(wf) => wf,
         Err(e) => {
             tracing::warn!(error = %e, "failed to fetch workflow files for link discovery");
-            return link_map;
+            return (link_map, Vec::new());
         }
     };
 
@@ -357,7 +361,7 @@ pub async fn discover_links(aws: &dyn PipelineClient, gh: &dyn ActionsClient) ->
     }
 
     tracing::info!(links = link_map.links().len(), "link discovery complete");
-    link_map
+    (link_map, workflow_files)
 }
 
 /// Update each WorkflowGroup's linked_pipeline from the LinkMap.
@@ -380,12 +384,31 @@ pub async fn run_discovery(
     cache_path: &std::path::Path,
 ) -> LinkMap {
     app.lock().expect("app mutex poisoned").linkage_discovering = true;
-    let link_map = discover_links(aws, gh).await;
+    let (link_map, workflow_files) = discover_links(aws, gh).await;
 
     if !link_map.links().is_empty() {
         let cache = link_map.to_cache(&Utc::now().to_rfc3339());
         if let Err(e) = save_link_cache(cache_path, &cache) {
             tracing::warn!(error = %e, "failed to save link cache");
+        }
+
+        // Compute per-job pipeline assignments for pipeline-centric UI
+        let assignment = assign_jobs_to_pipelines(&workflow_files, &link_map);
+        let has_jobs = assignment
+            .pipeline_jobs
+            .values()
+            .any(|(_, jobs)| !jobs.is_empty())
+            || assignment
+                .shared_jobs
+                .iter()
+                .any(|(_, jobs)| !jobs.is_empty());
+        if has_jobs {
+            tracing::info!(
+                pipelines = assignment.pipeline_jobs.len(),
+                shared_workflows = assignment.shared_jobs.len(),
+                "computed job assignments for pipeline-centric UI"
+            );
+            app.lock().expect("app mutex poisoned").job_assignment = Some(assignment);
         }
     }
 
@@ -1657,7 +1680,7 @@ source = "YamlDiscovered"
             )],
         };
 
-        let link_map = super::discover_links(&aws, &gh).await;
+        let (link_map, _wf) = super::discover_links(&aws, &gh).await;
         assert_eq!(link_map.links().len(), 1);
         assert_eq!(link_map.workflow_for_pipeline("deploy-pipe"), Some("CI"));
     }
@@ -1681,7 +1704,7 @@ source = "YamlDiscovered"
             )],
         };
 
-        let link_map = super::discover_links(&aws, &gh).await;
+        let (link_map, _wf) = super::discover_links(&aws, &gh).await;
         assert!(link_map.links().is_empty());
     }
 
@@ -1719,7 +1742,7 @@ source = "YamlDiscovered"
             ],
         };
 
-        let link_map = super::discover_links(&aws, &gh).await;
+        let (link_map, _wf) = super::discover_links(&aws, &gh).await;
         assert_eq!(link_map.links().len(), 2);
         assert_eq!(
             link_map.workflow_for_pipeline("frontend-pipe"),
@@ -1774,7 +1797,7 @@ jobs:
             )],
         };
 
-        let link_map = super::discover_links(&aws, &gh).await;
+        let (link_map, _wf) = super::discover_links(&aws, &gh).await;
         assert_eq!(
             link_map.links().len(),
             2,
@@ -1906,7 +1929,7 @@ jobs:
         };
 
         // Discover links (exercises YAML parsing → S3 extraction → key matching)
-        let mut link_map = super::discover_links(&aws, &gh).await;
+        let (mut link_map, _wf) = super::discover_links(&aws, &gh).await;
         assert_eq!(link_map.workflow_for_pipeline("deploy-pipe"), Some("CI"));
 
         // Setup App with Running states
