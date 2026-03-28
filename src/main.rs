@@ -108,8 +108,12 @@ async fn run_poll_orchestrator(
             // Cache-first: try loading from disk
             match linkage::load_link_cache(&cache_path) {
                 Ok(Some(cache)) => {
+                    let cached_assignment = cache.job_assignment.clone();
                     link_map.load_from_cache(cache);
                     linkage::sync_linked_pipelines(&app, &link_map);
+                    if let Some(assignment) = cached_assignment {
+                        app.lock().expect("app mutex poisoned").job_assignment = Some(assignment);
+                    }
                     tracing::info!(
                         links = link_map.links().len(),
                         "loaded link cache from disk"

@@ -36,6 +36,8 @@ pub struct LinkCache {
     pub schema_version: u32,
     pub discovered_at: String,
     pub links: Vec<CachedLink>,
+    #[serde(default)]
+    pub job_assignment: Option<JobAssignment>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -192,7 +194,11 @@ impl LinkMap {
     }
 
     /// Serialize current links to a cache struct.
-    pub fn to_cache(&self, discovered_at: &str) -> LinkCache {
+    pub fn to_cache(
+        &self,
+        discovered_at: &str,
+        job_assignment: Option<JobAssignment>,
+    ) -> LinkCache {
         LinkCache {
             schema_version: 2,
             discovered_at: discovered_at.to_string(),
@@ -212,6 +218,7 @@ impl LinkMap {
                     dep_job_ids: l.dep_job_ids.clone(),
                 })
                 .collect(),
+            job_assignment,
         }
     }
 
@@ -387,11 +394,6 @@ pub async fn run_discovery(
     let (link_map, workflow_files) = discover_links(aws, gh).await;
 
     if !link_map.links().is_empty() {
-        let cache = link_map.to_cache(&Utc::now().to_rfc3339());
-        if let Err(e) = save_link_cache(cache_path, &cache) {
-            tracing::warn!(error = %e, "failed to save link cache");
-        }
-
         // Compute per-job pipeline assignments for pipeline-centric UI
         let assignment = assign_jobs_to_pipelines(&workflow_files, &link_map);
         let has_jobs = assignment
@@ -402,6 +404,18 @@ pub async fn run_discovery(
                 .shared_jobs
                 .iter()
                 .any(|(_, jobs)| !jobs.is_empty());
+
+        let cached_assignment = if has_jobs {
+            Some(assignment.clone())
+        } else {
+            None
+        };
+
+        let cache = link_map.to_cache(&Utc::now().to_rfc3339(), cached_assignment);
+        if let Err(e) = save_link_cache(cache_path, &cache) {
+            tracing::warn!(error = %e, "failed to save link cache");
+        }
+
         if has_jobs {
             tracing::info!(
                 pipelines = assignment.pipeline_jobs.len(),
@@ -544,7 +558,7 @@ fn set_pending_links(app: &mut App, link_map: &LinkMap) {
 }
 
 /// Result of assigning workflow jobs to pipelines.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JobAssignment {
     /// Jobs assigned to exactly one pipeline, keyed by pipeline name.
     /// Value is (workflow_name, ordered list of job display names).
@@ -831,7 +845,7 @@ mod tests {
             "bucket".into(),
             "art.zip".into(),
         );
-        let cache = map.to_cache("2026-03-27T12:00:00Z");
+        let cache = map.to_cache("2026-03-27T12:00:00Z", None);
 
         save_link_cache(&path, &cache).unwrap();
 
@@ -840,6 +854,42 @@ mod tests {
         assert_eq!(loaded.discovered_at, "2026-03-27T12:00:00Z");
         assert_eq!(loaded.links.len(), 1);
         assert_eq!(loaded.links[0].pipeline_name, "deploy");
+    }
+
+    #[test]
+    fn save_and_load_job_assignment_roundtrip() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".cibars-links.toml");
+
+        let mut map = LinkMap::new();
+        map.add_discovered(
+            "pipe".into(),
+            "CI".into(),
+            "bucket".into(),
+            "key.zip".into(),
+        );
+
+        let assignment = JobAssignment {
+            pipeline_jobs: {
+                let mut m = HashMap::new();
+                m.insert(
+                    "pipe".to_string(),
+                    ("CI".to_string(), vec!["Build".to_string()]),
+                );
+                m
+            },
+            shared_jobs: vec![("CI".to_string(), vec!["Test".to_string()])],
+        };
+
+        let cache = map.to_cache("2026-03-28T12:00:00Z", Some(assignment));
+        save_link_cache(&path, &cache).unwrap();
+
+        let loaded = load_link_cache(&path).unwrap().unwrap();
+        let ja = loaded
+            .job_assignment
+            .expect("job_assignment should roundtrip");
+        assert_eq!(ja.pipeline_jobs["pipe"].1, vec!["Build"]);
+        assert_eq!(ja.shared_jobs[0].1, vec!["Test"]);
     }
 
     #[test]
@@ -899,6 +949,7 @@ source = "YamlDiscovered"
             schema_version: 1,
             discovered_at: "now".into(),
             links: vec![],
+            job_assignment: None,
         };
         save_link_cache(&path, &cache).unwrap();
         let content = std::fs::read_to_string(&path).unwrap();
@@ -1449,7 +1500,7 @@ source = "YamlDiscovered"
     #[test]
     fn to_cache_empty_link_map() {
         let map = LinkMap::new();
-        let cache = map.to_cache("2026-03-27T00:00:00Z");
+        let cache = map.to_cache("2026-03-27T00:00:00Z", None);
         assert_eq!(cache.schema_version, 2);
         assert_eq!(cache.discovered_at, "2026-03-27T00:00:00Z");
         assert!(cache.links.is_empty());
@@ -1464,7 +1515,7 @@ source = "YamlDiscovered"
             "bucket".into(),
             "key.zip".into(),
         );
-        let cache = map.to_cache("2026-03-27T00:00:00Z");
+        let cache = map.to_cache("2026-03-27T00:00:00Z", None);
         assert_eq!(cache.links.len(), 1);
         assert_eq!(cache.links[0].pipeline_name, "my-pipe");
         assert_eq!(cache.links[0].workflow_name, "CI");
@@ -1481,7 +1532,7 @@ source = "YamlDiscovered"
         let mut map = LinkMap::new();
         map.record_workflow_completion("CI");
         map.try_correlate("deploy-pipe");
-        let cache = map.to_cache("2026-03-27T00:00:00Z");
+        let cache = map.to_cache("2026-03-27T00:00:00Z", None);
         assert_eq!(cache.links.len(), 1);
         assert!(matches!(
             cache.links[0].source,
@@ -1493,7 +1544,7 @@ source = "YamlDiscovered"
     fn load_from_cache_round_trip() {
         let mut map = LinkMap::new();
         map.add_discovered("pipe-a".into(), "WF-A".into(), "b".into(), "k".into());
-        let cache = map.to_cache("2026-03-27T00:00:00Z");
+        let cache = map.to_cache("2026-03-27T00:00:00Z", None);
 
         let mut map2 = LinkMap::new();
         map2.load_from_cache(cache);
@@ -1508,7 +1559,7 @@ source = "YamlDiscovered"
 
         let mut fresh = LinkMap::new();
         fresh.add_discovered("new".into(), "NEW-WF".into(), "b2".into(), "k2".into());
-        let cache = fresh.to_cache("2026-03-27T00:00:00Z");
+        let cache = fresh.to_cache("2026-03-27T00:00:00Z", None);
 
         map.load_from_cache(cache);
         assert_eq!(map.workflow_for_pipeline("old"), None);
