@@ -486,14 +486,10 @@ fn render_pipeline_centric(
 
     // Statusbar is the last area
     let status_area = areas[areas.len() - 1];
-    let elapsed = app
-        .last_poll_started
-        .map(|t| t.elapsed())
-        .unwrap_or_default();
     frame.render_widget(
         StatusBar {
             poll_state: &app.poll_state,
-            elapsed_since_poll: elapsed,
+            tick: app.status_tick,
             cooldown_remaining: app.cooldown_remaining,
             warnings: &app.warnings,
             hook_status: &app.hook_status,
@@ -504,6 +500,21 @@ fn render_pipeline_centric(
         },
         status_area,
     );
+}
+
+/// Advance the status bar tick counter if enough time has elapsed.
+/// Returns true if the tick was advanced.
+pub fn maybe_advance_tick(app: &mut App) -> bool {
+    let interval = App::tick_interval_for(&app.poll_state);
+    let should_advance = app
+        .last_tick_advance
+        .is_none_or(|t| t.elapsed() >= interval);
+    if should_advance {
+        app.advance_status_tick();
+        true
+    } else {
+        false
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -852,14 +863,10 @@ pub fn run_ui(
             }
 
             // --- Status bar block (area 4, after fill at area 3) ---
-            let elapsed = app
-                .last_poll_started
-                .map(|t| t.elapsed())
-                .unwrap_or_default();
             frame.render_widget(
                 StatusBar {
                     poll_state: &app.poll_state,
-                    elapsed_since_poll: elapsed,
+                    tick: app.status_tick,
                     cooldown_remaining: app.cooldown_remaining,
                     warnings: &app.warnings,
                     hook_status: &app.hook_status,
@@ -873,6 +880,11 @@ pub fn run_ui(
 
             drop(app);
         })?;
+
+        // Advance status bar tick (self-timed, safe to call every frame)
+        if let Ok(mut a) = app.lock() {
+            maybe_advance_tick(&mut a);
+        }
 
         // Advance animation for Running bars every ~1s
         if last_animation.elapsed() >= ANIMATION_INTERVAL {
@@ -1733,5 +1745,59 @@ mod tests {
         ];
         let sorted = sorted_pipeline_groups(&pipelines, &[]);
         assert_eq!(sorted.len(), 2);
+    }
+
+    // --- maybe_advance_tick e2e tests ---
+
+    #[test]
+    fn tick_advances_when_no_prior_advance() {
+        let mut app = App::new();
+        app.poll_state = PollState::Active;
+        assert!(maybe_advance_tick(&mut app));
+        assert_eq!(app.status_tick, 1);
+    }
+
+    #[test]
+    fn tick_does_not_advance_before_interval() {
+        let mut app = App::new();
+        app.poll_state = PollState::Idle; // 5s tick interval
+        app.last_tick_advance = Some(Instant::now());
+        app.status_tick = 1;
+        assert!(!maybe_advance_tick(&mut app));
+        assert_eq!(app.status_tick, 1);
+    }
+
+    #[test]
+    fn tick_advances_after_interval_elapsed() {
+        let mut app = App::new();
+        app.poll_state = PollState::Active; // ~833ms tick interval
+        app.last_tick_advance = Some(Instant::now() - Duration::from_millis(900));
+        app.status_tick = 2;
+        assert!(maybe_advance_tick(&mut app));
+        assert_eq!(app.status_tick, 3);
+    }
+
+    #[test]
+    fn tick_wraps_around_via_advance() {
+        let mut app = App::new();
+        app.poll_state = PollState::Active;
+        app.status_tick = App::NUM_TICKS;
+        app.last_tick_advance = Some(Instant::now() - Duration::from_secs(2));
+        assert!(maybe_advance_tick(&mut app));
+        assert_eq!(app.status_tick, 0);
+    }
+
+    #[test]
+    fn tick_interval_adapts_to_state_change() {
+        let mut app = App::new();
+        // Active (833ms interval) — advance
+        app.poll_state = PollState::Active;
+        app.last_tick_advance = Some(Instant::now() - Duration::from_millis(900));
+        assert!(maybe_advance_tick(&mut app));
+
+        // Switch to Idle (5000ms interval) — should not advance immediately
+        app.poll_state = PollState::Idle;
+        app.last_tick_advance = Some(Instant::now());
+        assert!(!maybe_advance_tick(&mut app));
     }
 }

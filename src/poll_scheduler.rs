@@ -15,6 +15,16 @@ pub enum PollState {
     Cooldown,
 }
 
+impl PollState {
+    pub fn interval(&self) -> Duration {
+        match self {
+            PollState::Idle => IDLE_INTERVAL,
+            PollState::LongIdle => LONG_IDLE_INTERVAL,
+            PollState::Watching | PollState::Active | PollState::Cooldown => ACTIVE_INTERVAL,
+        }
+    }
+}
+
 pub struct PollScheduler {
     state: PollState,
     cooldown_started: Option<Instant>,
@@ -55,11 +65,7 @@ impl PollScheduler {
     }
 
     pub fn interval(&self) -> Duration {
-        match self.state {
-            PollState::Idle => IDLE_INTERVAL,
-            PollState::LongIdle => LONG_IDLE_INTERVAL,
-            PollState::Watching | PollState::Active | PollState::Cooldown => ACTIVE_INTERVAL,
-        }
+        self.state.interval()
     }
 
     pub fn transition(&mut self, any_running: bool) {
@@ -476,5 +482,32 @@ mod tests {
         let mut s = PollScheduler::new();
         s.transition(true); // → Active
         assert!(s.cooldown_remaining().is_none());
+    }
+
+    // --- PollState::interval() tests ---
+
+    #[test]
+    fn poll_state_interval_active() {
+        assert_eq!(PollState::Active.interval(), Duration::from_secs(5));
+    }
+
+    #[test]
+    fn poll_state_interval_idle() {
+        assert_eq!(PollState::Idle.interval(), Duration::from_secs(30));
+    }
+
+    #[test]
+    fn poll_state_interval_long_idle() {
+        assert_eq!(PollState::LongIdle.interval(), Duration::from_secs(300));
+    }
+
+    #[test]
+    fn poll_state_interval_watching() {
+        assert_eq!(PollState::Watching.interval(), Duration::from_secs(5));
+    }
+
+    #[test]
+    fn poll_state_interval_cooldown() {
+        assert_eq!(PollState::Cooldown.interval(), Duration::from_secs(5));
     }
 }

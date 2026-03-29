@@ -78,9 +78,6 @@ async fn run_poll_orchestrator(
 
     loop {
         let cycle_start = Instant::now();
-        // Reset tick bar immediately so the UI shows progress from cycle start,
-        // not delayed until after slow API calls complete.
-        app.lock().expect("app mutex poisoned").last_poll_started = Some(cycle_start);
 
         let force_aws = force_next_aws || {
             let a = app.lock().expect("app mutex poisoned");

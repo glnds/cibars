@@ -31,8 +31,10 @@ pub struct App {
     pub loading_actions: bool,
     /// Current poll state machine state, for UI display.
     pub poll_state: PollState,
-    /// Set by orchestrator at start of each poll cycle.
-    pub last_poll_started: Option<Instant>,
+    /// Simple tick counter for status bar animation (0..=NUM_TICKS, cycles).
+    pub status_tick: usize,
+    /// When the status tick counter last advanced.
+    pub last_tick_advance: Option<Instant>,
     /// Cooldown remaining, set by orchestrator for UI display.
     pub cooldown_remaining: Option<std::time::Duration>,
     /// Git pre-push hook status for boost integration.
@@ -53,6 +55,7 @@ pub struct App {
 
 impl App {
     pub const MAX_WARNINGS: usize = 10;
+    pub const NUM_TICKS: usize = 5;
 
     pub fn new() -> Self {
         Self {
@@ -67,7 +70,8 @@ impl App {
             loading_pipelines: true,
             loading_actions: true,
             poll_state: PollState::Idle,
-            last_poll_started: None,
+            status_tick: 0,
+            last_tick_advance: None,
             cooldown_remaining: None,
             hook_status: HookStatus::NoGitDir,
             aws_health: SourceHealth::Unknown,
@@ -77,6 +81,16 @@ impl App {
             linkage_discovering: false,
             job_assignment: None,
         }
+    }
+
+    pub fn tick_interval_for(state: &PollState) -> std::time::Duration {
+        let interval_ms = state.interval().as_millis() as u64;
+        std::time::Duration::from_millis(interval_ms / (Self::NUM_TICKS as u64 + 1))
+    }
+
+    pub fn advance_status_tick(&mut self) {
+        self.status_tick = (self.status_tick + 1) % (Self::NUM_TICKS + 1);
+        self.last_tick_advance = Some(Instant::now());
     }
 
     pub fn push_warning(&mut self, msg: String) {
@@ -131,6 +145,8 @@ impl Default for App {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
+
     use crate::model::{Bar, WorkflowCategory, WorkflowGroup};
 
     #[test]
@@ -389,5 +405,59 @@ mod tests {
     fn new_app_has_no_push_signal() {
         let app = App::new();
         assert!(app.push_signal_at.is_none());
+    }
+
+    // --- status tick tests ---
+
+    #[test]
+    fn app_starts_with_zero_status_tick() {
+        let app = App::new();
+        assert_eq!(app.status_tick, 0);
+    }
+
+    #[test]
+    fn app_starts_with_no_last_tick_advance() {
+        let app = App::new();
+        assert!(app.last_tick_advance.is_none());
+    }
+
+    #[test]
+    fn advance_status_tick_increments() {
+        let mut app = App::new();
+        app.status_tick = 0;
+        app.advance_status_tick();
+        assert_eq!(app.status_tick, 1);
+    }
+
+    #[test]
+    fn advance_status_tick_wraps() {
+        let mut app = App::new();
+        app.status_tick = App::NUM_TICKS;
+        app.advance_status_tick();
+        assert_eq!(app.status_tick, 0);
+    }
+
+    #[test]
+    fn advance_status_tick_sets_last_tick_advance() {
+        let mut app = App::new();
+        assert!(app.last_tick_advance.is_none());
+        app.advance_status_tick();
+        assert!(app.last_tick_advance.is_some());
+    }
+
+    #[test]
+    fn tick_interval_scales_with_poll_state() {
+        assert_eq!(
+            App::tick_interval_for(&PollState::Active),
+            Duration::from_millis(833)
+        );
+        assert_eq!(
+            App::tick_interval_for(&PollState::Idle),
+            Duration::from_millis(5000)
+        );
+        assert_eq!(
+            App::tick_interval_for(&PollState::LongIdle),
+            Duration::from_millis(50000)
+        );
     }
 }
