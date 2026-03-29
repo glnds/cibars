@@ -11,6 +11,7 @@ use crate::config::HookStatus;
 use crate::poll_scheduler::PollState;
 
 const BOOST_FLASH_DURATION: Duration = Duration::from_millis(750);
+const PUSH_SIGNAL_DURATION: Duration = Duration::from_millis(1500);
 
 const NUM_TICKS: u64 = 5;
 
@@ -21,6 +22,7 @@ pub struct StatusBar<'a> {
     pub warnings: &'a [String],
     pub hook_status: &'a HookStatus,
     pub boost_pressed_at: Option<Instant>,
+    pub push_signal_at: Option<Instant>,
     pub linkage_broken: bool,
     pub linkage_discovering: bool,
 }
@@ -90,15 +92,34 @@ impl Widget for StatusBar<'_> {
         }
         spans.push(Span::raw(" q=quit"));
 
-        match self.hook_status {
-            HookStatus::Missing | HookStatus::Incomplete => {
-                spans.push(dim_sep.clone());
-                spans.push(Span::styled(
-                    "h=install pre-push hook",
-                    Style::default().fg(theme::STATUS_RUNNING),
-                ));
+        let push_active = self
+            .push_signal_at
+            .is_some_and(|t| t.elapsed() < PUSH_SIGNAL_DURATION);
+
+        if push_active {
+            spans.push(dim_sep.clone());
+            spans.push(Span::styled(
+                "\u{2B06} pushed!",
+                Style::default().fg(theme::POLL_SCAN),
+            ));
+        } else {
+            match self.hook_status {
+                HookStatus::Installed => {
+                    spans.push(dim_sep.clone());
+                    spans.push(Span::styled(
+                        "\u{2713}hook",
+                        Style::default().fg(theme::STATUS_SUCCESS),
+                    ));
+                }
+                HookStatus::Missing | HookStatus::Incomplete => {
+                    spans.push(dim_sep.clone());
+                    spans.push(Span::styled(
+                        "h=install pre-push hook",
+                        Style::default().fg(theme::STATUS_RUNNING),
+                    ));
+                }
+                HookStatus::NoGitDir => {}
             }
-            _ => {}
         }
 
         // Linkage status
@@ -155,6 +176,7 @@ mod tests {
             warnings: &[],
             hook_status,
             boost_pressed_at: None,
+            push_signal_at: None,
             linkage_broken: false,
             linkage_discovering: false,
         };
@@ -312,6 +334,28 @@ mod tests {
     }
 
     #[test]
+    fn installed_hook_shows_checkmark() {
+        let bar = StatusBar {
+            poll_state: &PollState::Idle,
+            elapsed_since_poll: Duration::ZERO,
+            cooldown_remaining: None,
+            warnings: &[],
+            hook_status: &HookStatus::Installed,
+            boost_pressed_at: None,
+            push_signal_at: None,
+            linkage_broken: false,
+            linkage_discovering: false,
+        };
+        let area = Rect::new(0, 0, 120, 3);
+        let mut buf = Buffer::empty(area);
+        bar.render(area, &mut buf);
+        let content: String = (0..120)
+            .map(|x| buf.cell((x, 1)).unwrap().symbol().to_string())
+            .collect();
+        assert!(content.contains("✓hook"), "got: {content}");
+    }
+
+    #[test]
     fn filled_ticks_cycle_boundary() {
         // Zero elapsed → 0 ticks in all states
         assert_eq!(filled_ticks(Duration::ZERO, &PollState::Active), 0);
@@ -366,6 +410,7 @@ mod tests {
             warnings,
             hook_status,
             boost_pressed_at: None,
+            push_signal_at: None,
             linkage_broken: false,
             linkage_discovering: false,
         };
@@ -413,6 +458,7 @@ mod tests {
             warnings: &[],
             hook_status: &HookStatus::Installed,
             boost_pressed_at: None,
+            push_signal_at: None,
             linkage_broken: false,
             linkage_discovering: false,
         };
@@ -438,6 +484,7 @@ mod tests {
             warnings: &[],
             hook_status: &HookStatus::Installed,
             boost_pressed_at: Some(Instant::now()),
+            push_signal_at: None,
             linkage_broken: false,
             linkage_discovering: false,
         };
@@ -473,6 +520,7 @@ mod tests {
             warnings: &[],
             hook_status: &HookStatus::Installed,
             boost_pressed_at: Some(expired),
+            push_signal_at: None,
             linkage_broken: false,
             linkage_discovering: false,
         };
@@ -503,6 +551,7 @@ mod tests {
             warnings: &[],
             hook_status: &HookStatus::Installed,
             boost_pressed_at: None,
+            push_signal_at: None,
             linkage_broken: false,
             linkage_discovering: false,
         };
@@ -532,6 +581,7 @@ mod tests {
             warnings: &[],
             hook_status: &HookStatus::Installed,
             boost_pressed_at: None,
+            push_signal_at: None,
             linkage_broken,
             linkage_discovering,
         };
@@ -572,6 +622,7 @@ mod tests {
             warnings: &[],
             hook_status: &HookStatus::Installed,
             boost_pressed_at: None,
+            push_signal_at: None,
             linkage_broken: false,
             linkage_discovering: false,
         };
@@ -640,6 +691,7 @@ mod tests {
             warnings: &[],
             hook_status: &HookStatus::Installed,
             boost_pressed_at: None,
+            push_signal_at: None,
             linkage_broken: false,
             linkage_discovering: false,
         };
@@ -650,5 +702,120 @@ mod tests {
         // Border cells should use theme::BORDER_STATUS color
         let border_cell = buf.cell((0, 0)).unwrap();
         assert_eq!(border_cell.fg, theme::BORDER_STATUS);
+    }
+
+    #[test]
+    fn push_signal_shows_pushed_label() {
+        let bar = StatusBar {
+            poll_state: &PollState::Idle,
+            elapsed_since_poll: Duration::ZERO,
+            cooldown_remaining: None,
+            warnings: &[],
+            hook_status: &HookStatus::Installed,
+            boost_pressed_at: None,
+            push_signal_at: Some(Instant::now()),
+            linkage_broken: false,
+            linkage_discovering: false,
+        };
+        let area = Rect::new(0, 0, 120, 3);
+        let mut buf = Buffer::empty(area);
+        bar.render(area, &mut buf);
+        let content: String = (0..120)
+            .map(|x| buf.cell((x, 1)).unwrap().symbol().to_string())
+            .collect();
+        assert!(content.contains("pushed!"), "got: {content}");
+        assert!(!content.contains("✓hook"), "got: {content}");
+    }
+
+    #[test]
+    fn expired_push_signal_shows_checkmark() {
+        let expired = Instant::now() - Duration::from_secs(5);
+        let bar = StatusBar {
+            poll_state: &PollState::Idle,
+            elapsed_since_poll: Duration::ZERO,
+            cooldown_remaining: None,
+            warnings: &[],
+            hook_status: &HookStatus::Installed,
+            boost_pressed_at: None,
+            push_signal_at: Some(expired),
+            linkage_broken: false,
+            linkage_discovering: false,
+        };
+        let area = Rect::new(0, 0, 120, 3);
+        let mut buf = Buffer::empty(area);
+        bar.render(area, &mut buf);
+        let content: String = (0..120)
+            .map(|x| buf.cell((x, 1)).unwrap().symbol().to_string())
+            .collect();
+        assert!(content.contains("✓hook"), "got: {content}");
+        assert!(!content.contains("pushed!"), "got: {content}");
+    }
+
+    #[test]
+    fn push_signal_uses_scan_color() {
+        let bar = StatusBar {
+            poll_state: &PollState::Idle,
+            elapsed_since_poll: Duration::ZERO,
+            cooldown_remaining: None,
+            warnings: &[],
+            hook_status: &HookStatus::Installed,
+            boost_pressed_at: None,
+            push_signal_at: Some(Instant::now()),
+            linkage_broken: false,
+            linkage_discovering: false,
+        };
+        let area = Rect::new(0, 0, 120, 3);
+        let mut buf = Buffer::empty(area);
+        bar.render(area, &mut buf);
+        let col = (0u16..120)
+            .find(|&x| buf.cell((x, 1)).unwrap().symbol() == "\u{2B06}")
+            .expect("⬆ not found");
+        assert_eq!(buf.cell((col, 1)).unwrap().fg, theme::POLL_SCAN);
+    }
+
+    #[test]
+    fn installed_hook_uses_success_color() {
+        let bar = StatusBar {
+            poll_state: &PollState::Idle,
+            elapsed_since_poll: Duration::ZERO,
+            cooldown_remaining: None,
+            warnings: &[],
+            hook_status: &HookStatus::Installed,
+            boost_pressed_at: None,
+            push_signal_at: None,
+            linkage_broken: false,
+            linkage_discovering: false,
+        };
+        let area = Rect::new(0, 0, 120, 3);
+        let mut buf = Buffer::empty(area);
+        bar.render(area, &mut buf);
+        let col = (0u16..120)
+            .find(|&x| buf.cell((x, 1)).unwrap().symbol() == "\u{2713}")
+            .expect("✓ not found");
+        assert_eq!(buf.cell((col, 1)).unwrap().fg, theme::STATUS_SUCCESS);
+    }
+
+    #[test]
+    fn no_git_dir_omits_hook_indicator() {
+        let bar = StatusBar {
+            poll_state: &PollState::Idle,
+            elapsed_since_poll: Duration::ZERO,
+            cooldown_remaining: None,
+            warnings: &[],
+            hook_status: &HookStatus::NoGitDir,
+            boost_pressed_at: None,
+            push_signal_at: None,
+            linkage_broken: false,
+            linkage_discovering: false,
+        };
+        let area = Rect::new(0, 0, 120, 3);
+        let mut buf = Buffer::empty(area);
+        bar.render(area, &mut buf);
+        let content: String = (0..120)
+            .map(|x| buf.cell((x, 1)).unwrap().symbol().to_string())
+            .collect();
+        assert!(!content.contains("✓hook"), "got: {content}");
+        assert!(!content.contains("h=install"), "got: {content}");
+        assert!(!content.contains("pushed!"), "got: {content}");
     }
 }
