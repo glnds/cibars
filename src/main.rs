@@ -208,6 +208,7 @@ async fn run_poll_orchestrator(
                 force_next_aws = true;
                 let mut a = app.lock().expect("app mutex poisoned");
                 a.poll_state = scheduler.state();
+                a.push_signal_at = Some(Instant::now());
                 tracing::info!(state = ?scheduler.state(), "boost triggered by SIGUSR1");
             }
             _ = link_notify.notified() => {
