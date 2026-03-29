@@ -41,6 +41,8 @@ pub struct App {
     pub aws_health: SourceHealth,
     /// When boost key was last pressed, for visual flash feedback.
     pub boost_pressed_at: Option<Instant>,
+    /// When a SIGUSR1 push signal was last received, for transient UI feedback.
+    pub push_signal_at: Option<Instant>,
     /// True when cached link map has stale references.
     pub linkage_broken: bool,
     /// True while discover_links() is running.
@@ -70,6 +72,7 @@ impl App {
             hook_status: HookStatus::NoGitDir,
             aws_health: SourceHealth::Unknown,
             boost_pressed_at: None,
+            push_signal_at: None,
             linkage_broken: false,
             linkage_discovering: false,
             job_assignment: None,
@@ -380,5 +383,11 @@ mod tests {
         let app = App::new();
         assert!(!app.linkage_broken);
         assert!(!app.linkage_discovering);
+    }
+
+    #[test]
+    fn new_app_has_no_push_signal() {
+        let app = App::new();
+        assert!(app.push_signal_at.is_none());
     }
 }
