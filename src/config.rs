@@ -267,7 +267,7 @@ pub fn check_pre_push_hook(dir: &Path) -> HookStatus {
         if is_global && has_delegation(&contents) {
             if let Ok(local_contents) = std::fs::read_to_string(&local_hook) {
                 if has_cibars_hook(&local_contents) {
-                    return HookStatus::Installed(HookLocation::Local);
+                    return HookStatus::Installed(HookLocation::Global);
                 }
             }
         }
@@ -851,6 +851,32 @@ aws_profile = "staging"
         )
         .unwrap();
         // Global with delegation is just Global (always delegates)
+        assert_eq!(
+            check_pre_push_hook(dir.path()),
+            HookStatus::Installed(HookLocation::Global)
+        );
+    }
+
+    #[test]
+    fn check_hook_delegation_to_local_reports_global() {
+        let dir = tempfile::tempdir().unwrap();
+        let global_hooks = dir.path().join("global-hooks");
+        std::fs::create_dir_all(&global_hooks).unwrap();
+        init_git_repo_with_hooks_path(dir.path(), &global_hooks);
+        // Global hook has only delegation, no cibars snippet
+        std::fs::write(
+            global_hooks.join("pre-push"),
+            format!("#!/bin/sh{DELEGATION_SNIPPET}"),
+        )
+        .unwrap();
+        // Local hook has the cibars snippet
+        let local_hooks = dir.path().join(".git/hooks");
+        std::fs::write(
+            local_hooks.join("pre-push"),
+            format!("#!/bin/sh{HOOK_SNIPPET}"),
+        )
+        .unwrap();
+        // Should report Global since global hook is the entry point
         assert_eq!(
             check_pre_push_hook(dir.path()),
             HookStatus::Installed(HookLocation::Global)
