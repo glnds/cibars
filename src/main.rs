@@ -138,10 +138,10 @@ async fn run_poll_orchestrator(
 
         // Poll with boost/SIGUSR1 interruption — if a signal arrives
         // mid-API-call, cancel the poll and restart in Watching mode.
-        let interrupted = tokio::select! {
+        let source = tokio::select! {
             biased;
-            _ = boost_notify.notified() => true,
-            _ = sigusr1.recv() => true,
+            _ = boost_notify.notified() => Some(InterruptSource::Boost),
+            _ = sigusr1.recv() => Some(InterruptSource::Sigusr1),
             _ = async {
                 if let Some(aws) = aws_client.as_ref().filter(|_| poll_aws) {
                     tokio::join!(
@@ -158,15 +158,13 @@ async fn run_poll_orchestrator(
                 } else {
                     poller::poll_actions_tick(&app, &gh_client).await;
                 }
-            } => false,
+            } => None,
         };
 
-        if interrupted {
-            scheduler.boost();
+        if let Some(source) = source {
+            handle_poll_interrupt(&app, &mut scheduler, source);
             force_next_aws = true;
-            let mut a = app.lock().expect("app mutex poisoned");
-            a.poll_state = scheduler.state();
-            tracing::info!(state = ?scheduler.state(), "boost interrupted poll cycle");
+            tracing::info!(state = ?scheduler.state(), ?source, "boost interrupted poll");
             continue;
         }
 
@@ -208,18 +206,13 @@ async fn run_poll_orchestrator(
         tokio::select! {
             biased;
             _ = boost_notify.notified() => {
-                scheduler.boost();
+                handle_poll_interrupt(&app, &mut scheduler, InterruptSource::Boost);
                 force_next_aws = true;
-                let mut a = app.lock().expect("app mutex poisoned");
-                a.poll_state = scheduler.state();
                 tracing::info!(state = ?scheduler.state(), "boost triggered by key");
             }
             _ = sigusr1.recv() => {
-                scheduler.boost();
+                handle_poll_interrupt(&app, &mut scheduler, InterruptSource::Sigusr1);
                 force_next_aws = true;
-                let mut a = app.lock().expect("app mutex poisoned");
-                a.poll_state = scheduler.state();
-                a.push_signal_at = Some(Instant::now());
                 tracing::info!(state = ?scheduler.state(), "boost triggered by SIGUSR1");
             }
             _ = link_notify.notified() => {
@@ -239,6 +232,35 @@ async fn run_poll_orchestrator(
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InterruptSource {
+    Boost,
+    Sigusr1,
+}
+
+fn write_pid_file(pid_path: &std::path::Path) -> Result<()> {
+    std::fs::write(pid_path, std::process::id().to_string())
+        .with_context(|| format!("cannot write PID file {}", pid_path.display()))?;
+    Ok(())
+}
+
+fn cleanup_pid_file(pid_path: &std::path::Path) {
+    let _ = std::fs::remove_file(pid_path);
+}
+
+fn handle_poll_interrupt(
+    app: &Arc<Mutex<App>>,
+    scheduler: &mut PollScheduler,
+    source: InterruptSource,
+) {
+    scheduler.boost();
+    let mut a = app.lock().expect("app mutex poisoned");
+    a.poll_state = scheduler.state();
+    if source == InterruptSource::Sigusr1 {
+        a.push_signal_at = Some(Instant::now());
+    }
+}
+
 fn main() -> Result<()> {
     rustls::crypto::aws_lc_rs::default_provider()
         .install_default()
@@ -248,7 +270,11 @@ fn main() -> Result<()> {
 
     let cwd = std::env::current_dir().context("cannot read cwd")?;
     let (config, token) = Config::load(&cwd)?;
-    tracing::info!("starting cibars");
+    let pid_path = dirs::home_dir()
+        .context("no home dir")?
+        .join(".cibars/cibars.pid");
+    write_pid_file(&pid_path)?;
+    tracing::info!(pid = std::process::id(), "starting cibars");
     let mut app_state = App::new();
     app_state.hook_status = config::check_pre_push_hook(&cwd);
     let app = Arc::new(Mutex::new(app_state));
@@ -306,6 +332,73 @@ fn main() -> Result<()> {
     );
     ratatui::restore();
 
+    cleanup_pid_file(&pid_path);
     tracing::info!("shutting down");
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::{Arc, Mutex};
+
+    #[test]
+    fn write_pid_file_creates_file_with_pid() {
+        let dir = tempfile::tempdir().unwrap();
+        let pid_path = dir.path().join("cibars.pid");
+        write_pid_file(&pid_path).unwrap();
+        let content = std::fs::read_to_string(&pid_path).unwrap();
+        assert_eq!(content, std::process::id().to_string());
+    }
+
+    #[test]
+    fn cleanup_pid_file_removes_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let pid_path = dir.path().join("cibars.pid");
+        std::fs::write(&pid_path, "12345").unwrap();
+        assert!(pid_path.exists());
+        cleanup_pid_file(&pid_path);
+        assert!(!pid_path.exists());
+    }
+
+    #[test]
+    fn cleanup_pid_file_noop_when_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let pid_path = dir.path().join("cibars.pid");
+        cleanup_pid_file(&pid_path); // should not panic
+    }
+
+    #[test]
+    fn handle_interrupt_sigusr1_sets_push_signal() {
+        let app = Arc::new(Mutex::new(App::new()));
+        let mut scheduler = PollScheduler::new();
+        handle_poll_interrupt(&app, &mut scheduler, InterruptSource::Sigusr1);
+        assert!(app.lock().unwrap().push_signal_at.is_some());
+    }
+
+    #[test]
+    fn handle_interrupt_boost_no_push_signal() {
+        let app = Arc::new(Mutex::new(App::new()));
+        let mut scheduler = PollScheduler::new();
+        handle_poll_interrupt(&app, &mut scheduler, InterruptSource::Boost);
+        assert!(app.lock().unwrap().push_signal_at.is_none());
+    }
+
+    #[test]
+    fn handle_interrupt_transitions_to_watching() {
+        let app = Arc::new(Mutex::new(App::new()));
+        let mut scheduler = PollScheduler::new();
+        assert_eq!(scheduler.state(), PollState::Idle);
+        handle_poll_interrupt(&app, &mut scheduler, InterruptSource::Boost);
+        assert_eq!(scheduler.state(), PollState::Watching);
+    }
+
+    #[test]
+    fn handle_interrupt_updates_app_poll_state() {
+        let app = Arc::new(Mutex::new(App::new()));
+        let mut scheduler = PollScheduler::new();
+        handle_poll_interrupt(&app, &mut scheduler, InterruptSource::Sigusr1);
+        let a = app.lock().unwrap();
+        assert_eq!(a.poll_state, scheduler.state());
+    }
 }

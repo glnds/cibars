@@ -184,7 +184,7 @@ pub fn check_pre_push_hook(dir: &Path) -> HookStatus {
 }
 
 const HOOK_SNIPPET: &str =
-    "\n# cibars: boost polling on push\npkill -USR1 cibars 2>/dev/null || true\n";
+    "\n# cibars: boost polling on push\nkill -USR1 $(cat ~/.cibars/cibars.pid 2>/dev/null) 2>/dev/null || true\n";
 
 pub fn install_pre_push_hook(dir: &Path) -> Result<()> {
     let hook_path = dir.join(".git/hooks/pre-push");
@@ -472,7 +472,7 @@ aws_profile = "staging"
         install_pre_push_hook(dir.path()).unwrap();
         let content = std::fs::read_to_string(hooks_dir.join("pre-push")).unwrap();
         assert!(content.contains("#!/bin/sh"));
-        assert!(content.contains("pkill -USR1 cibars"));
+        assert!(content.contains("cibars.pid"));
     }
 
     #[test]
@@ -484,7 +484,7 @@ aws_profile = "staging"
         install_pre_push_hook(dir.path()).unwrap();
         let content = std::fs::read_to_string(hooks_dir.join("pre-push")).unwrap();
         assert!(content.contains("echo pushing"));
-        assert!(content.contains("pkill -USR1 cibars"));
+        assert!(content.contains("cibars.pid"));
     }
 
     #[test]
@@ -495,7 +495,7 @@ aws_profile = "staging"
         install_pre_push_hook(dir.path()).unwrap();
         install_pre_push_hook(dir.path()).unwrap();
         let content = std::fs::read_to_string(hooks_dir.join("pre-push")).unwrap();
-        assert_eq!(content.matches("pkill -USR1 cibars").count(), 1);
+        assert_eq!(content.matches("cibars.pid").count(), 1);
     }
 
     #[test]
@@ -747,6 +747,27 @@ branch = "master"
 "#;
         let fc: FileConfig = toml::from_str(toml_str).unwrap();
         assert_eq!(fc.branch.unwrap(), "master");
+    }
+
+    #[test]
+    fn hook_snippet_uses_pid_file() {
+        assert!(
+            HOOK_SNIPPET.contains("cibars.pid"),
+            "HOOK_SNIPPET should use PID file: {HOOK_SNIPPET}"
+        );
+    }
+
+    #[test]
+    fn hook_status_installed_with_pid_file_variant() {
+        let dir = tempfile::tempdir().unwrap();
+        let hooks_dir = dir.path().join(".git/hooks");
+        std::fs::create_dir_all(&hooks_dir).unwrap();
+        std::fs::write(
+            hooks_dir.join("pre-push"),
+            "#!/bin/sh\nkill -USR1 $(cat ~/.cibars/cibars.pid 2>/dev/null) 2>/dev/null || true\n",
+        )
+        .unwrap();
+        assert_eq!(check_pre_push_hook(dir.path()), HookStatus::Installed);
     }
 
     #[test]
