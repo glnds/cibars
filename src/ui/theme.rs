@@ -17,7 +17,7 @@ pub const BAR_EMPTY: Color = Color::Rgb(48, 48, 48);
 // Status colors
 pub const STATUS_SUCCESS: Color = Color::Rgb(0, 255, 127);
 pub const STATUS_RUNNING: Color = Color::Rgb(240, 192, 80);
-pub const STATUS_RUNNING_TIP: Color = Color::Rgb(240, 80, 80);
+pub const STATUS_RUNNING_TIP: Color = Color::Rgb(255, 158, 100);
 pub const STATUS_FAILED: Color = Color::Rgb(255, 64, 64);
 pub const STATUS_IDLE: Color = Color::Rgb(85, 85, 85);
 
@@ -25,8 +25,22 @@ pub const STATUS_IDLE: Color = Color::Rgb(85, 85, 85);
 pub const POLL_SLEEP: Color = Color::Rgb(85, 85, 85); // LongIdle — inactive_fg
 pub const POLL_SLOW: Color = Color::Rgb(135, 135, 95); // Idle — mem_box
 pub const POLL_SCAN: Color = Color::Rgb(72, 151, 212); // Watching — temp_start
-pub const POLL_FAST: Color = Color::Rgb(240, 80, 80); // Active — cpu_end
+pub const POLL_FAST: Color = Color::Rgb(240, 160, 60); // Active — warm amber
 pub const POLL_COOL: Color = Color::Rgb(95, 135, 135); // Cooldown — cpu_box
+
+/// Linearly interpolate between two RGB colors. `t` is clamped to [0.0, 1.0].
+pub fn lerp_color(from: Color, to: Color, t: f32) -> Color {
+    let t = t.clamp(0.0, 1.0);
+    if let (Color::Rgb(r1, g1, b1), Color::Rgb(r2, g2, b2)) = (from, to) {
+        Color::Rgb(
+            (r1 as f32 + (r2 as f32 - r1 as f32) * t).round() as u8,
+            (g1 as f32 + (g2 as f32 - g1 as f32) * t).round() as u8,
+            (b1 as f32 + (b2 as f32 - b1 as f32) * t).round() as u8,
+        )
+    } else {
+        from
+    }
+}
 
 // Separator color
 pub const SEPARATOR: Color = Color::Rgb(48, 48, 48);
@@ -67,7 +81,7 @@ mod tests {
     fn status_colors_are_correct_rgb() {
         assert_eq!(STATUS_SUCCESS, Color::Rgb(0, 255, 127));
         assert_eq!(STATUS_RUNNING, Color::Rgb(240, 192, 80));
-        assert_eq!(STATUS_RUNNING_TIP, Color::Rgb(240, 80, 80));
+        assert_eq!(STATUS_RUNNING_TIP, Color::Rgb(255, 158, 100));
         assert_eq!(STATUS_FAILED, Color::Rgb(255, 64, 64));
         assert_eq!(STATUS_IDLE, Color::Rgb(85, 85, 85));
     }
@@ -105,7 +119,22 @@ mod tests {
         assert_eq!(POLL_SLEEP, Color::Rgb(85, 85, 85));
         assert_eq!(POLL_SLOW, Color::Rgb(135, 135, 95));
         assert_eq!(POLL_SCAN, Color::Rgb(72, 151, 212));
-        assert_eq!(POLL_FAST, Color::Rgb(240, 80, 80));
+        assert_eq!(POLL_FAST, Color::Rgb(240, 160, 60));
         assert_eq!(POLL_COOL, Color::Rgb(95, 135, 135));
+    }
+
+    #[test]
+    fn lerp_color_endpoints() {
+        let a = Color::Rgb(100, 200, 50);
+        let b = Color::Rgb(200, 100, 250);
+        assert_eq!(lerp_color(a, b, 0.0), a);
+        assert_eq!(lerp_color(a, b, 1.0), b);
+    }
+
+    #[test]
+    fn lerp_color_midpoint() {
+        let a = Color::Rgb(100, 200, 50);
+        let b = Color::Rgb(200, 100, 250);
+        assert_eq!(lerp_color(a, b, 0.5), Color::Rgb(150, 150, 150));
     }
 }

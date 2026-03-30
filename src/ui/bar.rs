@@ -79,18 +79,16 @@ impl Widget for BarWidget<'_> {
         }
         spans.push(Span::raw(format!("{name_display}  ")));
         if !self.dim && self.bar.status == BuildStatus::Running && filled > 0 {
-            let tip_len = filled.min(2);
-            let main_len = filled - tip_len;
-            if main_len > 0 {
-                spans.push(Span::styled(
-                    theme::BAR_FILLED.to_string().repeat(main_len),
-                    Style::default().fg(color),
-                ));
+            let ch = theme::BAR_FILLED.to_string();
+            for i in 0..filled {
+                let t = if filled == 1 {
+                    1.0
+                } else {
+                    i as f32 / (filled - 1) as f32
+                };
+                let c = theme::lerp_color(theme::STATUS_RUNNING, theme::STATUS_RUNNING_TIP, t);
+                spans.push(Span::styled(ch.clone(), Style::default().fg(c)));
             }
-            spans.push(Span::styled(
-                theme::BAR_FILLED.to_string().repeat(tip_len),
-                Style::default().fg(theme::STATUS_RUNNING_TIP),
-            ));
         } else if filled > 0 {
             spans.push(Span::styled(
                 theme::BAR_FILLED.to_string().repeat(filled),
@@ -1036,12 +1034,43 @@ mod tests {
             filled_cells.len() >= 3,
             "need enough filled cells for gradient"
         );
-        // Last 2 filled chars should be tip color (orange)
+        // First cell = STATUS_RUNNING (yellow), last = STATUS_RUNNING_TIP (orange)
+        assert_eq!(filled_cells[0].fg, theme::STATUS_RUNNING);
         let len = filled_cells.len();
         assert_eq!(filled_cells[len - 1].fg, theme::STATUS_RUNNING_TIP);
-        assert_eq!(filled_cells[len - 2].fg, theme::STATUS_RUNNING_TIP);
-        // Earlier chars should be main running color (yellow)
-        assert_eq!(filled_cells[0].fg, theme::STATUS_RUNNING);
+        // Middle cells should be interpolated (not all the same as first)
+        if len > 2 {
+            let mid = &filled_cells[len / 2];
+            assert_ne!(mid.fg, filled_cells[0].fg, "mid should differ from start");
+        }
+    }
+
+    #[test]
+    fn running_bar_gradient_is_smooth() {
+        let bar = make_bar("build", BuildStatus::Running, 15);
+        let widget = BarWidget::new(&bar, 10, false);
+        let area = Rect::new(0, 0, 40, 1);
+        let mut buf = Buffer::empty(area);
+        widget.render(area, &mut buf);
+
+        let bar_str = theme::BAR_FILLED.to_string();
+        let filled_cells: Vec<_> = buf
+            .content()
+            .iter()
+            .filter(|c| c.symbol() == bar_str && c.fg != theme::BAR_EMPTY)
+            .collect();
+        // No adjacent cells should have an RGB jump > 30 per channel
+        for pair in filled_cells.windows(2) {
+            if let (Color::Rgb(r1, g1, b1), Color::Rgb(r2, g2, b2)) = (pair[0].fg, pair[1].fg) {
+                let dr = (r2 as i16 - r1 as i16).unsigned_abs();
+                let dg = (g2 as i16 - g1 as i16).unsigned_abs();
+                let db = (b2 as i16 - b1 as i16).unsigned_abs();
+                assert!(
+                    dr <= 30 && dg <= 30 && db <= 30,
+                    "gradient jump too large: dr={dr} dg={dg} db={db}"
+                );
+            }
+        }
     }
 
     #[test]
