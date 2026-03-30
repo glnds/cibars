@@ -283,27 +283,6 @@ mod tests {
     }
 
     #[test]
-    fn set_status_succeeded_reapplied_keeps_zero_fill() {
-        let mut bar = make_bar();
-        // Simulate reconcile_bars first-poll: direct field assignment
-        bar.status = BuildStatus::Succeeded;
-        // fill stays 0 (no set_status call on first poll for new bars)
-        assert_eq!(bar.fill, 0);
-        // Second poll: set_status re-applies same status
-        bar.set_status(BuildStatus::Succeeded);
-        assert_eq!(bar.fill, 0, "re-applying same status should not bump fill");
-    }
-
-    #[test]
-    fn set_status_failed_reapplied_keeps_zero_fill() {
-        let mut bar = make_bar();
-        bar.status = BuildStatus::Failed;
-        assert_eq!(bar.fill, 0);
-        bar.set_status(BuildStatus::Failed);
-        assert_eq!(bar.fill, 0, "re-applying same status should not bump fill");
-    }
-
-    #[test]
     fn set_status_failed_idempotent_preserves_fill() {
         let mut bar = make_bar();
         bar.set_status(BuildStatus::Running);

@@ -291,7 +291,7 @@ fn reconcile_bars(
             bar.last_finished = *finished;
         } else {
             let mut bar = Bar::new(name.clone());
-            bar.status = *status;
+            bar.set_status(*status);
             bar.last_finished = *finished;
             bars.push(bar);
         }
@@ -1055,7 +1055,7 @@ mod tests {
     }
 
     #[test]
-    fn reconcile_bars_new_bar_with_terminal_status_has_zero_fill() {
+    fn reconcile_bars_new_bar_with_terminal_status_gets_minimum_fill() {
         let mut bars: Vec<Bar> = vec![];
         let updates = vec![
             ("Source".to_string(), BuildStatus::Succeeded, None),
@@ -1066,15 +1066,15 @@ mod tests {
         let source = bars.iter().find(|b| b.name == "Source").unwrap();
         assert_eq!(source.status, BuildStatus::Succeeded);
         assert_eq!(
-            source.fill, 0,
-            "new bar should start with fill=0, not minimum-fill=1"
+            source.fill, 1,
+            "new bar with terminal status should get minimum fill=1"
         );
 
         let build = bars.iter().find(|b| b.name == "Build").unwrap();
         assert_eq!(build.status, BuildStatus::Failed);
         assert_eq!(
-            build.fill, 0,
-            "new bar should start with fill=0, not minimum-fill=1"
+            build.fill, 1,
+            "new bar with terminal status should get minimum fill=1"
         );
     }
 
@@ -1440,5 +1440,66 @@ mod tests {
         // Should have recovered
         assert_eq!(a.aws_health, SourceHealth::Healthy);
         assert_eq!(a.pipeline_groups.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn poll_first_sees_terminal_stage_gets_minimum_fill() {
+        // Pipeline with Source already Succeeded and Build already Failed
+        let app = Arc::new(Mutex::new(App::new()));
+        let pipes = MockPipelineClient {
+            pipelines: vec![mock_pipeline(
+                "my-pipe",
+                BuildStatus::Succeeded,
+                vec![
+                    mock_stage("Source", vec![("checkout", BuildStatus::Succeeded)]),
+                    mock_stage("Build", vec![("compile", BuildStatus::Failed)]),
+                ],
+            )],
+        };
+        // GH workflow with a job already Succeeded
+        let actions = MockActionsClient {
+            runs: vec![WorkflowRunInfo {
+                workflow_name: "CI".to_string(),
+                run_id: 42,
+                status: BuildStatus::Succeeded,
+                jobs: vec![JobInfo {
+                    name: "lint".to_string(),
+                    status: BuildStatus::Succeeded,
+                    completed_at: None,
+                }],
+            }],
+        };
+        poll_once(&app, &pipes, &actions).await;
+
+        let a = app.lock().unwrap();
+
+        // Pipeline stages should have minimum fill=1
+        let source = &a.pipeline_groups[0].stages[0];
+        assert_eq!(source.name, "Source");
+        assert_eq!(source.status, BuildStatus::Succeeded);
+        assert!(
+            source.fill >= 1,
+            "terminal stage on first poll must have fill >= 1, got {}",
+            source.fill
+        );
+
+        let build = &a.pipeline_groups[0].stages[1];
+        assert_eq!(build.name, "Build");
+        assert_eq!(build.status, BuildStatus::Failed);
+        assert!(
+            build.fill >= 1,
+            "terminal stage on first poll must have fill >= 1, got {}",
+            build.fill
+        );
+
+        // GH Actions job should also have minimum fill=1
+        let job = &a.workflow_groups[0].jobs[0];
+        assert_eq!(job.name, "lint");
+        assert_eq!(job.status, BuildStatus::Succeeded);
+        assert!(
+            job.fill >= 1,
+            "terminal job on first poll must have fill >= 1, got {}",
+            job.fill
+        );
     }
 }
