@@ -345,6 +345,99 @@ mod tests {
     use super::*;
     use std::sync::{Arc, Mutex};
 
+    /// E2E: simulates the pre-push hook shell command sending SIGUSR1 via PID file,
+    /// then verifies the full chain: signal received → scheduler boosts → Watching
+    /// state + push_signal_at set.
+    #[tokio::test]
+    async fn e2e_hook_signal_triggers_fast_polling() {
+        use tokio::signal::unix::{signal, SignalKind};
+
+        // 1. Write PID file (as cibars does on startup)
+        let dir = tempfile::tempdir().unwrap();
+        let pid_path = dir.path().join("cibars.pid");
+        write_pid_file(&pid_path).unwrap();
+
+        // 2. Register SIGUSR1 handler (as cibars does on startup)
+        let mut sigusr1 = signal(SignalKind::user_defined1()).unwrap();
+
+        // 3. Execute the exact hook command that pre-push runs
+        let hook_cmd = format!(
+            "kill -USR1 $(cat {} 2>/dev/null) 2>/dev/null || true",
+            pid_path.display()
+        );
+        std::process::Command::new("sh")
+            .arg("-c")
+            .arg(&hook_cmd)
+            .status()
+            .unwrap();
+
+        // 4. Wait for signal (should arrive within 1s if delivered)
+        let received =
+            tokio::time::timeout(std::time::Duration::from_millis(500), sigusr1.recv()).await;
+        assert!(
+            received.is_ok(),
+            "SIGUSR1 not received — hook failed to signal"
+        );
+
+        // 5. Handle the interrupt (as poll orchestrator does)
+        let app = Arc::new(Mutex::new(App::new()));
+        let mut scheduler = PollScheduler::new();
+        handle_poll_interrupt(&app, &mut scheduler, InterruptSource::Sigusr1);
+
+        // 6. Verify end state: fast polling + visual feedback
+        let a = app.lock().unwrap();
+        assert_eq!(a.poll_state, PollState::Watching);
+        assert!(a.push_signal_at.is_some());
+    }
+
+    /// E2E: hook command is harmless when PID file doesn't exist (graceful
+    /// degradation for projects without a running cibars instance).
+    #[tokio::test]
+    async fn e2e_hook_noop_without_pid_file() {
+        let cmd = "kill -USR1 $(cat /nonexistent/cibars.pid 2>/dev/null) 2>/dev/null || true";
+        let status = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(cmd)
+            .status()
+            .unwrap();
+        assert!(status.success(), "hook should exit 0 even without PID file");
+    }
+
+    /// E2E: hook targeting a different project's PID file does NOT signal this
+    /// process. Verifies per-project isolation with multiple cibars instances.
+    #[tokio::test]
+    async fn e2e_hook_wrong_pid_does_not_signal() {
+        use tokio::signal::unix::{signal, SignalKind};
+
+        let mut sigusr1 = signal(SignalKind::user_defined1()).unwrap();
+
+        // Drain any stale signals from prior tests (tokio handlers are global)
+        let _ = tokio::time::timeout(std::time::Duration::from_millis(50), sigusr1.recv()).await;
+
+        // Write a PID file pointing to a non-existent process
+        let dir = tempfile::tempdir().unwrap();
+        let pid_path = dir.path().join("other_project.pid");
+        std::fs::write(&pid_path, "999999999").unwrap();
+
+        let hook_cmd = format!(
+            "kill -USR1 $(cat {} 2>/dev/null) 2>/dev/null || true",
+            pid_path.display()
+        );
+        std::process::Command::new("sh")
+            .arg("-c")
+            .arg(&hook_cmd)
+            .status()
+            .unwrap();
+
+        // Signal should NOT arrive (wrong PID)
+        let received =
+            tokio::time::timeout(std::time::Duration::from_millis(200), sigusr1.recv()).await;
+        assert!(
+            received.is_err(),
+            "should NOT receive signal from wrong PID"
+        );
+    }
+
     #[test]
     fn write_pid_file_creates_file_with_pid() {
         let dir = tempfile::tempdir().unwrap();
