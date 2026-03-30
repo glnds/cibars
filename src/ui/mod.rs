@@ -136,7 +136,7 @@ fn handle_hook_install(app: &Arc<Mutex<App>>) -> bool {
         if let Ok(mut a) = app.lock() {
             match result {
                 Ok(()) => {
-                    a.hook_status = HookStatus::Installed;
+                    a.hook_status = crate::config::check_pre_push_hook(&cwd);
                     tracing::info!("pre-push hook installed");
                 }
                 Err(e) => {
@@ -1013,7 +1013,7 @@ mod tests {
     #[test]
     fn handle_hook_install_skips_when_already_installed() {
         let app = Arc::new(Mutex::new(App::new()));
-        app.lock().unwrap().hook_status = HookStatus::Installed;
+        app.lock().unwrap().hook_status = HookStatus::Installed(crate::config::HookLocation::Local);
         assert!(!handle_hook_install(&app));
     }
 
@@ -1063,7 +1063,10 @@ mod tests {
 
         let attempted = handle_hook_install(&app);
         assert!(attempted);
-        assert_eq!(app.lock().unwrap().hook_status, HookStatus::Installed);
+        assert!(matches!(
+            app.lock().unwrap().hook_status,
+            HookStatus::Installed(_)
+        ));
 
         std::env::set_current_dir(original_dir).unwrap();
     }

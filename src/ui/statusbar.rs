@@ -88,10 +88,15 @@ impl Widget for StatusBar<'_> {
             ));
         } else {
             match self.hook_status {
-                HookStatus::Installed => {
+                HookStatus::Installed(loc) => {
                     spans.push(dim_sep.clone());
+                    let label = match loc {
+                        crate::config::HookLocation::Local => "\u{2713}hook",
+                        crate::config::HookLocation::Global => "\u{2713}g-hook",
+                        crate::config::HookLocation::GlobalDelegated => "\u{2713}gd-hook",
+                    };
                     spans.push(Span::styled(
-                        "\u{2713}hook",
+                        label,
                         Style::default().fg(theme::STATUS_SUCCESS),
                     ));
                 }
@@ -146,12 +151,18 @@ impl Widget for StatusBar<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::HookLocation;
     use ratatui::buffer::Buffer;
     use ratatui::layout::Rect;
 
     /// Extract content from row 1 (inner area of bordered block).
     fn render_bar(state: &PollState, tick: usize, cooldown: Option<Duration>) -> String {
-        render_bar_with_hook(state, tick, cooldown, &HookStatus::Installed)
+        render_bar_with_hook(
+            state,
+            tick,
+            cooldown,
+            &HookStatus::Installed(HookLocation::Local),
+        )
     }
 
     fn render_bar_with_hook(
@@ -298,7 +309,12 @@ mod tests {
 
     #[test]
     fn no_hook_hint_when_installed() {
-        let content = render_bar_with_hook(&PollState::Idle, 0, None, &HookStatus::Installed);
+        let content = render_bar_with_hook(
+            &PollState::Idle,
+            0,
+            None,
+            &HookStatus::Installed(HookLocation::Local),
+        );
         assert!(!content.contains("h=install"), "got: {content}");
     }
 
@@ -309,7 +325,7 @@ mod tests {
             tick: 0,
             cooldown_remaining: None,
             warnings: &[],
-            hook_status: &HookStatus::Installed,
+            hook_status: &HookStatus::Installed(HookLocation::Local),
             boost_pressed_at: None,
             push_signal_at: None,
             linkage_broken: false,
@@ -333,7 +349,7 @@ mod tests {
             tick: 0,
             cooldown_remaining: None,
             warnings: &[],
-            hook_status: &HookStatus::Installed,
+            hook_status: &HookStatus::Installed(HookLocation::Local),
             boost_pressed_at: Some(Instant::now()),
             push_signal_at: None,
             linkage_broken: false,
@@ -368,7 +384,7 @@ mod tests {
             tick: 0,
             cooldown_remaining: None,
             warnings: &[],
-            hook_status: &HookStatus::Installed,
+            hook_status: &HookStatus::Installed(HookLocation::Local),
             boost_pressed_at: Some(expired),
             push_signal_at: None,
             linkage_broken: false,
@@ -399,7 +415,7 @@ mod tests {
             tick: 0,
             cooldown_remaining: None,
             warnings: &[],
-            hook_status: &HookStatus::Installed,
+            hook_status: &HookStatus::Installed(HookLocation::Local),
             boost_pressed_at: None,
             push_signal_at: None,
             linkage_broken: false,
@@ -431,7 +447,7 @@ mod tests {
             tick: 0,
             cooldown_remaining: None,
             warnings: &[],
-            hook_status: &HookStatus::Installed,
+            hook_status: &HookStatus::Installed(HookLocation::Local),
             boost_pressed_at: None,
             push_signal_at: None,
             linkage_broken,
@@ -474,7 +490,7 @@ mod tests {
             tick,
             cooldown_remaining: cooldown,
             warnings: &[],
-            hook_status: &HookStatus::Installed,
+            hook_status: &HookStatus::Installed(HookLocation::Local),
             boost_pressed_at: None,
             push_signal_at: None,
             linkage_broken: false,
@@ -541,7 +557,7 @@ mod tests {
             tick: 0,
             cooldown_remaining: None,
             warnings: &[],
-            hook_status: &HookStatus::Installed,
+            hook_status: &HookStatus::Installed(HookLocation::Local),
             boost_pressed_at: None,
             push_signal_at: None,
             linkage_broken: false,
@@ -565,7 +581,7 @@ mod tests {
             tick: 0,
             cooldown_remaining: None,
             warnings: &[],
-            hook_status: &HookStatus::Installed,
+            hook_status: &HookStatus::Installed(HookLocation::Local),
             boost_pressed_at: None,
             push_signal_at: None,
             linkage_broken: false,
@@ -610,8 +626,13 @@ mod tests {
     #[test]
     fn renders_warnings() {
         let warnings = vec!["AWS: timeout".to_string()];
-        let content =
-            render_bar_with_warnings(&PollState::Idle, 0, None, &HookStatus::Installed, &warnings);
+        let content = render_bar_with_warnings(
+            &PollState::Idle,
+            0,
+            None,
+            &HookStatus::Installed(HookLocation::Local),
+            &warnings,
+        );
         assert!(content.contains("AWS: timeout"), "got: {content}");
     }
 
@@ -633,7 +654,7 @@ mod tests {
             tick: 0,
             cooldown_remaining: None,
             warnings: &[],
-            hook_status: &HookStatus::Installed,
+            hook_status: &HookStatus::Installed(HookLocation::Local),
             boost_pressed_at: None,
             push_signal_at: Some(Instant::now()),
             linkage_broken: false,
@@ -657,7 +678,7 @@ mod tests {
             tick: 0,
             cooldown_remaining: None,
             warnings: &[],
-            hook_status: &HookStatus::Installed,
+            hook_status: &HookStatus::Installed(HookLocation::Local),
             boost_pressed_at: None,
             push_signal_at: Some(expired),
             linkage_broken: false,
@@ -680,7 +701,7 @@ mod tests {
             tick: 0,
             cooldown_remaining: None,
             warnings: &[],
-            hook_status: &HookStatus::Installed,
+            hook_status: &HookStatus::Installed(HookLocation::Local),
             boost_pressed_at: None,
             push_signal_at: Some(Instant::now()),
             linkage_broken: false,
@@ -702,7 +723,7 @@ mod tests {
             tick: 0,
             cooldown_remaining: None,
             warnings: &[],
-            hook_status: &HookStatus::Installed,
+            hook_status: &HookStatus::Installed(HookLocation::Local),
             boost_pressed_at: None,
             push_signal_at: None,
             linkage_broken: false,

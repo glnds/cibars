@@ -157,10 +157,20 @@ fn resolve_github_token() -> Result<String> {
     Ok(token)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HookLocation {
+    /// Installed in .git/hooks/ (no core.hooksPath override).
+    Local,
+    /// Installed in global hooks dir (core.hooksPath), no delegation.
+    Global,
+    /// Installed in global hooks dir with delegation to local hooks.
+    GlobalDelegated,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HookStatus {
     /// Snippet found in effective hooks dir — will actually run.
-    Installed,
+    Installed(HookLocation),
     /// Snippet in .git/hooks/ but core.hooksPath overrides it.
     Shadowed,
     /// Effective hooks dir has a pre-push but no cibars snippet.
@@ -239,7 +249,14 @@ pub fn check_pre_push_hook(dir: &Path) -> HookStatus {
     // Check effective hooks dir first
     if let Ok(contents) = std::fs::read_to_string(&effective_hook) {
         if has_cibars_hook(&contents) {
-            return HookStatus::Installed;
+            let location = if !is_global {
+                HookLocation::Local
+            } else if has_delegation(&contents) {
+                HookLocation::GlobalDelegated
+            } else {
+                HookLocation::Global
+            };
+            return HookStatus::Installed(location);
         }
         // Effective hook exists but no cibars snippet
         return HookStatus::Incomplete;
@@ -695,7 +712,10 @@ aws_profile = "staging"
             format!("#!/bin/sh{HOOK_SNIPPET}"),
         )
         .unwrap();
-        assert_eq!(check_pre_push_hook(dir.path()), HookStatus::Installed);
+        assert_eq!(
+            check_pre_push_hook(dir.path()),
+            HookStatus::Installed(HookLocation::Local)
+        );
     }
 
     #[test]
@@ -708,7 +728,10 @@ aws_profile = "staging"
             "#!/bin/sh\npkill -USR1 cibars 2>/dev/null\n",
         )
         .unwrap();
-        assert_eq!(check_pre_push_hook(dir.path()), HookStatus::Installed);
+        assert_eq!(
+            check_pre_push_hook(dir.path()),
+            HookStatus::Installed(HookLocation::Local)
+        );
     }
 
     #[test]
@@ -739,7 +762,27 @@ aws_profile = "staging"
             format!("#!/bin/sh{HOOK_SNIPPET}"),
         )
         .unwrap();
-        assert_eq!(check_pre_push_hook(dir.path()), HookStatus::Installed);
+        assert_eq!(
+            check_pre_push_hook(dir.path()),
+            HookStatus::Installed(HookLocation::Global)
+        );
+    }
+
+    #[test]
+    fn check_hook_installed_in_global_dir_with_delegation() {
+        let dir = tempfile::tempdir().unwrap();
+        let global_hooks = dir.path().join("global-hooks");
+        std::fs::create_dir_all(&global_hooks).unwrap();
+        init_git_repo_with_hooks_path(dir.path(), &global_hooks);
+        std::fs::write(
+            global_hooks.join("pre-push"),
+            format!("#!/bin/sh{DELEGATION_SNIPPET}{HOOK_SNIPPET}"),
+        )
+        .unwrap();
+        assert_eq!(
+            check_pre_push_hook(dir.path()),
+            HookStatus::Installed(HookLocation::GlobalDelegated)
+        );
     }
 
     #[test]
