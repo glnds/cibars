@@ -95,6 +95,13 @@ impl Widget for StatusBar<'_> {
                         Style::default().fg(theme::STATUS_SUCCESS),
                     ));
                 }
+                HookStatus::Shadowed => {
+                    spans.push(dim_sep.clone());
+                    spans.push(Span::styled(
+                        "\u{26A0}hook:override h=fix",
+                        Style::default().fg(theme::STATUS_RUNNING),
+                    ));
+                }
                 HookStatus::Missing | HookStatus::Incomplete => {
                     spans.push(dim_sep.clone());
                     spans.push(Span::styled(

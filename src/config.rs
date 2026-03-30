@@ -159,9 +159,15 @@ fn resolve_github_token() -> Result<String> {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HookStatus {
+    /// Snippet found in effective hooks dir — will actually run.
     Installed,
+    /// Snippet in .git/hooks/ but core.hooksPath overrides it.
+    Shadowed,
+    /// Effective hooks dir has a pre-push but no cibars snippet.
     Incomplete,
+    /// No pre-push hook in effective hooks dir.
     Missing,
+    /// Not a git repository.
     NoGitDir,
 }
 
@@ -175,51 +181,115 @@ pub fn pid_file_for(cwd: &Path) -> Result<PathBuf> {
     Ok(pids_dir.join(format!("{sanitized}.pid")))
 }
 
-pub fn check_pre_push_hook(dir: &Path, pid_path: &Path) -> HookStatus {
+/// Dynamic hook snippet — derives PID path at runtime using `pwd`.
+/// Works from any directory, targets the correct cibars instance.
+const HOOK_SNIPPET: &str = "\n# cibars: boost polling on push\n\
+    _cibars_pid=\"$HOME/.cibars/pids/$(pwd | tr '/' '_').pid\"\n\
+    kill -USR1 $(cat \"$_cibars_pid\" 2>/dev/null) 2>/dev/null || true\n";
+
+/// Delegation block: calls repo-local pre-push if it exists.
+/// Added when core.hooksPath overrides .git/hooks/.
+const DELEGATION_SNIPPET: &str = "\n# --- cibars: delegate to repo-local hook ---\n\
+    _local=\"$(git rev-parse --git-dir)/hooks/pre-push\"\n\
+    if [ -x \"$_local\" ]; then\n    \
+    \"$_local\" \"$@\" || exit $?\n\
+    fi\n";
+
+fn has_cibars_hook(contents: &str) -> bool {
+    contents.contains("USR1") && contents.contains("cibars")
+}
+
+fn has_delegation(contents: &str) -> bool {
+    contents.contains("rev-parse --git-dir")
+        && contents.contains("hooks/pre-push")
+        && contents.contains("$_local")
+}
+
+/// Resolve effective hooks directory, respecting core.hooksPath.
+pub fn effective_hooks_dir(repo: &Path) -> PathBuf {
+    let output = Command::new("git")
+        .args(["-C", &repo.to_string_lossy(), "config", "core.hooksPath"])
+        .output();
+    if let Ok(out) = output {
+        if out.status.success() {
+            let raw = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            if !raw.is_empty() {
+                let path = PathBuf::from(&raw);
+                if path.is_absolute() {
+                    return path;
+                }
+                // Relative to repo root
+                return repo.join(path);
+            }
+        }
+    }
+    repo.join(".git/hooks")
+}
+
+pub fn check_pre_push_hook(dir: &Path) -> HookStatus {
     let git_dir = dir.join(".git");
     if !git_dir.is_dir() {
         return HookStatus::NoGitDir;
     }
-    let hook_path = git_dir.join("hooks/pre-push");
-    let pid_str = pid_path.display().to_string();
-    match std::fs::read_to_string(&hook_path) {
-        Ok(contents) => {
-            if contents.contains(&pid_str) {
-                HookStatus::Installed
-            } else {
-                HookStatus::Incomplete
+    let effective = effective_hooks_dir(dir);
+    let effective_hook = effective.join("pre-push");
+    let local_hook = git_dir.join("hooks/pre-push");
+    let is_global = effective != git_dir.join("hooks");
+
+    // Check effective hooks dir first
+    if let Ok(contents) = std::fs::read_to_string(&effective_hook) {
+        if has_cibars_hook(&contents) {
+            return HookStatus::Installed;
+        }
+        // Effective hook exists but no cibars snippet
+        return HookStatus::Incomplete;
+    }
+
+    // Effective dir has no pre-push. Check if local hook is shadowed.
+    if is_global {
+        if let Ok(contents) = std::fs::read_to_string(&local_hook) {
+            if has_cibars_hook(&contents) {
+                return HookStatus::Shadowed;
             }
         }
-        Err(_) => HookStatus::Missing,
+        // Global override active, no hook anywhere → Missing
+        // (but effective dir is still the right place to install)
+        return HookStatus::Missing;
     }
+
+    HookStatus::Missing
 }
 
-fn hook_snippet(pid_path: &Path) -> String {
-    format!(
-        "\n# cibars: boost polling on push\nkill -USR1 $(cat {} 2>/dev/null) 2>/dev/null || true\n",
-        pid_path.display()
-    )
-}
-
-pub fn install_pre_push_hook(dir: &Path, pid_path: &Path) -> Result<()> {
-    let hook_path = dir.join(".git/hooks/pre-push");
-    let hooks_dir = dir.join(".git/hooks");
-    std::fs::create_dir_all(&hooks_dir)
-        .with_context(|| format!("cannot create {}", hooks_dir.display()))?;
+pub fn install_pre_push_hook(dir: &Path) -> Result<()> {
+    let effective = effective_hooks_dir(dir);
+    let hook_path = effective.join("pre-push");
+    std::fs::create_dir_all(&effective)
+        .with_context(|| format!("cannot create {}", effective.display()))?;
 
     let existing = std::fs::read_to_string(&hook_path).unwrap_or_default();
-    let snippet = hook_snippet(pid_path);
-    let pid_str = pid_path.display().to_string();
 
-    // Idempotent: skip if already contains this instance's PID path
-    if existing.contains(&pid_str) {
+    // Idempotent: skip if already contains cibars hook
+    if has_cibars_hook(&existing) {
         return Ok(());
     }
 
+    let mut additions = String::new();
+
+    // Add delegation if core.hooksPath is active and local hook exists
+    let is_global = effective != dir.join(".git/hooks");
+    if is_global && !has_delegation(&existing) {
+        let local_hook = dir.join(".git/hooks/pre-push");
+        if local_hook.is_file() {
+            additions.push_str(DELEGATION_SNIPPET);
+        }
+    }
+
+    additions.push_str(HOOK_SNIPPET);
+
     let content = if existing.is_empty() {
-        format!("#!/bin/sh{snippet}")
+        format!("#!/bin/sh{additions}")
     } else {
-        format!("{existing}{snippet}")
+        format!("{existing}{additions}")
     };
 
     std::fs::write(&hook_path, content)
@@ -432,12 +502,6 @@ aws_profile = "staging"
         assert!(result.is_err());
     }
 
-    use std::path::PathBuf;
-
-    fn test_pid_path() -> PathBuf {
-        PathBuf::from("/home/user/.cibars/pids/_Users_test_myproject.pid")
-    }
-
     // --- pid_file_for tests ---
 
     #[test]
@@ -477,91 +541,215 @@ aws_profile = "staging"
     // --- hook snippet tests ---
 
     #[test]
-    fn hook_snippet_contains_pid_path() {
-        let pid = test_pid_path();
-        let snippet = hook_snippet(&pid);
+    fn hook_snippet_uses_dynamic_pwd() {
         assert!(
-            snippet.contains(&pid.display().to_string()),
-            "snippet should contain PID path: {snippet}"
+            HOOK_SNIPPET.contains("$(pwd | tr '/' '_')"),
+            "got: {HOOK_SNIPPET}"
         );
     }
 
     #[test]
     fn hook_snippet_contains_kill_usr1() {
-        let snippet = hook_snippet(&test_pid_path());
-        assert!(snippet.contains("kill -USR1"), "got: {snippet}");
+        assert!(HOOK_SNIPPET.contains("kill -USR1"), "got: {HOOK_SNIPPET}");
+    }
+
+    #[test]
+    fn hook_snippet_references_pids_dir() {
+        assert!(
+            HOOK_SNIPPET.contains(".cibars/pids/"),
+            "got: {HOOK_SNIPPET}"
+        );
+    }
+
+    // --- has_cibars_hook / has_delegation helpers ---
+
+    #[test]
+    fn has_cibars_hook_recognizes_dynamic_snippet() {
+        assert!(has_cibars_hook(HOOK_SNIPPET));
+    }
+
+    #[test]
+    fn has_cibars_hook_recognizes_legacy_pkill() {
+        assert!(has_cibars_hook("pkill -USR1 cibars 2>/dev/null"));
+    }
+
+    #[test]
+    fn has_cibars_hook_rejects_unrelated() {
+        assert!(!has_cibars_hook("#!/bin/sh\necho hello\n"));
+    }
+
+    #[test]
+    fn has_delegation_recognizes_snippet() {
+        assert!(has_delegation(DELEGATION_SNIPPET));
+    }
+
+    #[test]
+    fn has_delegation_rejects_unrelated() {
+        assert!(!has_delegation("#!/bin/sh\necho hello\n"));
+    }
+
+    // --- effective_hooks_dir tests ---
+
+    /// Helper: init an isolated git repo (blocks global core.hooksPath leaking in).
+    fn init_git_repo(dir: &Path) {
+        Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(dir)
+            .status()
+            .unwrap();
+        // Override any global core.hooksPath so tests are isolated
+        Command::new("git")
+            .args([
+                "-C",
+                &dir.to_string_lossy(),
+                "config",
+                "--local",
+                "--unset",
+                "core.hooksPath",
+            ])
+            .status()
+            .ok(); // may fail if not set locally, that's fine
+                   // Set explicitly to ensure isolation from global config
+        Command::new("git")
+            .args([
+                "-C",
+                &dir.to_string_lossy(),
+                "config",
+                "--local",
+                "core.hooksPath",
+                &dir.join(".git/hooks").to_string_lossy(),
+            ])
+            .status()
+            .unwrap();
+    }
+
+    /// Helper: init a git repo with a specific core.hooksPath override.
+    fn init_git_repo_with_hooks_path(dir: &Path, hooks_path: &Path) {
+        Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(dir)
+            .status()
+            .unwrap();
+        Command::new("git")
+            .args([
+                "-C",
+                &dir.to_string_lossy(),
+                "config",
+                "--local",
+                "core.hooksPath",
+                &hooks_path.to_string_lossy(),
+            ])
+            .status()
+            .unwrap();
+    }
+
+    #[test]
+    fn effective_hooks_dir_defaults_to_local() {
+        let dir = tempfile::tempdir().unwrap();
+        init_git_repo(dir.path());
+        let hooks = effective_hooks_dir(dir.path());
+        assert_eq!(hooks, dir.path().join(".git/hooks"));
+    }
+
+    #[test]
+    fn effective_hooks_dir_respects_core_hooks_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let global_hooks = dir.path().join("global-hooks");
+        std::fs::create_dir_all(&global_hooks).unwrap();
+        init_git_repo_with_hooks_path(dir.path(), &global_hooks);
+        let hooks = effective_hooks_dir(dir.path());
+        assert_eq!(hooks, global_hooks);
     }
 
     // --- check_pre_push_hook tests ---
 
     #[test]
-    fn hook_status_missing_when_no_git_dir() {
+    fn check_hook_no_git_dir() {
         let dir = tempfile::tempdir().unwrap();
-        assert_eq!(
-            check_pre_push_hook(dir.path(), &test_pid_path()),
-            HookStatus::NoGitDir
-        );
+        assert_eq!(check_pre_push_hook(dir.path()), HookStatus::NoGitDir);
     }
 
     #[test]
-    fn hook_status_missing_when_no_hook_file() {
+    fn check_hook_missing_when_no_hook_file() {
         let dir = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(dir.path().join(".git/hooks")).unwrap();
-        assert_eq!(
-            check_pre_push_hook(dir.path(), &test_pid_path()),
-            HookStatus::Missing
-        );
+        init_git_repo(dir.path());
+        assert_eq!(check_pre_push_hook(dir.path()), HookStatus::Missing);
     }
 
     #[test]
-    fn hook_status_incomplete_when_no_boost_command() {
+    fn check_hook_incomplete_when_no_cibars_snippet() {
         let dir = tempfile::tempdir().unwrap();
+        init_git_repo(dir.path());
         let hooks_dir = dir.path().join(".git/hooks");
-        std::fs::create_dir_all(&hooks_dir).unwrap();
         std::fs::write(hooks_dir.join("pre-push"), "#!/bin/sh\necho pushing\n").unwrap();
-        assert_eq!(
-            check_pre_push_hook(dir.path(), &test_pid_path()),
-            HookStatus::Incomplete
-        );
+        assert_eq!(check_pre_push_hook(dir.path()), HookStatus::Incomplete);
     }
 
     #[test]
-    fn hook_status_installed_when_pid_path_present() {
+    fn check_hook_installed_with_dynamic_snippet() {
         let dir = tempfile::tempdir().unwrap();
+        init_git_repo(dir.path());
         let hooks_dir = dir.path().join(".git/hooks");
-        let pid = test_pid_path();
-        std::fs::create_dir_all(&hooks_dir).unwrap();
-        std::fs::write(hooks_dir.join("pre-push"), hook_snippet(&pid)).unwrap();
-        assert_eq!(check_pre_push_hook(dir.path(), &pid), HookStatus::Installed);
+        std::fs::write(
+            hooks_dir.join("pre-push"),
+            format!("#!/bin/sh{HOOK_SNIPPET}"),
+        )
+        .unwrap();
+        assert_eq!(check_pre_push_hook(dir.path()), HookStatus::Installed);
     }
 
     #[test]
-    fn hook_status_incomplete_with_wrong_pid_path() {
+    fn check_hook_installed_with_legacy_pkill() {
         let dir = tempfile::tempdir().unwrap();
+        init_git_repo(dir.path());
         let hooks_dir = dir.path().join(".git/hooks");
-        std::fs::create_dir_all(&hooks_dir).unwrap();
-        let other_pid = PathBuf::from("/home/user/.cibars/pids/_other_project.pid");
-        std::fs::write(hooks_dir.join("pre-push"), hook_snippet(&other_pid)).unwrap();
-        assert_eq!(
-            check_pre_push_hook(dir.path(), &test_pid_path()),
-            HookStatus::Incomplete
-        );
-    }
-
-    #[test]
-    fn hook_status_incomplete_with_legacy_pkill() {
-        let dir = tempfile::tempdir().unwrap();
-        let hooks_dir = dir.path().join(".git/hooks");
-        std::fs::create_dir_all(&hooks_dir).unwrap();
         std::fs::write(
             hooks_dir.join("pre-push"),
             "#!/bin/sh\npkill -USR1 cibars 2>/dev/null\n",
         )
         .unwrap();
-        assert_eq!(
-            check_pre_push_hook(dir.path(), &test_pid_path()),
-            HookStatus::Incomplete
-        );
+        assert_eq!(check_pre_push_hook(dir.path()), HookStatus::Installed);
+    }
+
+    #[test]
+    fn check_hook_shadowed_when_local_has_snippet_but_global_overrides() {
+        let dir = tempfile::tempdir().unwrap();
+        let global_hooks = dir.path().join("global-hooks");
+        std::fs::create_dir_all(&global_hooks).unwrap();
+        init_git_repo_with_hooks_path(dir.path(), &global_hooks);
+        // Local hook has cibars snippet but is shadowed
+        let local_hooks = dir.path().join(".git/hooks");
+        std::fs::write(
+            local_hooks.join("pre-push"),
+            format!("#!/bin/sh{HOOK_SNIPPET}"),
+        )
+        .unwrap();
+        assert_eq!(check_pre_push_hook(dir.path()), HookStatus::Shadowed);
+    }
+
+    #[test]
+    fn check_hook_installed_in_global_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let global_hooks = dir.path().join("global-hooks");
+        std::fs::create_dir_all(&global_hooks).unwrap();
+        init_git_repo_with_hooks_path(dir.path(), &global_hooks);
+        // Snippet in global dir — this is what matters
+        std::fs::write(
+            global_hooks.join("pre-push"),
+            format!("#!/bin/sh{HOOK_SNIPPET}"),
+        )
+        .unwrap();
+        assert_eq!(check_pre_push_hook(dir.path()), HookStatus::Installed);
+    }
+
+    #[test]
+    fn check_hook_missing_with_global_override_no_hooks() {
+        let dir = tempfile::tempdir().unwrap();
+        let global_hooks = dir.path().join("global-hooks");
+        std::fs::create_dir_all(&global_hooks).unwrap();
+        init_git_repo_with_hooks_path(dir.path(), &global_hooks);
+        // No hook anywhere
+        assert_eq!(check_pre_push_hook(dir.path()), HookStatus::Missing);
     }
 
     // --- install_pre_push_hook tests ---
@@ -569,56 +757,123 @@ aws_profile = "staging"
     #[test]
     fn install_hook_creates_new_file() {
         let dir = tempfile::tempdir().unwrap();
+        init_git_repo(dir.path());
+        install_pre_push_hook(dir.path()).unwrap();
         let hooks_dir = dir.path().join(".git/hooks");
-        let pid = test_pid_path();
-        std::fs::create_dir_all(&hooks_dir).unwrap();
-        install_pre_push_hook(dir.path(), &pid).unwrap();
         let content = std::fs::read_to_string(hooks_dir.join("pre-push")).unwrap();
         assert!(content.contains("#!/bin/sh"));
-        assert!(content.contains(&pid.display().to_string()));
+        assert!(content.contains("cibars"));
+        assert!(content.contains("$(pwd | tr"));
     }
 
     #[test]
     fn install_hook_appends_to_existing() {
         let dir = tempfile::tempdir().unwrap();
+        init_git_repo(dir.path());
         let hooks_dir = dir.path().join(".git/hooks");
-        let pid = test_pid_path();
-        std::fs::create_dir_all(&hooks_dir).unwrap();
         std::fs::write(hooks_dir.join("pre-push"), "#!/bin/sh\necho pushing\n").unwrap();
-        install_pre_push_hook(dir.path(), &pid).unwrap();
+        install_pre_push_hook(dir.path()).unwrap();
         let content = std::fs::read_to_string(hooks_dir.join("pre-push")).unwrap();
         assert!(content.contains("echo pushing"));
-        assert!(content.contains(&pid.display().to_string()));
+        assert!(content.contains("cibars"));
     }
 
     #[test]
     fn install_hook_is_idempotent() {
         let dir = tempfile::tempdir().unwrap();
+        init_git_repo(dir.path());
+        install_pre_push_hook(dir.path()).unwrap();
+        install_pre_push_hook(dir.path()).unwrap();
         let hooks_dir = dir.path().join(".git/hooks");
-        let pid = test_pid_path();
-        std::fs::create_dir_all(&hooks_dir).unwrap();
-        install_pre_push_hook(dir.path(), &pid).unwrap();
-        install_pre_push_hook(dir.path(), &pid).unwrap();
         let content = std::fs::read_to_string(hooks_dir.join("pre-push")).unwrap();
-        let pid_str = pid.display().to_string();
-        assert_eq!(content.matches(&pid_str).count(), 1);
+        assert_eq!(
+            content.matches("cibars: boost").count(),
+            1,
+            "should not duplicate"
+        );
     }
 
     #[test]
-    fn install_hook_appends_alongside_legacy_pkill() {
+    fn install_hook_in_global_dir_when_core_hooks_path() {
         let dir = tempfile::tempdir().unwrap();
-        let hooks_dir = dir.path().join(".git/hooks");
-        let pid = test_pid_path();
-        std::fs::create_dir_all(&hooks_dir).unwrap();
+        let global_hooks = dir.path().join("global-hooks");
+        std::fs::create_dir_all(&global_hooks).unwrap();
+        init_git_repo_with_hooks_path(dir.path(), &global_hooks);
+        install_pre_push_hook(dir.path()).unwrap();
+        // Should install in global dir, not local
+        let content = std::fs::read_to_string(global_hooks.join("pre-push")).unwrap();
+        assert!(
+            content.contains("cibars"),
+            "snippet should be in global hooks"
+        );
+        assert!(
+            !dir.path().join(".git/hooks/pre-push").exists()
+                || !std::fs::read_to_string(dir.path().join(".git/hooks/pre-push"))
+                    .unwrap_or_default()
+                    .contains("$(pwd | tr"),
+            "should NOT install new snippet in local hooks"
+        );
+    }
+
+    #[test]
+    fn install_hook_adds_delegation_when_local_hook_shadowed() {
+        let dir = tempfile::tempdir().unwrap();
+        let global_hooks = dir.path().join("global-hooks");
+        std::fs::create_dir_all(&global_hooks).unwrap();
+        init_git_repo_with_hooks_path(dir.path(), &global_hooks);
+        // Local hook has project-specific content
+        let local_hooks = dir.path().join(".git/hooks");
         std::fs::write(
-            hooks_dir.join("pre-push"),
-            "#!/bin/sh\npkill -USR1 cibars 2>/dev/null || true\n",
+            local_hooks.join("pre-push"),
+            "#!/bin/sh\ncd backend && pytest\n",
         )
         .unwrap();
-        install_pre_push_hook(dir.path(), &pid).unwrap();
-        let content = std::fs::read_to_string(hooks_dir.join("pre-push")).unwrap();
-        assert!(content.contains("pkill -USR1 cibars"));
-        assert!(content.contains(&pid.display().to_string()));
+        install_pre_push_hook(dir.path()).unwrap();
+        let content = std::fs::read_to_string(global_hooks.join("pre-push")).unwrap();
+        assert!(has_delegation(&content), "should add delegation: {content}");
+        assert!(
+            has_cibars_hook(&content),
+            "should add cibars snippet: {content}"
+        );
+    }
+
+    #[test]
+    fn install_hook_skips_delegation_when_already_present() {
+        let dir = tempfile::tempdir().unwrap();
+        let global_hooks = dir.path().join("global-hooks");
+        std::fs::create_dir_all(&global_hooks).unwrap();
+        init_git_repo_with_hooks_path(dir.path(), &global_hooks);
+        let local_hooks = dir.path().join(".git/hooks");
+        std::fs::write(local_hooks.join("pre-push"), "#!/bin/sh\necho test\n").unwrap();
+        // Global hook already has delegation
+        std::fs::write(
+            global_hooks.join("pre-push"),
+            format!("#!/bin/sh{DELEGATION_SNIPPET}"),
+        )
+        .unwrap();
+        install_pre_push_hook(dir.path()).unwrap();
+        let content = std::fs::read_to_string(global_hooks.join("pre-push")).unwrap();
+        assert_eq!(
+            content.matches("rev-parse --git-dir").count(),
+            1,
+            "should not duplicate delegation: {content}"
+        );
+    }
+
+    #[test]
+    fn install_hook_no_delegation_without_local_hook() {
+        let dir = tempfile::tempdir().unwrap();
+        let global_hooks = dir.path().join("global-hooks");
+        std::fs::create_dir_all(&global_hooks).unwrap();
+        init_git_repo_with_hooks_path(dir.path(), &global_hooks);
+        // No local hook
+        install_pre_push_hook(dir.path()).unwrap();
+        let content = std::fs::read_to_string(global_hooks.join("pre-push")).unwrap();
+        assert!(
+            !has_delegation(&content),
+            "no delegation without local hook"
+        );
+        assert!(has_cibars_hook(&content));
     }
 
     #[cfg(unix)]
@@ -626,9 +881,9 @@ aws_profile = "staging"
     fn install_hook_sets_executable() {
         use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().unwrap();
+        init_git_repo(dir.path());
+        install_pre_push_hook(dir.path()).unwrap();
         let hooks_dir = dir.path().join(".git/hooks");
-        std::fs::create_dir_all(&hooks_dir).unwrap();
-        install_pre_push_hook(dir.path(), &test_pid_path()).unwrap();
         let perms = std::fs::metadata(hooks_dir.join("pre-push"))
             .unwrap()
             .permissions();

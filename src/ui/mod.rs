@@ -116,10 +116,15 @@ fn handle_boost(app: &Arc<Mutex<App>>) -> bool {
 
 /// Handle the 'h' key press: install pre-push hook if needed.
 /// Returns true if installation was attempted.
-fn handle_hook_install(app: &Arc<Mutex<App>>, pid_path: &std::path::Path) -> bool {
+fn handle_hook_install(app: &Arc<Mutex<App>>) -> bool {
     let should_install = app
         .lock()
-        .map(|a| matches!(a.hook_status, HookStatus::Missing | HookStatus::Incomplete))
+        .map(|a| {
+            matches!(
+                a.hook_status,
+                HookStatus::Missing | HookStatus::Incomplete | HookStatus::Shadowed
+            )
+        })
         .unwrap_or(false);
 
     if !should_install {
@@ -127,7 +132,7 @@ fn handle_hook_install(app: &Arc<Mutex<App>>, pid_path: &std::path::Path) -> boo
     }
 
     if let Ok(cwd) = std::env::current_dir() {
-        let result = crate::config::install_pre_push_hook(&cwd, pid_path);
+        let result = crate::config::install_pre_push_hook(&cwd);
         if let Ok(mut a) = app.lock() {
             match result {
                 Ok(()) => {
@@ -527,7 +532,6 @@ pub fn run_ui(
     boost_notify: Arc<Notify>,
     link_notify: Arc<Notify>,
     term_flag: &AtomicBool,
-    pid_path: &std::path::Path,
 ) -> Result<()> {
     let mut last_animation = Instant::now();
     loop {
@@ -932,7 +936,7 @@ pub fn run_ui(
                         handle_boost(&app);
                     }
                     KeyCode::Char('h') => {
-                        handle_hook_install(&app, pid_path);
+                        handle_hook_install(&app);
                     }
                     KeyCode::Char('l') => {
                         let discovering = app.lock().map(|a| a.linkage_discovering).unwrap_or(true);
@@ -1006,44 +1010,50 @@ mod tests {
         assert!(app.lock().unwrap().pipelines_expanded);
     }
 
-    fn test_pid_path() -> std::path::PathBuf {
-        std::path::PathBuf::from("/tmp/test-cibars.pid")
-    }
-
     #[test]
     fn handle_hook_install_skips_when_already_installed() {
         let app = Arc::new(Mutex::new(App::new()));
         app.lock().unwrap().hook_status = HookStatus::Installed;
-        assert!(!handle_hook_install(&app, &test_pid_path()));
+        assert!(!handle_hook_install(&app));
     }
 
     #[test]
     fn handle_hook_install_skips_when_no_git_dir() {
         let app = Arc::new(Mutex::new(App::new()));
         app.lock().unwrap().hook_status = HookStatus::NoGitDir;
-        assert!(!handle_hook_install(&app, &test_pid_path()));
+        assert!(!handle_hook_install(&app));
     }
 
     #[test]
     fn handle_hook_install_attempts_when_missing() {
         let app = Arc::new(Mutex::new(App::new()));
         app.lock().unwrap().hook_status = HookStatus::Missing;
-        let attempted = handle_hook_install(&app, &test_pid_path());
-        assert!(attempted);
+        assert!(handle_hook_install(&app));
     }
 
     #[test]
     fn handle_hook_install_attempts_when_incomplete() {
         let app = Arc::new(Mutex::new(App::new()));
         app.lock().unwrap().hook_status = HookStatus::Incomplete;
-        let attempted = handle_hook_install(&app, &test_pid_path());
-        assert!(attempted);
+        assert!(handle_hook_install(&app));
+    }
+
+    #[test]
+    fn handle_hook_install_attempts_when_shadowed() {
+        let app = Arc::new(Mutex::new(App::new()));
+        app.lock().unwrap().hook_status = HookStatus::Shadowed;
+        assert!(handle_hook_install(&app));
     }
 
     #[test]
     fn handle_hook_install_sets_installed_on_success() {
         let tmp = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(tmp.path().join(".git/hooks")).unwrap();
+        // Need a real git repo for effective_hooks_dir to work
+        std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(tmp.path())
+            .status()
+            .unwrap();
 
         let original_dir = std::env::current_dir().unwrap();
         std::env::set_current_dir(tmp.path()).unwrap();
@@ -1051,7 +1061,7 @@ mod tests {
         let app = Arc::new(Mutex::new(App::new()));
         app.lock().unwrap().hook_status = HookStatus::Missing;
 
-        let attempted = handle_hook_install(&app, &test_pid_path());
+        let attempted = handle_hook_install(&app);
         assert!(attempted);
         assert_eq!(app.lock().unwrap().hook_status, HookStatus::Installed);
 
