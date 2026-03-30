@@ -20,6 +20,7 @@ pub struct StatusBar<'a> {
     pub cooldown_remaining: Option<Duration>,
     pub warnings: &'a [String],
     pub hook_status: &'a HookStatus,
+    pub has_global_hooks_path: bool,
     pub boost_pressed_at: Option<Instant>,
     pub push_signal_at: Option<Instant>,
     pub linkage_broken: bool,
@@ -93,7 +94,6 @@ impl Widget for StatusBar<'_> {
                     let label = match loc {
                         crate::config::HookLocation::Local => "\u{2713}hook",
                         crate::config::HookLocation::Global => "\u{2713}g-hook",
-                        crate::config::HookLocation::GlobalDelegated => "\u{2713}gd-hook",
                     };
                     spans.push(Span::styled(
                         label,
@@ -103,14 +103,19 @@ impl Widget for StatusBar<'_> {
                 HookStatus::Shadowed => {
                     spans.push(dim_sep.clone());
                     spans.push(Span::styled(
-                        "\u{26A0}hook:override h=fix",
+                        "\u{26A0}hook:override g=fix",
                         Style::default().fg(theme::STATUS_RUNNING),
                     ));
                 }
                 HookStatus::Missing | HookStatus::Incomplete => {
                     spans.push(dim_sep.clone());
+                    let hint = if self.has_global_hooks_path {
+                        "p=local g=global hook"
+                    } else {
+                        "p=install hook"
+                    };
                     spans.push(Span::styled(
-                        "h=install pre-push hook",
+                        hint,
                         Style::default().fg(theme::STATUS_RUNNING),
                     ));
                 }
@@ -162,6 +167,7 @@ mod tests {
             tick,
             cooldown,
             &HookStatus::Installed(HookLocation::Local),
+            false,
         )
     }
 
@@ -170,6 +176,7 @@ mod tests {
         tick: usize,
         cooldown: Option<Duration>,
         hook_status: &HookStatus,
+        has_global_hooks_path: bool,
     ) -> String {
         let bar = StatusBar {
             poll_state: state,
@@ -177,6 +184,7 @@ mod tests {
             cooldown_remaining: cooldown,
             warnings: &[],
             hook_status,
+            has_global_hooks_path,
             boost_pressed_at: None,
             push_signal_at: None,
             linkage_broken: false,
@@ -296,15 +304,24 @@ mod tests {
     // --- hook tests ---
 
     #[test]
-    fn shows_hook_hint_when_missing() {
-        let content = render_bar_with_hook(&PollState::Idle, 0, None, &HookStatus::Missing);
-        assert!(content.contains("h=install"), "got: {content}");
+    fn shows_local_hint_when_missing_no_global() {
+        let content = render_bar_with_hook(&PollState::Idle, 0, None, &HookStatus::Missing, false);
+        assert!(content.contains("p=install hook"), "got: {content}");
+        assert!(!content.contains("g="), "got: {content}");
     }
 
     #[test]
-    fn shows_hook_hint_when_incomplete() {
-        let content = render_bar_with_hook(&PollState::Idle, 0, None, &HookStatus::Incomplete);
-        assert!(content.contains("h=install"), "got: {content}");
+    fn shows_both_hints_when_missing_with_global() {
+        let content = render_bar_with_hook(&PollState::Idle, 0, None, &HookStatus::Missing, true);
+        assert!(content.contains("p=local"), "got: {content}");
+        assert!(content.contains("g=global"), "got: {content}");
+    }
+
+    #[test]
+    fn shows_local_hint_when_incomplete_no_global() {
+        let content =
+            render_bar_with_hook(&PollState::Idle, 0, None, &HookStatus::Incomplete, false);
+        assert!(content.contains("p=install hook"), "got: {content}");
     }
 
     #[test]
@@ -314,8 +331,10 @@ mod tests {
             0,
             None,
             &HookStatus::Installed(HookLocation::Local),
+            false,
         );
-        assert!(!content.contains("h=install"), "got: {content}");
+        assert!(!content.contains("p=install"), "got: {content}");
+        assert!(!content.contains("g="), "got: {content}");
     }
 
     #[test]
@@ -326,6 +345,7 @@ mod tests {
             cooldown_remaining: None,
             warnings: &[],
             hook_status: &HookStatus::Installed(HookLocation::Local),
+            has_global_hooks_path: false,
             boost_pressed_at: None,
             push_signal_at: None,
             linkage_broken: false,
@@ -350,6 +370,7 @@ mod tests {
             cooldown_remaining: None,
             warnings: &[],
             hook_status: &HookStatus::Installed(HookLocation::Local),
+            has_global_hooks_path: false,
             boost_pressed_at: Some(Instant::now()),
             push_signal_at: None,
             linkage_broken: false,
@@ -385,6 +406,7 @@ mod tests {
             cooldown_remaining: None,
             warnings: &[],
             hook_status: &HookStatus::Installed(HookLocation::Local),
+            has_global_hooks_path: false,
             boost_pressed_at: Some(expired),
             push_signal_at: None,
             linkage_broken: false,
@@ -416,6 +438,7 @@ mod tests {
             cooldown_remaining: None,
             warnings: &[],
             hook_status: &HookStatus::Installed(HookLocation::Local),
+            has_global_hooks_path: false,
             boost_pressed_at: None,
             push_signal_at: None,
             linkage_broken: false,
@@ -448,6 +471,7 @@ mod tests {
             cooldown_remaining: None,
             warnings: &[],
             hook_status: &HookStatus::Installed(HookLocation::Local),
+            has_global_hooks_path: false,
             boost_pressed_at: None,
             push_signal_at: None,
             linkage_broken,
@@ -491,6 +515,7 @@ mod tests {
             cooldown_remaining: cooldown,
             warnings: &[],
             hook_status: &HookStatus::Installed(HookLocation::Local),
+            has_global_hooks_path: false,
             boost_pressed_at: None,
             push_signal_at: None,
             linkage_broken: false,
@@ -558,6 +583,7 @@ mod tests {
             cooldown_remaining: None,
             warnings: &[],
             hook_status: &HookStatus::Installed(HookLocation::Local),
+            has_global_hooks_path: false,
             boost_pressed_at: None,
             push_signal_at: None,
             linkage_broken: false,
@@ -582,6 +608,7 @@ mod tests {
             cooldown_remaining: None,
             warnings: &[],
             hook_status: &HookStatus::Installed(HookLocation::Local),
+            has_global_hooks_path: false,
             boost_pressed_at: None,
             push_signal_at: None,
             linkage_broken: false,
@@ -610,6 +637,7 @@ mod tests {
             cooldown_remaining: cooldown,
             warnings,
             hook_status,
+            has_global_hooks_path: false,
             boost_pressed_at: None,
             push_signal_at: None,
             linkage_broken: false,
@@ -641,7 +669,7 @@ mod tests {
         let warnings = vec!["AWS: timeout".to_string()];
         let content =
             render_bar_with_warnings(&PollState::Idle, 0, None, &HookStatus::Missing, &warnings);
-        assert!(content.contains("h=install"), "got: {content}");
+        assert!(content.contains("p=install hook"), "got: {content}");
         assert!(content.contains("AWS: timeout"), "got: {content}");
     }
 
@@ -655,6 +683,7 @@ mod tests {
             cooldown_remaining: None,
             warnings: &[],
             hook_status: &HookStatus::Installed(HookLocation::Local),
+            has_global_hooks_path: false,
             boost_pressed_at: None,
             push_signal_at: Some(Instant::now()),
             linkage_broken: false,
@@ -679,6 +708,7 @@ mod tests {
             cooldown_remaining: None,
             warnings: &[],
             hook_status: &HookStatus::Installed(HookLocation::Local),
+            has_global_hooks_path: false,
             boost_pressed_at: None,
             push_signal_at: Some(expired),
             linkage_broken: false,
@@ -702,6 +732,7 @@ mod tests {
             cooldown_remaining: None,
             warnings: &[],
             hook_status: &HookStatus::Installed(HookLocation::Local),
+            has_global_hooks_path: false,
             boost_pressed_at: None,
             push_signal_at: Some(Instant::now()),
             linkage_broken: false,
@@ -724,6 +755,7 @@ mod tests {
             cooldown_remaining: None,
             warnings: &[],
             hook_status: &HookStatus::Installed(HookLocation::Local),
+            has_global_hooks_path: false,
             boost_pressed_at: None,
             push_signal_at: None,
             linkage_broken: false,
@@ -746,6 +778,7 @@ mod tests {
             cooldown_remaining: None,
             warnings: &[],
             hook_status: &HookStatus::NoGitDir,
+            has_global_hooks_path: false,
             boost_pressed_at: None,
             push_signal_at: None,
             linkage_broken: false,
@@ -758,7 +791,7 @@ mod tests {
             .map(|x| buf.cell((x, 1)).unwrap().symbol().to_string())
             .collect();
         assert!(!content.contains("✓hook"), "got: {content}");
-        assert!(!content.contains("h=install"), "got: {content}");
+        assert!(!content.contains("p=install"), "got: {content}");
         assert!(!content.contains("pushed!"), "got: {content}");
     }
 }

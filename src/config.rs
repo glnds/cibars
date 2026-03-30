@@ -161,10 +161,17 @@ fn resolve_github_token() -> Result<String> {
 pub enum HookLocation {
     /// Installed in .git/hooks/ (no core.hooksPath override).
     Local,
-    /// Installed in global hooks dir (core.hooksPath), no delegation.
+    /// Installed in global hooks dir (core.hooksPath), always delegates to local.
     Global,
-    /// Installed in global hooks dir with delegation to local hooks.
-    GlobalDelegated,
+}
+
+/// Target location for hook installation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HookTarget {
+    /// Install in .git/hooks/ (repo-local).
+    Local,
+    /// Install in global hooks dir (core.hooksPath), always with delegation.
+    Global,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -249,12 +256,10 @@ pub fn check_pre_push_hook(dir: &Path) -> HookStatus {
     // Check effective hooks dir first
     if let Ok(contents) = std::fs::read_to_string(&effective_hook) {
         if has_cibars_hook(&contents) {
-            let location = if !is_global {
-                HookLocation::Local
-            } else if has_delegation(&contents) {
-                HookLocation::GlobalDelegated
-            } else {
+            let location = if is_global {
                 HookLocation::Global
+            } else {
+                HookLocation::Local
             };
             return HookStatus::Installed(location);
         }
@@ -277,11 +282,47 @@ pub fn check_pre_push_hook(dir: &Path) -> HookStatus {
     HookStatus::Missing
 }
 
-pub fn install_pre_push_hook(dir: &Path) -> Result<()> {
+/// Ensure global hook delegates to local hooks. Auto-fixes broken state where
+/// both local and global pre-push hooks exist but global doesn't delegate.
+/// Returns true if delegation was added.
+pub fn ensure_delegation(dir: &Path) -> bool {
     let effective = effective_hooks_dir(dir);
-    let hook_path = effective.join("pre-push");
-    std::fs::create_dir_all(&effective)
-        .with_context(|| format!("cannot create {}", effective.display()))?;
+    let local_hooks = dir.join(".git/hooks");
+    if effective == local_hooks {
+        return false; // No global override, nothing to fix
+    }
+    let global_hook = effective.join("pre-push");
+    let local_hook = local_hooks.join("pre-push");
+    if !global_hook.is_file() || !local_hook.is_file() {
+        return false; // Both must exist for this to be a broken state
+    }
+    let content = std::fs::read_to_string(&global_hook).unwrap_or_default();
+    if has_delegation(&content) {
+        return false; // Already delegates
+    }
+    // Fix: prepend delegation to global hook (before any existing content after shebang)
+    let new_content = format!("{content}{DELEGATION_SNIPPET}");
+    if std::fs::write(&global_hook, new_content).is_ok() {
+        tracing::info!("auto-fixed: added delegation to global pre-push hook");
+        true
+    } else {
+        false
+    }
+}
+
+/// Returns true if core.hooksPath is set and differs from .git/hooks.
+pub fn has_global_hooks_path(dir: &Path) -> bool {
+    effective_hooks_dir(dir) != dir.join(".git/hooks")
+}
+
+pub fn install_pre_push_hook(dir: &Path, target: HookTarget) -> Result<()> {
+    let hook_dir = match target {
+        HookTarget::Local => dir.join(".git/hooks"),
+        HookTarget::Global => effective_hooks_dir(dir),
+    };
+    let hook_path = hook_dir.join("pre-push");
+    std::fs::create_dir_all(&hook_dir)
+        .with_context(|| format!("cannot create {}", hook_dir.display()))?;
 
     let existing = std::fs::read_to_string(&hook_path).unwrap_or_default();
 
@@ -292,13 +333,9 @@ pub fn install_pre_push_hook(dir: &Path) -> Result<()> {
 
     let mut additions = String::new();
 
-    // Add delegation if core.hooksPath is active and local hook exists
-    let is_global = effective != dir.join(".git/hooks");
-    if is_global && !has_delegation(&existing) {
-        let local_hook = dir.join(".git/hooks/pre-push");
-        if local_hook.is_file() {
-            additions.push_str(DELEGATION_SNIPPET);
-        }
+    // Global target always delegates to repo-local hooks (safe no-op)
+    if target == HookTarget::Global && !has_delegation(&existing) {
+        additions.push_str(DELEGATION_SNIPPET);
     }
 
     additions.push_str(HOOK_SNIPPET);
@@ -779,9 +816,10 @@ aws_profile = "staging"
             format!("#!/bin/sh{DELEGATION_SNIPPET}{HOOK_SNIPPET}"),
         )
         .unwrap();
+        // Global with delegation is just Global (always delegates)
         assert_eq!(
             check_pre_push_hook(dir.path()),
-            HookStatus::Installed(HookLocation::GlobalDelegated)
+            HookStatus::Installed(HookLocation::Global)
         );
     }
 
@@ -798,10 +836,10 @@ aws_profile = "staging"
     // --- install_pre_push_hook tests ---
 
     #[test]
-    fn install_hook_creates_new_file() {
+    fn install_hook_local_creates_new_file() {
         let dir = tempfile::tempdir().unwrap();
         init_git_repo(dir.path());
-        install_pre_push_hook(dir.path()).unwrap();
+        install_pre_push_hook(dir.path(), HookTarget::Local).unwrap();
         let hooks_dir = dir.path().join(".git/hooks");
         let content = std::fs::read_to_string(hooks_dir.join("pre-push")).unwrap();
         assert!(content.contains("#!/bin/sh"));
@@ -810,23 +848,23 @@ aws_profile = "staging"
     }
 
     #[test]
-    fn install_hook_appends_to_existing() {
+    fn install_hook_local_appends_to_existing() {
         let dir = tempfile::tempdir().unwrap();
         init_git_repo(dir.path());
         let hooks_dir = dir.path().join(".git/hooks");
         std::fs::write(hooks_dir.join("pre-push"), "#!/bin/sh\necho pushing\n").unwrap();
-        install_pre_push_hook(dir.path()).unwrap();
+        install_pre_push_hook(dir.path(), HookTarget::Local).unwrap();
         let content = std::fs::read_to_string(hooks_dir.join("pre-push")).unwrap();
         assert!(content.contains("echo pushing"));
         assert!(content.contains("cibars"));
     }
 
     #[test]
-    fn install_hook_is_idempotent() {
+    fn install_hook_local_is_idempotent() {
         let dir = tempfile::tempdir().unwrap();
         init_git_repo(dir.path());
-        install_pre_push_hook(dir.path()).unwrap();
-        install_pre_push_hook(dir.path()).unwrap();
+        install_pre_push_hook(dir.path(), HookTarget::Local).unwrap();
+        install_pre_push_hook(dir.path(), HookTarget::Local).unwrap();
         let hooks_dir = dir.path().join(".git/hooks");
         let content = std::fs::read_to_string(hooks_dir.join("pre-push")).unwrap();
         assert_eq!(
@@ -837,41 +875,49 @@ aws_profile = "staging"
     }
 
     #[test]
-    fn install_hook_in_global_dir_when_core_hooks_path() {
+    fn install_hook_local_no_delegation() {
+        let dir = tempfile::tempdir().unwrap();
+        init_git_repo(dir.path());
+        install_pre_push_hook(dir.path(), HookTarget::Local).unwrap();
+        let hooks_dir = dir.path().join(".git/hooks");
+        let content = std::fs::read_to_string(hooks_dir.join("pre-push")).unwrap();
+        assert!(
+            !has_delegation(&content),
+            "local install should not add delegation: {content}"
+        );
+    }
+
+    #[test]
+    fn install_hook_global_in_global_dir() {
         let dir = tempfile::tempdir().unwrap();
         let global_hooks = dir.path().join("global-hooks");
         std::fs::create_dir_all(&global_hooks).unwrap();
         init_git_repo_with_hooks_path(dir.path(), &global_hooks);
-        install_pre_push_hook(dir.path()).unwrap();
-        // Should install in global dir, not local
+        install_pre_push_hook(dir.path(), HookTarget::Global).unwrap();
         let content = std::fs::read_to_string(global_hooks.join("pre-push")).unwrap();
         assert!(
             content.contains("cibars"),
             "snippet should be in global hooks"
         );
         assert!(
-            !dir.path().join(".git/hooks/pre-push").exists()
-                || !std::fs::read_to_string(dir.path().join(".git/hooks/pre-push"))
-                    .unwrap_or_default()
-                    .contains("$(pwd | tr"),
-            "should NOT install new snippet in local hooks"
+            has_delegation(&content),
+            "global always delegates: {content}"
         );
     }
 
     #[test]
-    fn install_hook_adds_delegation_when_local_hook_shadowed() {
+    fn install_hook_global_adds_delegation_when_local_hook_exists() {
         let dir = tempfile::tempdir().unwrap();
         let global_hooks = dir.path().join("global-hooks");
         std::fs::create_dir_all(&global_hooks).unwrap();
         init_git_repo_with_hooks_path(dir.path(), &global_hooks);
-        // Local hook has project-specific content
         let local_hooks = dir.path().join(".git/hooks");
         std::fs::write(
             local_hooks.join("pre-push"),
             "#!/bin/sh\ncd backend && pytest\n",
         )
         .unwrap();
-        install_pre_push_hook(dir.path()).unwrap();
+        install_pre_push_hook(dir.path(), HookTarget::Global).unwrap();
         let content = std::fs::read_to_string(global_hooks.join("pre-push")).unwrap();
         assert!(has_delegation(&content), "should add delegation: {content}");
         assert!(
@@ -881,20 +927,18 @@ aws_profile = "staging"
     }
 
     #[test]
-    fn install_hook_skips_delegation_when_already_present() {
+    fn install_hook_global_skips_delegation_when_already_present() {
         let dir = tempfile::tempdir().unwrap();
         let global_hooks = dir.path().join("global-hooks");
         std::fs::create_dir_all(&global_hooks).unwrap();
         init_git_repo_with_hooks_path(dir.path(), &global_hooks);
-        let local_hooks = dir.path().join(".git/hooks");
-        std::fs::write(local_hooks.join("pre-push"), "#!/bin/sh\necho test\n").unwrap();
         // Global hook already has delegation
         std::fs::write(
             global_hooks.join("pre-push"),
             format!("#!/bin/sh{DELEGATION_SNIPPET}"),
         )
         .unwrap();
-        install_pre_push_hook(dir.path()).unwrap();
+        install_pre_push_hook(dir.path(), HookTarget::Global).unwrap();
         let content = std::fs::read_to_string(global_hooks.join("pre-push")).unwrap();
         assert_eq!(
             content.matches("rev-parse --git-dir").count(),
@@ -904,17 +948,17 @@ aws_profile = "staging"
     }
 
     #[test]
-    fn install_hook_no_delegation_without_local_hook() {
+    fn install_hook_global_always_delegates_even_without_local_hook() {
         let dir = tempfile::tempdir().unwrap();
         let global_hooks = dir.path().join("global-hooks");
         std::fs::create_dir_all(&global_hooks).unwrap();
         init_git_repo_with_hooks_path(dir.path(), &global_hooks);
-        // No local hook
-        install_pre_push_hook(dir.path()).unwrap();
+        // No local hook — delegation should still be added (safe no-op)
+        install_pre_push_hook(dir.path(), HookTarget::Global).unwrap();
         let content = std::fs::read_to_string(global_hooks.join("pre-push")).unwrap();
         assert!(
-            !has_delegation(&content),
-            "no delegation without local hook"
+            has_delegation(&content),
+            "global always delegates: {content}"
         );
         assert!(has_cibars_hook(&content));
     }
@@ -925,12 +969,88 @@ aws_profile = "staging"
         use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().unwrap();
         init_git_repo(dir.path());
-        install_pre_push_hook(dir.path()).unwrap();
+        install_pre_push_hook(dir.path(), HookTarget::Local).unwrap();
         let hooks_dir = dir.path().join(".git/hooks");
         let perms = std::fs::metadata(hooks_dir.join("pre-push"))
             .unwrap()
             .permissions();
         assert!(perms.mode() & 0o111 != 0, "hook should be executable");
+    }
+
+    // --- has_global_hooks_path tests ---
+
+    // --- ensure_delegation tests ---
+
+    #[test]
+    fn ensure_delegation_noop_without_global_override() {
+        let dir = tempfile::tempdir().unwrap();
+        init_git_repo(dir.path());
+        assert!(!ensure_delegation(dir.path()));
+    }
+
+    #[test]
+    fn ensure_delegation_noop_when_no_local_hook() {
+        let dir = tempfile::tempdir().unwrap();
+        let global_hooks = dir.path().join("global-hooks");
+        std::fs::create_dir_all(&global_hooks).unwrap();
+        init_git_repo_with_hooks_path(dir.path(), &global_hooks);
+        std::fs::write(
+            global_hooks.join("pre-push"),
+            format!("#!/bin/sh{HOOK_SNIPPET}"),
+        )
+        .unwrap();
+        assert!(!ensure_delegation(dir.path()));
+    }
+
+    #[test]
+    fn ensure_delegation_fixes_broken_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let global_hooks = dir.path().join("global-hooks");
+        std::fs::create_dir_all(&global_hooks).unwrap();
+        init_git_repo_with_hooks_path(dir.path(), &global_hooks);
+        // Both hooks exist but global doesn't delegate
+        std::fs::write(
+            global_hooks.join("pre-push"),
+            format!("#!/bin/sh{HOOK_SNIPPET}"),
+        )
+        .unwrap();
+        let local_hooks = dir.path().join(".git/hooks");
+        std::fs::write(local_hooks.join("pre-push"), "#!/bin/sh\necho local\n").unwrap();
+        assert!(ensure_delegation(dir.path()));
+        let content = std::fs::read_to_string(global_hooks.join("pre-push")).unwrap();
+        assert!(has_delegation(&content), "should add delegation: {content}");
+    }
+
+    #[test]
+    fn ensure_delegation_noop_when_already_delegates() {
+        let dir = tempfile::tempdir().unwrap();
+        let global_hooks = dir.path().join("global-hooks");
+        std::fs::create_dir_all(&global_hooks).unwrap();
+        init_git_repo_with_hooks_path(dir.path(), &global_hooks);
+        std::fs::write(
+            global_hooks.join("pre-push"),
+            format!("#!/bin/sh{DELEGATION_SNIPPET}{HOOK_SNIPPET}"),
+        )
+        .unwrap();
+        let local_hooks = dir.path().join(".git/hooks");
+        std::fs::write(local_hooks.join("pre-push"), "#!/bin/sh\necho local\n").unwrap();
+        assert!(!ensure_delegation(dir.path()));
+    }
+
+    #[test]
+    fn has_global_hooks_path_false_by_default() {
+        let dir = tempfile::tempdir().unwrap();
+        init_git_repo(dir.path());
+        assert!(!has_global_hooks_path(dir.path()));
+    }
+
+    #[test]
+    fn has_global_hooks_path_true_when_set() {
+        let dir = tempfile::tempdir().unwrap();
+        let global_hooks = dir.path().join("global-hooks");
+        std::fs::create_dir_all(&global_hooks).unwrap();
+        init_git_repo_with_hooks_path(dir.path(), &global_hooks);
+        assert!(has_global_hooks_path(dir.path()));
     }
 
     // --- classify_workflow tests ---

@@ -278,7 +278,9 @@ fn main() -> Result<()> {
     write_pid_file(&pid_path)?;
     tracing::info!(pid = std::process::id(), "starting cibars");
     let mut app_state = App::new();
+    config::ensure_delegation(&cwd);
     app_state.hook_status = config::check_pre_push_hook(&cwd);
+    app_state.has_global_hooks_path = config::has_global_hooks_path(&cwd);
     let app = Arc::new(Mutex::new(app_state));
 
     // Build tokio runtime for async polling

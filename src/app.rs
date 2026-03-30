@@ -39,6 +39,8 @@ pub struct App {
     pub cooldown_remaining: Option<std::time::Duration>,
     /// Git pre-push hook status for boost integration.
     pub hook_status: HookStatus,
+    /// True when core.hooksPath overrides .git/hooks (global hooks dir active).
+    pub has_global_hooks_path: bool,
     /// AWS authentication health state.
     pub aws_health: SourceHealth,
     /// When boost key was last pressed, for visual flash feedback.
@@ -74,6 +76,7 @@ impl App {
             last_tick_advance: None,
             cooldown_remaining: None,
             hook_status: HookStatus::NoGitDir,
+            has_global_hooks_path: false,
             aws_health: SourceHealth::Unknown,
             boost_pressed_at: None,
             push_signal_at: None,

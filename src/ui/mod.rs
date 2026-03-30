@@ -114,9 +114,8 @@ fn handle_boost(app: &Arc<Mutex<App>>) -> bool {
     false
 }
 
-/// Handle the 'h' key press: install pre-push hook if needed.
-/// Returns true if installation was attempted.
-fn handle_hook_install(app: &Arc<Mutex<App>>) -> bool {
+/// Install pre-push hook for the given target. Returns true if attempted.
+fn handle_hook_install(app: &Arc<Mutex<App>>, target: crate::config::HookTarget) -> bool {
     let should_install = app
         .lock()
         .map(|a| {
@@ -132,12 +131,12 @@ fn handle_hook_install(app: &Arc<Mutex<App>>) -> bool {
     }
 
     if let Ok(cwd) = std::env::current_dir() {
-        let result = crate::config::install_pre_push_hook(&cwd);
+        let result = crate::config::install_pre_push_hook(&cwd, target);
         if let Ok(mut a) = app.lock() {
             match result {
                 Ok(()) => {
                     a.hook_status = crate::config::check_pre_push_hook(&cwd);
-                    tracing::info!("pre-push hook installed");
+                    tracing::info!("pre-push hook installed ({target:?})");
                 }
                 Err(e) => {
                     a.push_warning(format!("hook install failed: {e}"));
@@ -498,6 +497,7 @@ fn render_pipeline_centric(
             cooldown_remaining: app.cooldown_remaining,
             warnings: &app.warnings,
             hook_status: &app.hook_status,
+            has_global_hooks_path: app.has_global_hooks_path,
             boost_pressed_at: app.boost_pressed_at,
             push_signal_at: app.push_signal_at,
             linkage_broken: app.linkage_broken,
@@ -875,6 +875,7 @@ pub fn run_ui(
                     cooldown_remaining: app.cooldown_remaining,
                     warnings: &app.warnings,
                     hook_status: &app.hook_status,
+                    has_global_hooks_path: app.has_global_hooks_path,
                     boost_pressed_at: app.boost_pressed_at,
                     push_signal_at: app.push_signal_at,
                     linkage_broken: app.linkage_broken,
@@ -935,8 +936,11 @@ pub fn run_ui(
                         boost_notify.notify_one();
                         handle_boost(&app);
                     }
-                    KeyCode::Char('h') => {
-                        handle_hook_install(&app);
+                    KeyCode::Char('p') => {
+                        handle_hook_install(&app, crate::config::HookTarget::Local);
+                    }
+                    KeyCode::Char('g') => {
+                        handle_hook_install(&app, crate::config::HookTarget::Global);
                     }
                     KeyCode::Char('l') => {
                         let discovering = app.lock().map(|a| a.linkage_discovering).unwrap_or(true);
@@ -1014,35 +1018,35 @@ mod tests {
     fn handle_hook_install_skips_when_already_installed() {
         let app = Arc::new(Mutex::new(App::new()));
         app.lock().unwrap().hook_status = HookStatus::Installed(crate::config::HookLocation::Local);
-        assert!(!handle_hook_install(&app));
+        assert!(!handle_hook_install(&app, crate::config::HookTarget::Local));
     }
 
     #[test]
     fn handle_hook_install_skips_when_no_git_dir() {
         let app = Arc::new(Mutex::new(App::new()));
         app.lock().unwrap().hook_status = HookStatus::NoGitDir;
-        assert!(!handle_hook_install(&app));
+        assert!(!handle_hook_install(&app, crate::config::HookTarget::Local));
     }
 
     #[test]
     fn handle_hook_install_attempts_when_missing() {
         let app = Arc::new(Mutex::new(App::new()));
         app.lock().unwrap().hook_status = HookStatus::Missing;
-        assert!(handle_hook_install(&app));
+        assert!(handle_hook_install(&app, crate::config::HookTarget::Local));
     }
 
     #[test]
     fn handle_hook_install_attempts_when_incomplete() {
         let app = Arc::new(Mutex::new(App::new()));
         app.lock().unwrap().hook_status = HookStatus::Incomplete;
-        assert!(handle_hook_install(&app));
+        assert!(handle_hook_install(&app, crate::config::HookTarget::Local));
     }
 
     #[test]
     fn handle_hook_install_attempts_when_shadowed() {
         let app = Arc::new(Mutex::new(App::new()));
         app.lock().unwrap().hook_status = HookStatus::Shadowed;
-        assert!(handle_hook_install(&app));
+        assert!(handle_hook_install(&app, crate::config::HookTarget::Local));
     }
 
     #[test]
@@ -1061,7 +1065,7 @@ mod tests {
         let app = Arc::new(Mutex::new(App::new()));
         app.lock().unwrap().hook_status = HookStatus::Missing;
 
-        let attempted = handle_hook_install(&app);
+        let attempted = handle_hook_install(&app, crate::config::HookTarget::Local);
         assert!(attempted);
         assert!(matches!(
             app.lock().unwrap().hook_status,
