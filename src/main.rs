@@ -18,7 +18,7 @@ use app::{App, SourceHealth};
 use chrono::Utc;
 use config::Config;
 use linkage::LinkMap;
-use poll_scheduler::PollScheduler;
+use poll_scheduler::{PollScheduler, PollState};
 
 fn setup_tracing() -> Result<()> {
     use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
@@ -34,7 +34,9 @@ fn setup_tracing() -> Result<()> {
     Ok(())
 }
 
-async fn init_aws_client(config: &Config) -> poller::aws::AwsPipelineClient {
+async fn init_aws_client(
+    config: &Config,
+) -> (poller::aws::AwsPipelineClient, poller::aws::StsAuthClient) {
     let aws_config = aws_config::defaults(aws_config::BehaviorVersion::latest())
         .profile_name(&config.aws_profile)
         .region(aws_config::Region::new(config.region.clone()))
@@ -46,7 +48,10 @@ async fn init_aws_client(config: &Config) -> poller::aws::AwsPipelineClient {
         .load()
         .await;
 
-    poller::aws::AwsPipelineClient::new(aws_sdk_codepipeline::Client::new(&aws_config))
+    let pipeline_client =
+        poller::aws::AwsPipelineClient::new(aws_sdk_codepipeline::Client::new(&aws_config));
+    let sts_client = poller::aws::StsAuthClient::new(aws_sdk_sts::Client::new(&aws_config));
+    (pipeline_client, sts_client)
 }
 
 async fn run_poll_orchestrator(
@@ -70,6 +75,7 @@ async fn run_poll_orchestrator(
     )?;
 
     let mut aws_client: Option<poller::aws::AwsPipelineClient> = None;
+    let mut sts_client: Option<poller::aws::StsAuthClient> = None;
     let mut scheduler = PollScheduler::new();
     let mut link_map = LinkMap::new();
     let cache_path = cwd.join(".cibars-links.toml");
@@ -100,7 +106,8 @@ async fn run_poll_orchestrator(
         // Lazy-init AWS on first need + cache-first link discovery
         if need_aws && aws_client.is_none() {
             tracing::info!("initializing AWS client (first active poll)");
-            let client = init_aws_client(&config).await;
+            let (client, sts) = init_aws_client(&config).await;
+            sts_client = Some(sts);
 
             // Cache-first: try loading from disk
             match linkage::load_link_cache(&cache_path) {
@@ -140,6 +147,13 @@ async fn run_poll_orchestrator(
                     tokio::join!(
                         poller::poll_actions_tick(&app, &gh_client),
                         poller::poll_pipelines_tick(&app, aws, &config.aws_profile, force_aws),
+                    );
+                } else if let Some(sts) = sts_client.as_ref()
+                    .filter(|_| scheduler.state() == PollState::LongIdle)
+                {
+                    tokio::join!(
+                        poller::poll_actions_tick(&app, &gh_client),
+                        poller::check_aws_auth(&app, sts, &config.aws_profile),
                     );
                 } else {
                     poller::poll_actions_tick(&app, &gh_client).await;

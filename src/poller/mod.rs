@@ -115,6 +115,11 @@ pub trait ActionsClient: Send + Sync {
     async fn fetch_workflow_files(&self) -> Result<Vec<WorkflowFile>>;
 }
 
+#[async_trait]
+pub trait AuthHealthClient: Send + Sync {
+    async fn get_caller_identity(&self) -> Result<()>;
+}
+
 /// Detect AWS auth/credential errors by string matching.
 fn is_auth_error(msg: &str) -> bool {
     msg.contains("ExpiredToken")
@@ -168,6 +173,30 @@ pub async fn poll_pipelines_tick(
     let mut a = app.lock().expect("app mutex poisoned");
     a.loading_pipelines = false;
     a.last_poll = Some(Utc::now());
+}
+
+/// Lightweight AWS credential health check via STS GetCallerIdentity.
+/// Used during LongIdle to detect expired SSO sessions without a full pipeline poll.
+pub async fn check_aws_auth(app: &Arc<Mutex<App>>, client: &dyn AuthHealthClient, profile: &str) {
+    match client.get_caller_identity().await {
+        Ok(()) => {
+            let mut a = app.lock().expect("app mutex poisoned");
+            if matches!(a.aws_health, SourceHealth::AuthFailed { .. }) {
+                a.aws_health = SourceHealth::Healthy;
+                a.warnings.retain(|w| !w.starts_with("AWS:"));
+            }
+        }
+        Err(e) => {
+            let msg = format!("{e:#}");
+            if is_auth_error(&msg) {
+                let mut a = app.lock().expect("app mutex poisoned");
+                a.aws_health = SourceHealth::AuthFailed { since: Utc::now() };
+                a.push_warning(format!(
+                    "AWS: SSO session expired \u{2014} run `aws sso login --profile {profile}` then press b"
+                ));
+            }
+        }
+    }
 }
 
 /// Poll GitHub Actions in two phases for fast perceived startup.
@@ -1501,5 +1530,90 @@ mod tests {
             "terminal job on first poll must have fill >= 1, got {}",
             job.fill
         );
+    }
+
+    // --- check_aws_auth tests ---
+
+    struct OkAuthClient;
+
+    #[async_trait]
+    impl AuthHealthClient for OkAuthClient {
+        async fn get_caller_identity(&self) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    struct ExpiredAuthClient;
+
+    #[async_trait]
+    impl AuthHealthClient for ExpiredAuthClient {
+        async fn get_caller_identity(&self) -> Result<()> {
+            anyhow::bail!("ExpiredToken: the security token is expired")
+        }
+    }
+
+    struct NetworkErrorAuthClient;
+
+    #[async_trait]
+    impl AuthHealthClient for NetworkErrorAuthClient {
+        async fn get_caller_identity(&self) -> Result<()> {
+            anyhow::bail!("connection refused")
+        }
+    }
+
+    #[tokio::test]
+    async fn check_aws_auth_expired_sets_auth_failed() {
+        let app = Arc::new(Mutex::new(App::new()));
+        let client = ExpiredAuthClient;
+        check_aws_auth(&app, &client, "my-profile").await;
+
+        let a = app.lock().unwrap();
+        assert!(matches!(a.aws_health, SourceHealth::AuthFailed { .. }));
+        assert!(a.warnings.iter().any(|w| w.contains("aws sso login")));
+        assert!(a.warnings.iter().any(|w| w.contains("my-profile")));
+    }
+
+    #[tokio::test]
+    async fn check_aws_auth_success_clears_auth_failed() {
+        let app = Arc::new(Mutex::new(App::new()));
+        {
+            let mut a = app.lock().unwrap();
+            a.aws_health = SourceHealth::AuthFailed { since: Utc::now() };
+            a.push_warning("AWS: SSO session expired".to_string());
+        }
+
+        let client = OkAuthClient;
+        check_aws_auth(&app, &client, "my-profile").await;
+
+        let a = app.lock().unwrap();
+        assert!(matches!(a.aws_health, SourceHealth::Healthy));
+        assert!(a.warnings.is_empty());
+    }
+
+    #[tokio::test]
+    async fn check_aws_auth_non_auth_error_does_not_set_auth_failed() {
+        let app = Arc::new(Mutex::new(App::new()));
+        let client = NetworkErrorAuthClient;
+        check_aws_auth(&app, &client, "my-profile").await;
+
+        let a = app.lock().unwrap();
+        assert!(!matches!(a.aws_health, SourceHealth::AuthFailed { .. }));
+        assert!(a.warnings.is_empty());
+    }
+
+    #[tokio::test]
+    async fn check_aws_auth_success_noop_when_already_healthy() {
+        let app = Arc::new(Mutex::new(App::new()));
+        {
+            let mut a = app.lock().unwrap();
+            a.aws_health = SourceHealth::Healthy;
+        }
+
+        let client = OkAuthClient;
+        check_aws_auth(&app, &client, "my-profile").await;
+
+        let a = app.lock().unwrap();
+        assert!(matches!(a.aws_health, SourceHealth::Healthy));
+        assert!(a.warnings.is_empty());
     }
 }

@@ -2,7 +2,10 @@ use anyhow::{Context, Result};
 use async_trait::async_trait;
 use aws_sdk_codepipeline::Client;
 
-use super::{ActionState, PipelineClient, PipelineDefinition, PipelineState, S3Source, StageState};
+use super::{
+    ActionState, AuthHealthClient, PipelineClient, PipelineDefinition, PipelineState, S3Source,
+    StageState,
+};
 use crate::model::BuildStatus;
 
 pub struct AwsPipelineClient {
@@ -167,6 +170,28 @@ impl PipelineClient for AwsPipelineClient {
             name: name.to_string(),
             source_s3,
         })
+    }
+}
+
+pub struct StsAuthClient {
+    client: aws_sdk_sts::Client,
+}
+
+impl StsAuthClient {
+    pub fn new(client: aws_sdk_sts::Client) -> Self {
+        Self { client }
+    }
+}
+
+#[async_trait]
+impl AuthHealthClient for StsAuthClient {
+    async fn get_caller_identity(&self) -> anyhow::Result<()> {
+        self.client
+            .get_caller_identity()
+            .send()
+            .await
+            .map(|_| ())
+            .map_err(|e| anyhow::anyhow!("{e:#}"))
     }
 }
 

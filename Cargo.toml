@@ -9,6 +9,7 @@ base64 = "0.22"
 async-trait = "0.1"
 aws-config = { version = "1", features = ["behavior-version-latest", "sso"] }
 aws-sdk-codepipeline = "1"
+aws-sdk-sts = "1"
 chrono = "0.4"
 clap = { version = "4", features = ["derive"] }
 crossterm = "0.29"

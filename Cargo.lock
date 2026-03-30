@@ -692,6 +692,7 @@ dependencies = [
  "async-trait",
  "aws-config",
  "aws-sdk-codepipeline",
+ "aws-sdk-sts",
  "base64",
  "chrono",
  "clap",
