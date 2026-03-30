@@ -239,6 +239,10 @@ enum InterruptSource {
 }
 
 fn write_pid_file(pid_path: &std::path::Path) -> Result<()> {
+    if let Some(parent) = pid_path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("cannot create {}", parent.display()))?;
+    }
     std::fs::write(pid_path, std::process::id().to_string())
         .with_context(|| format!("cannot write PID file {}", pid_path.display()))?;
     Ok(())
@@ -270,13 +274,11 @@ fn main() -> Result<()> {
 
     let cwd = std::env::current_dir().context("cannot read cwd")?;
     let (config, token) = Config::load(&cwd)?;
-    let pid_path = dirs::home_dir()
-        .context("no home dir")?
-        .join(".cibars/cibars.pid");
+    let pid_path = config::pid_file_for(&cwd)?;
     write_pid_file(&pid_path)?;
     tracing::info!(pid = std::process::id(), "starting cibars");
     let mut app_state = App::new();
-    app_state.hook_status = config::check_pre_push_hook(&cwd);
+    app_state.hook_status = config::check_pre_push_hook(&cwd, &pid_path);
     let app = Arc::new(Mutex::new(app_state));
 
     // Build tokio runtime for async polling
@@ -329,6 +331,7 @@ fn main() -> Result<()> {
         boost_notify,
         link_notify,
         &term_flag,
+        &pid_path,
     );
     ratatui::restore();
 
