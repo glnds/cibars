@@ -1618,4 +1618,82 @@ mod tests {
         assert!(matches!(a.aws_health, SourceHealth::Healthy));
         assert!(a.warnings.is_empty());
     }
+
+    #[test]
+    fn stage_status_and_timestamp_empty_actions() {
+        let actions: Vec<ActionState> = vec![];
+        let (status, timestamp) = stage_status_and_timestamp(&actions);
+        assert_eq!(status, BuildStatus::Idle);
+        assert!(timestamp.is_none());
+    }
+
+    #[test]
+    fn stage_status_and_timestamp_failed_with_time() {
+        use chrono::TimeZone;
+        let ts = chrono::Utc
+            .with_ymd_and_hms(2026, 3, 18, 14, 25, 0)
+            .unwrap();
+        let actions = vec![ActionState {
+            status: BuildStatus::Failed,
+            last_status_change: Some(ts),
+        }];
+        let (status, timestamp) = stage_status_and_timestamp(&actions);
+        assert_eq!(status, BuildStatus::Failed);
+        assert_eq!(timestamp, Some(ts));
+    }
+
+    #[test]
+    fn stage_status_and_timestamp_running_ignores_timestamp() {
+        use chrono::TimeZone;
+        let ts = chrono::Utc
+            .with_ymd_and_hms(2026, 3, 18, 14, 25, 0)
+            .unwrap();
+        let actions = vec![ActionState {
+            status: BuildStatus::Running,
+            last_status_change: Some(ts),
+        }];
+        let (status, timestamp) = stage_status_and_timestamp(&actions);
+        assert_eq!(status, BuildStatus::Running);
+        assert!(timestamp.is_none(), "Running should not expose timestamp");
+    }
+
+    #[test]
+    fn stage_status_and_timestamp_multi_action_uses_last() {
+        use chrono::TimeZone;
+        let ts = chrono::Utc.with_ymd_and_hms(2026, 3, 18, 15, 0, 0).unwrap();
+        let actions = vec![
+            ActionState {
+                status: BuildStatus::Succeeded,
+                last_status_change: Some(
+                    chrono::Utc.with_ymd_and_hms(2026, 3, 18, 14, 0, 0).unwrap(),
+                ),
+            },
+            ActionState {
+                status: BuildStatus::Failed,
+                last_status_change: Some(ts),
+            },
+        ];
+        let (status, timestamp) = stage_status_and_timestamp(&actions);
+        assert_eq!(
+            status,
+            BuildStatus::Failed,
+            "should use last action's status"
+        );
+        assert_eq!(timestamp, Some(ts), "should use last action's timestamp");
+    }
+
+    #[tokio::test]
+    async fn update_workflow_jobs_missing_group_is_noop() {
+        let mut app = App::new();
+        update_workflow_jobs(
+            &mut app,
+            "nonexistent",
+            vec![JobInfo {
+                name: "build".to_string(),
+                status: BuildStatus::Running,
+                completed_at: None,
+            }],
+        );
+        assert!(app.workflow_groups.is_empty());
+    }
 }
