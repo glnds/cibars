@@ -201,7 +201,7 @@ pub fn pid_file_for(cwd: &Path) -> Result<PathBuf> {
 /// Dynamic hook snippet — derives PID path at runtime using `pwd`.
 /// Works from any directory, targets the correct cibars instance.
 const HOOK_SNIPPET: &str = "\n# cibars: boost polling on push\n\
-    _cibars_pid=\"$HOME/.cibars/pids/$(pwd | tr '/' '_').pid\"\n\
+    _cibars_pid=\"$HOME/.cibars/pids/$(git rev-parse --show-toplevel | tr '/' '_').pid\"\n\
     kill -USR1 $(cat \"$_cibars_pid\" 2>/dev/null) 2>/dev/null || true\n";
 
 /// Delegation block: calls repo-local pre-push if it exists.
@@ -629,10 +629,18 @@ aws_profile = "staging"
     // --- hook snippet tests ---
 
     #[test]
-    fn hook_snippet_uses_dynamic_pwd() {
+    fn hook_snippet_uses_git_toplevel() {
         assert!(
-            HOOK_SNIPPET.contains("$(pwd | tr '/' '_')"),
-            "got: {HOOK_SNIPPET}"
+            HOOK_SNIPPET.contains("$(git rev-parse --show-toplevel | tr '/' '_')"),
+            "snippet should use git rev-parse --show-toplevel, got: {HOOK_SNIPPET}"
+        );
+    }
+
+    #[test]
+    fn hook_snippet_does_not_use_bare_pwd() {
+        assert!(
+            !HOOK_SNIPPET.contains("$(pwd"),
+            "snippet must not use pwd (breaks after cd), got: {HOOK_SNIPPET}"
         );
     }
 
@@ -904,7 +912,7 @@ aws_profile = "staging"
         let content = std::fs::read_to_string(hooks_dir.join("pre-push")).unwrap();
         assert!(content.contains("#!/bin/sh"));
         assert!(content.contains("cibars"));
-        assert!(content.contains("$(pwd | tr"));
+        assert!(content.contains("$(git rev-parse --show-toplevel | tr"));
     }
 
     #[test]
