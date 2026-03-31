@@ -494,4 +494,76 @@ mod tests {
         let a = app.lock().unwrap();
         assert_eq!(a.poll_state, scheduler.state());
     }
+
+    #[test]
+    fn e2e_double_boost_stays_watching() {
+        let app = Arc::new(Mutex::new(App::new()));
+        let mut scheduler = PollScheduler::new();
+        assert_eq!(scheduler.state(), PollState::Idle);
+
+        handle_poll_interrupt(&app, &mut scheduler, InterruptSource::Boost);
+        assert_eq!(scheduler.state(), PollState::Watching);
+
+        handle_poll_interrupt(&app, &mut scheduler, InterruptSource::Boost);
+        assert_eq!(scheduler.state(), PollState::Watching);
+        assert!(
+            app.lock().unwrap().push_signal_at.is_none(),
+            "boost should never set push_signal_at"
+        );
+    }
+
+    #[test]
+    fn e2e_sigusr1_then_boost_both_watching() {
+        let app = Arc::new(Mutex::new(App::new()));
+        let mut scheduler = PollScheduler::new();
+
+        handle_poll_interrupt(&app, &mut scheduler, InterruptSource::Sigusr1);
+        assert_eq!(scheduler.state(), PollState::Watching);
+        assert!(app.lock().unwrap().push_signal_at.is_some());
+
+        handle_poll_interrupt(&app, &mut scheduler, InterruptSource::Boost);
+        assert_eq!(scheduler.state(), PollState::Watching);
+    }
+
+    #[test]
+    fn e2e_boost_never_sets_push_signal_across_states() {
+        let app = Arc::new(Mutex::new(App::new()));
+        let mut scheduler = PollScheduler::new();
+
+        // Boost from Idle
+        handle_poll_interrupt(&app, &mut scheduler, InterruptSource::Boost);
+        assert!(app.lock().unwrap().push_signal_at.is_none());
+
+        // Boost again from Watching
+        handle_poll_interrupt(&app, &mut scheduler, InterruptSource::Boost);
+        assert!(app.lock().unwrap().push_signal_at.is_none());
+    }
+
+    #[test]
+    fn e2e_pid_file_overwritten_on_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let pid_path = dir.path().join("cibars.pid");
+
+        // Write initial PID file with fake PID
+        std::fs::write(&pid_path, "99999").unwrap();
+
+        // Overwrite with current PID (simulates restart)
+        write_pid_file(&pid_path).unwrap();
+        let content = std::fs::read_to_string(&pid_path).unwrap();
+        assert_eq!(content, std::process::id().to_string());
+    }
+
+    #[test]
+    fn e2e_pid_file_creates_nested_parent_dirs() {
+        let dir = tempfile::tempdir().unwrap();
+        let pid_path = dir.path().join("deep").join("nested").join("cibars.pid");
+
+        // Parent dirs don't exist yet
+        assert!(!pid_path.parent().unwrap().exists());
+
+        write_pid_file(&pid_path).unwrap();
+        assert!(pid_path.exists());
+        let content = std::fs::read_to_string(&pid_path).unwrap();
+        assert_eq!(content, std::process::id().to_string());
+    }
 }
