@@ -2243,4 +2243,130 @@ jobs:
             assignment.pipeline_jobs.is_empty() || assignment.pipeline_jobs["pipe"].1.is_empty()
         );
     }
+
+    #[test]
+    fn assign_jobs_deep_chain_four_levels() {
+        let wf = make_workflow_file(
+            "CI",
+            vec![
+                make_job("d", "Step D", &["c"], &[("bucket", "out.zip")]),
+                make_job("b", "Step B", &["a"], &[]),
+                make_job("c", "Step C", &["b"], &[]),
+                make_job("a", "Step A", &[], &[]),
+            ],
+        );
+
+        let mut link_map = LinkMap::new();
+        link_map.add_discovered(
+            "pipe".into(),
+            "CI".into(),
+            "bucket".into(),
+            "out.zip".into(),
+        );
+
+        let assignment = assign_jobs_to_pipelines(&[wf], &link_map);
+        let (_, jobs) = &assignment.pipeline_jobs["pipe"];
+        assert_eq!(jobs, &["Step A", "Step B", "Step C", "Step D"]);
+    }
+
+    #[test]
+    fn assign_jobs_all_jobs_no_s3_all_shared() {
+        let wf = make_workflow_file(
+            "CI",
+            vec![
+                make_job("lint", "Lint", &[], &[]),
+                make_job("test", "Test", &["lint"], &[]),
+                make_job("check", "Check", &[], &[]),
+            ],
+        );
+
+        let mut link_map = LinkMap::new();
+        link_map.add_discovered(
+            "pipe".into(),
+            "CI".into(),
+            "bucket".into(),
+            "key.zip".into(),
+        );
+
+        let assignment = assign_jobs_to_pipelines(&[wf], &link_map);
+
+        let has_pipe_jobs = assignment
+            .pipeline_jobs
+            .get("pipe")
+            .map(|(_, j)| !j.is_empty())
+            .unwrap_or(false);
+        assert!(!has_pipe_jobs, "no jobs should be assigned to pipeline");
+
+        let shared: Vec<&str> = assignment
+            .shared_jobs
+            .iter()
+            .flat_map(|(_, names)| names.iter().map(|s| s.as_str()))
+            .collect();
+        assert_eq!(shared.len(), 3);
+    }
+
+    #[test]
+    fn assign_jobs_multiple_workflows_separate_links() {
+        let wf1 = make_workflow_file(
+            "Backend CI",
+            vec![
+                make_job("test-be", "Test Backend", &[], &[]),
+                make_job(
+                    "build-be",
+                    "Build Backend",
+                    &["test-be"],
+                    &[("bucket", "backend/src.zip")],
+                ),
+            ],
+        );
+        let wf2 = make_workflow_file(
+            "Frontend CI",
+            vec![
+                make_job("test-fe", "Test Frontend", &[], &[]),
+                make_job(
+                    "build-fe",
+                    "Build Frontend",
+                    &["test-fe"],
+                    &[("bucket", "frontend/dist.zip")],
+                ),
+            ],
+        );
+
+        let mut link_map = LinkMap::new();
+        link_map.add_discovered(
+            "backend-pipe".into(),
+            "Backend CI".into(),
+            "bucket".into(),
+            "backend/src.zip".into(),
+        );
+        link_map.add_discovered(
+            "frontend-pipe".into(),
+            "Frontend CI".into(),
+            "bucket".into(),
+            "frontend/dist.zip".into(),
+        );
+
+        let assignment = assign_jobs_to_pipelines(&[wf1, wf2], &link_map);
+
+        let (wf, be_jobs) = &assignment.pipeline_jobs["backend-pipe"];
+        assert_eq!(wf, "Backend CI");
+        assert_eq!(be_jobs, &["Test Backend", "Build Backend"]);
+
+        let (wf, fe_jobs) = &assignment.pipeline_jobs["frontend-pipe"];
+        assert_eq!(wf, "Frontend CI");
+        assert_eq!(fe_jobs, &["Test Frontend", "Build Frontend"]);
+    }
+
+    #[test]
+    fn link_map_workflow_for_pipeline_returns_none_when_missing() {
+        let link_map = LinkMap::new();
+        assert!(link_map.workflow_for_pipeline("nope").is_none());
+    }
+
+    #[test]
+    fn link_map_workflow_for_pipeline_returns_name() {
+        let mut link_map = LinkMap::new();
+        link_map.add_discovered("deploy".into(), "CI".into(), "b".into(), "k".into());
+        assert_eq!(link_map.workflow_for_pipeline("deploy"), Some("CI"));
+    }
 }
