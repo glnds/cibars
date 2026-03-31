@@ -958,7 +958,9 @@ pub fn run_ui(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{Bar, BuildStatus};
+    use crate::linkage::JobAssignment;
+    use crate::model::{Bar, BuildStatus, PipelineGroup, WorkflowCategory, WorkflowGroup};
+    use std::collections::HashMap;
 
     fn sorted_bars(bars: &[Bar]) -> Vec<&Bar> {
         let mut sorted: Vec<&Bar> = bars.iter().collect();
@@ -1821,5 +1823,96 @@ mod tests {
         app.poll_state = PollState::Idle;
         app.last_tick_advance = Some(Instant::now());
         assert!(!maybe_advance_tick(&mut app));
+    }
+
+    #[test]
+    fn build_pipeline_centric_empty_assignment() {
+        let assignment = JobAssignment {
+            pipeline_jobs: HashMap::new(),
+            shared_jobs: vec![],
+        };
+        let app = App::new();
+        let sections = build_pipeline_centric_sections(&assignment, &app);
+        assert!(sections.is_empty());
+    }
+
+    #[test]
+    fn build_pipeline_centric_shared_section_first() {
+        let assignment = JobAssignment {
+            pipeline_jobs: HashMap::new(),
+            shared_jobs: vec![("CI".into(), vec!["Lint".into(), "Test".into()])],
+        };
+        let app = App::new();
+        let sections = build_pipeline_centric_sections(&assignment, &app);
+        assert_eq!(sections.len(), 1);
+        assert_eq!(sections[0].title, " CI ");
+        assert_eq!(sections[0].rows.len(), 2);
+    }
+
+    #[test]
+    fn build_pipeline_centric_skips_empty_shared() {
+        let assignment = JobAssignment {
+            pipeline_jobs: HashMap::new(),
+            shared_jobs: vec![("CI".into(), vec![])],
+        };
+        let app = App::new();
+        let sections = build_pipeline_centric_sections(&assignment, &app);
+        assert!(sections.is_empty(), "empty shared_names should be skipped");
+    }
+
+    #[test]
+    fn build_pipeline_centric_pipeline_section_with_stages() {
+        let mut pipeline_jobs = HashMap::new();
+        pipeline_jobs.insert(
+            "deploy".to_string(),
+            ("CI".to_string(), vec!["Build".to_string()]),
+        );
+        let assignment = JobAssignment {
+            pipeline_jobs,
+            shared_jobs: vec![],
+        };
+
+        let mut app = App::new();
+        let mut stage = Bar::new("Source".into());
+        stage.set_status(BuildStatus::Succeeded);
+        app.pipeline_groups.push(PipelineGroup {
+            name: "deploy".into(),
+            stages: vec![stage],
+            gone: false,
+            summary_status: BuildStatus::Succeeded,
+            pending_link: false,
+        });
+
+        let sections = build_pipeline_centric_sections(&assignment, &app);
+        assert_eq!(sections.len(), 1);
+        assert_eq!(sections[0].title, " deploy ");
+        // Should have: 1 job bar + 1 pipeline header + 1 stage bar = 3 rows
+        assert_eq!(sections[0].rows.len(), 3);
+    }
+
+    #[test]
+    fn build_pipeline_centric_reviews_section_last() {
+        let assignment = JobAssignment {
+            pipeline_jobs: HashMap::new(),
+            shared_jobs: vec![("CI".into(), vec!["Test".into()])],
+        };
+
+        let mut app = App::new();
+        let mut review_job = Bar::new("review-check".into());
+        review_job.set_status(BuildStatus::Running);
+        app.workflow_groups.push(WorkflowGroup {
+            name: "Review".into(),
+            jobs: vec![review_job],
+            gone: false,
+            summary_status: BuildStatus::Running,
+            run_id: None,
+            category: WorkflowCategory::Review,
+            linked_pipeline: None,
+        });
+
+        let sections = build_pipeline_centric_sections(&assignment, &app);
+        assert_eq!(sections.len(), 2); // shared + reviews
+        assert_eq!(sections[1].title, " reviews ");
+        assert_eq!(sections[1].rows.len(), 1);
     }
 }
