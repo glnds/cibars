@@ -469,4 +469,38 @@ mod tests {
             Duration::from_millis(50000)
         );
     }
+
+    #[test]
+    fn clear_warnings_by_prefix_removes_matching() {
+        let mut app = App::new();
+        app.push_warning("AWS: SSO expired".to_string());
+        app.push_warning("AWS: timeout".to_string());
+        app.clear_warnings_by_prefix("AWS:");
+        assert!(app.warnings.is_empty());
+    }
+
+    #[test]
+    fn clear_warnings_by_prefix_keeps_others() {
+        let mut app = App::new();
+        app.push_warning("AWS: SSO expired".to_string());
+        app.push_warning("GitHub: rate limited".to_string());
+        app.clear_warnings_by_prefix("AWS:");
+        assert_eq!(app.warnings.len(), 1);
+        assert_eq!(app.warnings[0], "GitHub: rate limited");
+    }
+
+    #[test]
+    fn clear_warnings_by_prefix_no_match_noop() {
+        let mut app = App::new();
+        app.push_warning("GitHub: rate limited".to_string());
+        app.clear_warnings_by_prefix("AWS:");
+        assert_eq!(app.warnings.len(), 1);
+    }
+
+    #[test]
+    fn clear_warnings_by_prefix_empty_warnings() {
+        let mut app = App::new();
+        app.clear_warnings_by_prefix("AWS:");
+        assert!(app.warnings.is_empty());
+    }
 }
