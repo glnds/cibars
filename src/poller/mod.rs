@@ -120,6 +120,12 @@ pub trait AuthHealthClient: Send + Sync {
     async fn get_caller_identity(&self) -> Result<()>;
 }
 
+fn aws_sso_expired_msg(profile: &str) -> String {
+    format!(
+        "AWS: SSO session expired \u{2014} run `aws sso login --profile {profile}` then press b"
+    )
+}
+
 /// Detect AWS auth/credential errors by string matching.
 fn is_auth_error(msg: &str) -> bool {
     msg.contains("ExpiredToken")
@@ -146,7 +152,7 @@ pub async fn poll_pipelines_tick(
 
     {
         let mut a = app.lock().expect("app mutex poisoned");
-        a.warnings.retain(|w| !w.starts_with("AWS:"));
+        a.clear_warnings_by_prefix("AWS:");
     }
 
     match poll_pipelines(client).await {
@@ -161,9 +167,7 @@ pub async fn poll_pipelines_tick(
             let mut a = app.lock().expect("app mutex poisoned");
             if is_auth_error(&msg) {
                 a.aws_health = SourceHealth::AuthFailed { since: Utc::now() };
-                a.push_warning(format!(
-                    "AWS: SSO session expired \u{2014} run `aws sso login --profile {profile}` then press b"
-                ));
+                a.push_warning(aws_sso_expired_msg(profile));
             } else {
                 a.push_warning(format!("AWS: {msg}"));
             }
@@ -183,7 +187,7 @@ pub async fn check_aws_auth(app: &Arc<Mutex<App>>, client: &dyn AuthHealthClient
             let mut a = app.lock().expect("app mutex poisoned");
             if matches!(a.aws_health, SourceHealth::AuthFailed { .. }) {
                 a.aws_health = SourceHealth::Healthy;
-                a.warnings.retain(|w| !w.starts_with("AWS:"));
+                a.clear_warnings_by_prefix("AWS:");
             }
         }
         Err(e) => {
@@ -191,9 +195,7 @@ pub async fn check_aws_auth(app: &Arc<Mutex<App>>, client: &dyn AuthHealthClient
             if is_auth_error(&msg) {
                 let mut a = app.lock().expect("app mutex poisoned");
                 a.aws_health = SourceHealth::AuthFailed { since: Utc::now() };
-                a.push_warning(format!(
-                    "AWS: SSO session expired \u{2014} run `aws sso login --profile {profile}` then press b"
-                ));
+                a.push_warning(aws_sso_expired_msg(profile));
             }
         }
     }
@@ -212,7 +214,7 @@ pub async fn poll_actions_tick(app: &Arc<Mutex<App>>, client: &dyn ActionsClient
 
     {
         let mut a = app.lock().expect("app mutex poisoned");
-        a.warnings.retain(|w| !w.starts_with("GitHub:"));
+        a.clear_warnings_by_prefix("GitHub:");
     }
 
     if skip_github {

@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::time::Instant;
 
 use chrono::{DateTime, Utc};
@@ -103,6 +104,10 @@ impl App {
         self.warnings.push(msg);
     }
 
+    pub fn clear_warnings_by_prefix(&mut self, prefix: &str) {
+        self.warnings.retain(|w| !w.starts_with(prefix));
+    }
+
     /// Compare link map against live data. Only meaningful after initial
     /// loading is complete (both pipelines and actions fetched at least once).
     pub fn check_linkage_health(&mut self, link_map: &crate::linkage::LinkMap) {
@@ -113,19 +118,20 @@ impl App {
             self.linkage_broken = false;
             return;
         }
-        let ghost_pipeline = link_map.links().iter().any(|l| {
-            !self
-                .pipeline_groups
-                .iter()
-                .any(|pg| pg.name == l.pipeline_name)
+        let pipeline_names: HashSet<&str> = self
+            .pipeline_groups
+            .iter()
+            .map(|pg| pg.name.as_str())
+            .collect();
+        let workflow_names: HashSet<&str> = self
+            .workflow_groups
+            .iter()
+            .map(|wg| wg.name.as_str())
+            .collect();
+        self.linkage_broken = link_map.links().iter().any(|l| {
+            !pipeline_names.contains(l.pipeline_name.as_str())
+                || !workflow_names.contains(l.workflow_name.as_str())
         });
-        let ghost_workflow = link_map.links().iter().any(|l| {
-            !self
-                .workflow_groups
-                .iter()
-                .any(|wg| wg.name == l.workflow_name)
-        });
-        self.linkage_broken = ghost_pipeline || ghost_workflow;
     }
 
     pub fn has_any_running(&self) -> bool {

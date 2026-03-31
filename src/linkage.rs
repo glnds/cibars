@@ -47,7 +47,6 @@ pub enum LinkSource {
 }
 
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct PipelineLink {
     pub pipeline_name: String,
     pub workflow_name: String,
@@ -125,6 +124,11 @@ impl LinkMap {
         self.recent_completions
             .push((workflow_name.to_string(), Instant::now()));
         self.prune_expired();
+        // Cap to prevent unbounded growth in long-running sessions
+        if self.recent_completions.len() > 500 {
+            self.recent_completions
+                .drain(..self.recent_completions.len() - 500);
+        }
     }
 
     /// Try to correlate a newly-started CP pipeline with a recently-completed

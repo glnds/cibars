@@ -177,21 +177,17 @@ async fn run_poll_orchestrator(
         // Apply linkage: mark GH workflows as Succeeded when linked CP starts Running
         linkage::apply_links(&app, &mut link_map, &mut stopped_runs);
 
-        // Sync linked_pipeline on workflow groups and check health
+        // Sync linked_pipeline, check health, transition + update display state
         linkage::sync_linked_pipelines(&app, &link_map);
-        {
+        let any_running = {
             let mut a = app.lock().expect("app mutex poisoned");
             a.check_linkage_health(&link_map);
-        }
-
-        // Transition + update App display state
-        let any_running = app.lock().expect("app mutex poisoned").has_any_running();
-        scheduler.transition(any_running);
-        {
-            let mut a = app.lock().expect("app mutex poisoned");
+            let any_running = a.has_any_running();
+            scheduler.transition(any_running);
             a.poll_state = scheduler.state();
             a.cooldown_remaining = scheduler.cooldown_remaining();
-        }
+            any_running
+        };
 
         // Sleep only the remaining interval after poll duration
         let remaining = scheduler.interval().saturating_sub(cycle_start.elapsed());
