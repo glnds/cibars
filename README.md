@@ -4,23 +4,83 @@ A lightweight terminal UI for monitoring CI/CD pipelines, built in Rust.
 
 `cibars` runs as a daemon inside a tmux pane and gives you a live,
 consolidated view of your AWS CodePipelines and GitHub Actions in a
-single screen — no browser required.
+single screen -- no browser required.
+
+![cibars screenshot](docs/screenshot.png)
 
 ## Features
 
-- Live polling of AWS CodePipelines and GitHub Actions
-- Intelligent polling: slow when idle, fast when builds are running
-- Manual boost (`b`) or external boost (SIGUSR1) for immediate refresh
-- htop-inspired terminal UI: compact, color-coded, always up-to-date
-- Visual indicators for running, succeeded, and failed builds
-- Auto-discovery of new pipelines and workflow runs — no restart needed
-- Designed to run persistently inside a tmux window
+### Core Monitoring
+
+- Live polling of AWS CodePipelines and GitHub Actions in a single TUI
+- Intelligent polling state machine: Idle (30s) -> LongIdle (5min) ->
+  Watching (5s) -> Active (5s) -> Cooldown (5s, 60s timer)
+- Auto-discovery of new pipelines and workflow runs (no restart needed)
+- Branch filtering for GitHub Actions (`--branch` flag)
+- Workflow categorization: CI vs Review (auto-detected via heuristics +
+  config override)
+
+### Smart Linkage
+
+- Automatic GH Actions to CodePipeline linkage via S3 source artifact
+  matching
+- YAML-based and runtime-correlated link discovery
+- Pipeline-centric UI layout: jobs grouped under their downstream
+  pipeline
+- Linkage health monitoring with broken-link warnings
+- Manual link re-discovery (`l` key)
+
+### Hook Integration
+
+- Auto-install pre-push hook via `p` (local) or `g` (global) key
+- `core.hooksPath` awareness: detects global hooks dir, auto-delegates
+  to local hooks
+- Per-project PID files for multi-instance signal targeting
+- `pushed!` flash feedback when SIGUSR1 received from hook
+
+### AWS SSO Support
+
+- SSO token health monitoring via STS `GetCallerIdentity` during
+  LongIdle
+- Visual SSO expired indicator in header
+
+### UI
+
+- btop-inspired terminal UI with rounded borders and muted color palette
+- Color-coded bars: yellow-to-orange gradient (running), green
+  (succeeded), red (failed), grey (idle)
+- Braille-character bar fill with gradient animation
+- Expand/collapse all sections (`e` key)
+- Boost key (`b`) with visual flash feedback
+- Status bar with poll state indicator, animated tick counter,
+  keybindings, hook status, linkage status, and warnings
+- Completion timestamps per bar (HH:MM)
+
+### Operational
+
+- Manual boost via `b` key or SIGUSR1 signal
+- Graceful SIGTERM handling for tmux session cleanup
+- Per-project PID files (`~/.cibars/pids/`) for reliable signal
+  delivery
+- Rate limit back-off for GitHub API (60s)
+- Structured logging to `~/.cibars/cibars.log` with configurable
+  levels via `RUST_LOG`
 
 ## Requirements
 
-- Rust 1.78+
-- An AWS profile configured via `~/.aws/credentials` or `AWS_PROFILE`
-- A GitHub personal access token with `repo` and `actions:read` scope, set via `GITHUB_TOKEN`
+- Rust 1.78+ (stable toolchain)
+- An AWS profile configured via `~/.aws/credentials`,
+  `~/.aws/config`, or `AWS_PROFILE` (SSO profiles supported)
+- A GitHub token: either `GITHUB_TOKEN` env var or `gh auth token`
+  (GitHub CLI auto-fallback)
+
+## Installation
+
+```bash
+git clone https://github.com/glnds/cibars
+cd cibars
+cargo install --path .
+```
 
 ## Usage
 
@@ -31,20 +91,25 @@ cibars --aws-profile <profile> --region <region> --github-repo <owner/repo>
 ### Arguments
 
 | Argument | Description | Example |
-|---|---|---|
+| --- | --- | --- |
 | `--aws-profile` | AWS named profile to use | `staging` |
 | `--region` | AWS region | `eu-west-1` |
 | `--github-repo` | GitHub repository in `owner/repo` format | `acme/backend` |
+| `--branch` | Git branch to filter GitHub Actions runs | `master` |
 
 ### Configuration file
 
-Instead of passing CLI flags, you can create a `config.toml` in
-the working directory. CLI args take precedence over file values.
+Instead of passing CLI flags, create a `config.toml` in the working
+directory. CLI args take precedence.
 
 ```toml
 aws_profile = "staging"
 region = "eu-west-1"
 github_repo = "acme/backend"
+# branch = "master"
+
+# [workflow_categories]
+# review = ["Claude Code Review"]
 ```
 
 Copy `config.toml.example` to get started:
@@ -56,44 +121,53 @@ cp config.toml.example config.toml
 ### Environment variables
 
 | Variable | Required | Description |
-|---|---|---|
-| `GITHUB_TOKEN` | Yes | GitHub PAT with `repo` and `actions:read` scope |
+| --- | --- | --- |
+| `GITHUB_TOKEN` | No* | GitHub PAT, `repo` + `actions:read`. *Falls back to `gh auth token`. |
+| `RUST_LOG` | No | Log level for `~/.cibars/cibars.log` (e.g. `info`, `debug`, `trace`) |
+
+## Keybindings
+
+| Key | Action |
+| --- | --- |
+| `e` | Expand / collapse all sections |
+| `b` | Boost: trigger immediate poll (Idle/LongIdle -> Watching) |
+| `p` | Install pre-push hook in `.git/hooks/` (local) |
+| `g` | Install pre-push hook in global hooks dir (when `core.hooksPath` is set) |
+| `l` | Re-discover GH Actions / CodePipeline linkage |
+| `q` | Quit |
+| `Ctrl+C` | Quit |
 
 ## UI Layout
 
-Each monitored pipeline or workflow gets its own labeled bar. Every
-poll cycle appends one `|` to the bar while the build is running.
-The bar color encodes the build state:
-
-| Color | Meaning |
-|---|---|
-| Yellow | Build is running |
-| Green | Build finished: succeeded |
-| Red | Build finished: failed |
-| Grey | No active or recent build |
-
-When a running bar reaches the terminal edge before the build
-completes, it resets to the left and starts filling again from
-position 0. On completion, the entire bar switches instantly to
-green or red.
-
 ```text
-┌─ cibars ── eu-west-1 / acme/backend ──────────────────────── 14:32:05 ─┐
-│                                                                           │
-│  CodePipelines                                                            │
-│  backend-deploy   [||||||||||||||||||||||||||||||||||||||||||||||||||||  ] │
-│  frontend-deploy  [||||||||||||||||||||                                  ] │
-│  infra-pipeline   [||||||||||||||||||||||||||||||||||||||||||||||||||||  ] │
-│                                                                           │
-│  GitHub Actions                                                           │
-│  CI / test        [||||||||||||||||||||||||||||||||||||||||||||||||||||  ] │
-│  Release/publish  [||||||||||||||||||||||||||||||||                      ] │
-│                                                                           │
-│  [e] expand  [b] boost  [q] quit                last poll: 14:32:00      │
-└───────────────────────────────────────────────────────────────────────────┘
+╭─ cibars v0.5.0-123 ──────────────────────────────────────────────────╮
+│ staging  │ eu-west-1 │ acme/backend │ 14:32:05                       │
+╰───────────────────────────────────────────────────────────────────────╯
+╭─ GitHub Actions ──────────────────────────────────────────────────────╮
+│ * CI / build      ⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿    14:31 │
+│   └ backend-deploy ⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿       14:30 │
+│ * CI / test        ⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿                  │
+│                                                                       │
+│ Review                                                                │
+│   Code Review      ⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿                      │
+╰───────────────────────────────────────────────────────────────────────╯
+╭─ CodePipelines ───────────────────────────────────────────────────────╮
+│ infra-pipeline     ⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿  14:28 │
+╰───────────────────────────────────────────────────────────────────────╯
+╭───────────────────────────────────────────────────────────────────────╮
+│ Slow ▮▯▯▯▯ │ e=expand b=boost q=quit │ hook │ l=relink               │
+╰───────────────────────────────────────────────────────────────────────╯
 ```
 
-Yellow bar = running.  Green bar = succeeded.  Red bar = failed.
+Bars use braille fill characters with gradient animation. Linked
+pipelines indent under their GitHub Action with a `└` connector.
+
+| Color | Hex | Meaning |
+| --- | --- | --- |
+| Yellow to Orange gradient | `#F0C050` to `#FF9E64` | Build is running |
+| Green | `#00FF7F` | Build finished: succeeded |
+| Red | `#FF4040` | Build finished: failed |
+| Grey | `#555555` | No active or recent build |
 
 ## Polling State Machine
 
@@ -122,32 +196,72 @@ to give immediate visibility into current status.
     └──────────────────► Watching
 ```
 
-| State    | GH interval | Poll AWS? | Entry                                               |
-|----------|-------------|-----------|-----------------------------------------------------|
-| Idle     | 30s         | No        | Startup (after initial poll), or cooldown expired   |
-| LongIdle | 5min        | No        | 5min of Idle with no running builds                 |
-| Watching | 5s          | No        | User pressed `b` from Idle or LongIdle              |
-| Active   | 5s          | Yes       | GitHub detects running builds                       |
-| Cooldown | 5s          | Yes       | Nothing running (from Active), 60s timer            |
+| State | GH interval | Poll AWS? | Entry |
+| --- | --- | --- | --- |
+| Idle | 30s | No | Startup (after initial poll), or cooldown expired |
+| LongIdle | 5min | No | 5min of Idle with no running builds |
+| Watching | 5s | No | User pressed `b` from Idle or LongIdle |
+| Active | 5s | Yes | GitHub detects running builds |
+| Cooldown | 5s | Yes | Nothing running (from Active), 60s timer |
 
 **Key transitions:**
 
-- Press `b` or send SIGUSR1 in Idle/LongIdle → Watching (fast GH-only polling)
-- 5min of Idle with no running builds → LongIdle (5min polling)
-- GitHub finds running builds → Active (adds AWS polling)
-- All builds finish → Cooldown (keeps fast polling for 60s)
-- 60s of inactivity → back to Idle
+- Press `b` or send SIGUSR1 in Idle/LongIdle -> Watching (fast
+  GH-only polling)
+- 5min of Idle with no running builds -> LongIdle (5min polling)
+- GitHub finds running builds -> Active (adds AWS polling)
+- All builds finish -> Cooldown (keeps fast polling for 60s)
+- 60s of inactivity -> back to Idle
 - Pressing `b` in Active/Cooldown is a no-op (already fast)
 
-## Installation
+**Notes:**
+
+- During LongIdle, cibars also polls STS `GetCallerIdentity` to
+  monitor AWS SSO session health.
+- SIGUSR1 during an active poll cancels the current API call and
+  restarts in Watching mode.
+
+## Git Hook Integration
+
+cibars can auto-install a `pre-push` git hook so every `git push`
+immediately boosts polling -- no manual `b` press needed.
+
+**How it works:**
+
+1. cibars writes a per-project PID file to `~/.cibars/pids/` on
+   startup.
+2. Press `p` to install a pre-push hook in `.git/hooks/` (local to
+   the repo).
+3. Press `g` to install in the global hooks dir (when
+   `core.hooksPath` is configured). This includes delegation to
+   repo-local hooks so both global and local hooks run.
+4. On `git push`, the hook sends SIGUSR1 to the correct cibars
+   instance via the PID file.
+5. The status bar shows `pushed!` flash for 1.5 seconds.
+
+**Status bar hook indicators:**
+
+- `hook` -- hook is installed and active
+- `p=install hook` -- no hook detected, press `p` to install
+- `hook:override g=fix` -- local hook is shadowed by
+  `core.hooksPath`, press `g` to fix
+
+**Manual SIGUSR1** still works for scripting or other integrations:
 
 ```bash
-git clone https://github.com/glnds/cibars
-cd cibars
-cargo install --path .
+kill -USR1 $(cat ~/.cibars/pids/$(pwd | tr '/' '_').pid 2>/dev/null)
 ```
 
-### macOS Tahoe+ code signing
+## Recommended tmux setup
+
+```bash
+tmux new-window -n cibars
+tmux send-keys \
+  'cibars --aws-profile staging --region eu-west-1 --github-repo acme/backend --branch master' \
+  Enter
+```
+
+## macOS Tahoe+ code signing
 
 macOS 26 (Tahoe) and later may block adhoc-signed binaries via
 AppleSystemPolicy. If `cibars` gets killed by SIGKILL on startup,
@@ -155,38 +269,6 @@ re-sign the binary:
 
 ```bash
 codesign -s - --force ~/.cargo/bin/cibars
-```
-
-## Recommended tmux setup
-
-```bash
-tmux new-window -n cibars
-tmux send-keys 'cibars --aws-profile staging --region eu-west-1 --github-repo acme/backend' Enter
-```
-
-## External boost via SIGUSR1
-
-Send `SIGUSR1` to trigger an immediate poll boost from outside
-the TUI — no pane switching needed.
-
-Manual test:
-
-```bash
-kill -USR1 $(pgrep cibars)
-```
-
-### Git pre-push hook
-
-Add a `pre-push` hook to the repository cibars monitors so
-every `git push` auto-boosts polling:
-
-```bash
-cat > .git/hooks/pre-push << 'EOF'
-#!/bin/sh
-pkill -USR1 cibars 2>/dev/null
-exit 0
-EOF
-chmod +x .git/hooks/pre-push
 ```
 
 ## License
