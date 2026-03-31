@@ -1696,4 +1696,459 @@ mod tests {
         );
         assert!(app.workflow_groups.is_empty());
     }
+
+    // === Multi-poll E2E scenarios ===
+
+    #[tokio::test]
+    async fn e2e_pipeline_lifecycle_idle_running_succeeded() {
+        let app = Arc::new(Mutex::new(App::new()));
+        let actions = MockActionsClient { runs: vec![] };
+
+        // Poll 1: pipeline arrives Idle
+        let pipes = MockPipelineClient {
+            pipelines: vec![mock_pipeline(
+                "deploy",
+                BuildStatus::Idle,
+                vec![mock_stage("Source", vec![("checkout", BuildStatus::Idle)])],
+            )],
+        };
+        poll_once(&app, &pipes, &actions).await;
+        {
+            let a = app.lock().unwrap();
+            assert_eq!(a.pipeline_groups[0].summary_status, BuildStatus::Idle);
+            assert!(!a.has_any_running());
+        }
+
+        // Poll 2: pipeline now Running
+        let pipes = MockPipelineClient {
+            pipelines: vec![mock_pipeline(
+                "deploy",
+                BuildStatus::Running,
+                vec![mock_stage(
+                    "Source",
+                    vec![("checkout", BuildStatus::Running)],
+                )],
+            )],
+        };
+        poll_once(&app, &pipes, &actions).await;
+        {
+            let a = app.lock().unwrap();
+            assert_eq!(a.pipeline_groups[0].summary_status, BuildStatus::Running);
+            assert!(a.has_any_running());
+        }
+
+        // Poll 3: pipeline Succeeded
+        let pipes = MockPipelineClient {
+            pipelines: vec![mock_pipeline(
+                "deploy",
+                BuildStatus::Succeeded,
+                vec![mock_stage(
+                    "Source",
+                    vec![("checkout", BuildStatus::Succeeded)],
+                )],
+            )],
+        };
+        poll_once(&app, &pipes, &actions).await;
+        {
+            let a = app.lock().unwrap();
+            assert_eq!(a.pipeline_groups[0].summary_status, BuildStatus::Succeeded);
+            assert!(!a.has_any_running());
+        }
+    }
+
+    #[tokio::test]
+    async fn e2e_pipeline_lifecycle_running_to_failed() {
+        let app = Arc::new(Mutex::new(App::new()));
+        let actions = MockActionsClient { runs: vec![] };
+
+        let pipes = MockPipelineClient {
+            pipelines: vec![mock_pipeline(
+                "deploy",
+                BuildStatus::Running,
+                vec![mock_stage("Build", vec![("compile", BuildStatus::Running)])],
+            )],
+        };
+        poll_once(&app, &pipes, &actions).await;
+        assert!(app.lock().unwrap().has_any_running());
+
+        let pipes = MockPipelineClient {
+            pipelines: vec![mock_pipeline(
+                "deploy",
+                BuildStatus::Failed,
+                vec![mock_stage("Build", vec![("compile", BuildStatus::Failed)])],
+            )],
+        };
+        poll_once(&app, &pipes, &actions).await;
+        {
+            let a = app.lock().unwrap();
+            assert_eq!(a.pipeline_groups[0].summary_status, BuildStatus::Failed);
+            assert!(!a.has_any_running());
+        }
+    }
+
+    #[tokio::test]
+    async fn e2e_workflow_appears_then_goes_gone() {
+        let app = Arc::new(Mutex::new(App::new()));
+        let pipes = MockPipelineClient { pipelines: vec![] };
+
+        let actions = MockActionsClient {
+            runs: vec![WorkflowRunInfo {
+                workflow_name: "CI".into(),
+                run_id: 1,
+                status: BuildStatus::Succeeded,
+                jobs: vec![],
+            }],
+        };
+        poll_once(&app, &pipes, &actions).await;
+        assert_eq!(app.lock().unwrap().workflow_groups.len(), 1);
+        assert!(!app.lock().unwrap().workflow_groups[0].gone);
+
+        let actions = MockActionsClient { runs: vec![] };
+        poll_once(&app, &pipes, &actions).await;
+        {
+            let a = app.lock().unwrap();
+            assert_eq!(a.workflow_groups.len(), 1, "group should persist");
+            assert!(a.workflow_groups[0].gone, "should be marked gone");
+        }
+    }
+
+    #[tokio::test]
+    async fn e2e_workflow_reappears_after_gone() {
+        let app = Arc::new(Mutex::new(App::new()));
+        let pipes = MockPipelineClient { pipelines: vec![] };
+
+        let actions = MockActionsClient {
+            runs: vec![WorkflowRunInfo {
+                workflow_name: "CI".into(),
+                run_id: 1,
+                status: BuildStatus::Succeeded,
+                jobs: vec![],
+            }],
+        };
+        poll_once(&app, &pipes, &actions).await;
+
+        let actions = MockActionsClient { runs: vec![] };
+        poll_once(&app, &pipes, &actions).await;
+        assert!(app.lock().unwrap().workflow_groups[0].gone);
+
+        let actions = MockActionsClient {
+            runs: vec![WorkflowRunInfo {
+                workflow_name: "CI".into(),
+                run_id: 2,
+                status: BuildStatus::Running,
+                jobs: vec![],
+            }],
+        };
+        poll_once(&app, &pipes, &actions).await;
+        {
+            let a = app.lock().unwrap();
+            assert!(!a.workflow_groups[0].gone, "should no longer be gone");
+            assert_eq!(a.workflow_groups[0].summary_status, BuildStatus::Running);
+        }
+    }
+
+    #[tokio::test]
+    async fn e2e_auth_recovery_flow() {
+        let app = Arc::new(Mutex::new(App::new()));
+
+        let pipes = ExpiredTokenClient;
+        poll_pipelines_tick(&app, &pipes, "my-profile", false).await;
+        {
+            let a = app.lock().unwrap();
+            assert!(matches!(a.aws_health, SourceHealth::AuthFailed { .. }));
+            assert!(!a.warnings.is_empty());
+        }
+
+        let auth_client = OkAuthClient;
+        check_aws_auth(&app, &auth_client, "my-profile").await;
+        {
+            let a = app.lock().unwrap();
+            assert_eq!(a.aws_health, SourceHealth::Healthy);
+            assert!(a.warnings.is_empty());
+        }
+
+        let pipes = MockPipelineClient {
+            pipelines: vec![mock_pipeline("deploy", BuildStatus::Succeeded, vec![])],
+        };
+        poll_pipelines_tick(&app, &pipes, "my-profile", false).await;
+        {
+            let a = app.lock().unwrap();
+            assert_eq!(a.aws_health, SourceHealth::Healthy);
+            assert_eq!(a.pipeline_groups.len(), 1);
+        }
+    }
+
+    #[tokio::test]
+    async fn e2e_rate_limit_backoff_and_recovery() {
+        let app = Arc::new(Mutex::new(App::new()));
+
+        let client = RateLimitActionsClient {
+            error_msg: "403 Forbidden".to_string(),
+        };
+        poll_actions_tick(&app, &client).await;
+        {
+            let a = app.lock().unwrap();
+            assert!(a.rate_limited_until.is_some());
+        }
+
+        let client = MockActionsClient {
+            runs: vec![WorkflowRunInfo {
+                workflow_name: "CI".into(),
+                run_id: 1,
+                status: BuildStatus::Succeeded,
+                jobs: vec![],
+            }],
+        };
+        poll_actions_tick(&app, &client).await;
+        {
+            let a = app.lock().unwrap();
+            assert!(
+                a.warnings.iter().any(|w| w.contains("rate-limited")),
+                "should show rate-limited warning"
+            );
+            assert!(a.workflow_groups.is_empty());
+        }
+
+        {
+            let mut a = app.lock().unwrap();
+            a.rate_limited_until = None;
+            a.warnings.clear();
+        }
+
+        poll_actions_tick(&app, &client).await;
+        {
+            let a = app.lock().unwrap();
+            assert_eq!(a.workflow_groups.len(), 1);
+            assert_eq!(a.workflow_groups[0].name, "CI");
+        }
+    }
+
+    #[tokio::test]
+    async fn e2e_multi_pipeline_independent_lifecycle() {
+        let app = Arc::new(Mutex::new(App::new()));
+        let actions = MockActionsClient { runs: vec![] };
+
+        let pipes = MockPipelineClient {
+            pipelines: vec![
+                mock_pipeline(
+                    "pipe-a",
+                    BuildStatus::Running,
+                    vec![mock_stage("Build", vec![("compile", BuildStatus::Running)])],
+                ),
+                mock_pipeline(
+                    "pipe-b",
+                    BuildStatus::Succeeded,
+                    vec![mock_stage(
+                        "Deploy",
+                        vec![("deploy", BuildStatus::Succeeded)],
+                    )],
+                ),
+            ],
+        };
+        poll_once(&app, &pipes, &actions).await;
+        {
+            let a = app.lock().unwrap();
+            assert_eq!(a.pipeline_groups.len(), 2);
+            let pa = a
+                .pipeline_groups
+                .iter()
+                .find(|g| g.name == "pipe-a")
+                .unwrap();
+            assert_eq!(pa.summary_status, BuildStatus::Running);
+            let pb = a
+                .pipeline_groups
+                .iter()
+                .find(|g| g.name == "pipe-b")
+                .unwrap();
+            assert_eq!(pb.summary_status, BuildStatus::Succeeded);
+            assert!(a.has_any_running());
+        }
+
+        let pipes = MockPipelineClient {
+            pipelines: vec![
+                mock_pipeline(
+                    "pipe-a",
+                    BuildStatus::Succeeded,
+                    vec![mock_stage(
+                        "Build",
+                        vec![("compile", BuildStatus::Succeeded)],
+                    )],
+                ),
+                mock_pipeline(
+                    "pipe-b",
+                    BuildStatus::Succeeded,
+                    vec![mock_stage(
+                        "Deploy",
+                        vec![("deploy", BuildStatus::Succeeded)],
+                    )],
+                ),
+            ],
+        };
+        poll_once(&app, &pipes, &actions).await;
+        {
+            let a = app.lock().unwrap();
+            assert!(!a.has_any_running());
+        }
+    }
+
+    #[tokio::test]
+    async fn e2e_classify_workflows_across_polls() {
+        let app = Arc::new(Mutex::new(App::new()));
+        let pipes = MockPipelineClient { pipelines: vec![] };
+        let config = Config::try_from_args(&[
+            "cibars",
+            "--aws-profile",
+            "p",
+            "--region",
+            "r",
+            "--github-repo",
+            "o/r",
+        ])
+        .unwrap();
+
+        let actions = MockActionsClient {
+            runs: vec![WorkflowRunInfo {
+                workflow_name: "CI".into(),
+                run_id: 1,
+                status: BuildStatus::Running,
+                jobs: vec![],
+            }],
+        };
+        poll_once(&app, &pipes, &actions).await;
+        {
+            let mut a = app.lock().unwrap();
+            classify_workflows(&mut a, &config);
+            assert_eq!(a.workflow_groups[0].category, WorkflowCategory::CI);
+        }
+
+        let actions = MockActionsClient {
+            runs: vec![
+                WorkflowRunInfo {
+                    workflow_name: "CI".into(),
+                    run_id: 2,
+                    status: BuildStatus::Succeeded,
+                    jobs: vec![],
+                },
+                WorkflowRunInfo {
+                    workflow_name: "Claude Code Review".into(),
+                    run_id: 3,
+                    status: BuildStatus::Running,
+                    jobs: vec![],
+                },
+            ],
+        };
+        poll_once(&app, &pipes, &actions).await;
+        {
+            let mut a = app.lock().unwrap();
+            classify_workflows(&mut a, &config);
+            let ci = a.workflow_groups.iter().find(|g| g.name == "CI").unwrap();
+            assert_eq!(ci.category, WorkflowCategory::CI);
+            let review = a
+                .workflow_groups
+                .iter()
+                .find(|g| g.name == "Claude Code Review")
+                .unwrap();
+            assert_eq!(review.category, WorkflowCategory::Review);
+        }
+    }
+
+    #[tokio::test]
+    async fn e2e_concurrent_pipeline_and_workflow_updates() {
+        let app = Arc::new(Mutex::new(App::new()));
+
+        let pipes = MockPipelineClient {
+            pipelines: vec![mock_pipeline("deploy", BuildStatus::Running, vec![])],
+        };
+        let actions = MockActionsClient {
+            runs: vec![WorkflowRunInfo {
+                workflow_name: "CI".into(),
+                run_id: 1,
+                status: BuildStatus::Succeeded,
+                jobs: vec![JobInfo {
+                    name: "build".into(),
+                    status: BuildStatus::Succeeded,
+                    completed_at: None,
+                }],
+            }],
+        };
+        poll_once(&app, &pipes, &actions).await;
+
+        let a = app.lock().unwrap();
+        assert_eq!(a.pipeline_groups.len(), 1);
+        assert_eq!(a.pipeline_groups[0].name, "deploy");
+        assert_eq!(a.workflow_groups.len(), 1);
+        assert_eq!(a.workflow_groups[0].name, "CI");
+        assert_eq!(a.workflow_groups[0].jobs.len(), 1);
+        assert_eq!(a.pipeline_groups[0].summary_status, BuildStatus::Running);
+        assert_eq!(a.workflow_groups[0].summary_status, BuildStatus::Succeeded);
+    }
+
+    #[tokio::test]
+    async fn e2e_linkage_gh_completes_cp_starts() {
+        use crate::linkage::{apply_links, LinkMap};
+
+        let app = Arc::new(Mutex::new(App::new()));
+        let mut link_map = LinkMap::new();
+        link_map.add_discovered(
+            "deploy".into(),
+            "CI".into(),
+            "bucket".into(),
+            "key.zip".into(),
+        );
+
+        let pipes = MockPipelineClient {
+            pipelines: vec![mock_pipeline("deploy", BuildStatus::Idle, vec![])],
+        };
+        let actions = MockActionsClient {
+            runs: vec![WorkflowRunInfo {
+                workflow_name: "CI".into(),
+                run_id: 1,
+                status: BuildStatus::Running,
+                jobs: vec![JobInfo {
+                    name: "build".into(),
+                    status: BuildStatus::Running,
+                    completed_at: None,
+                }],
+            }],
+        };
+        poll_once(&app, &pipes, &actions).await;
+
+        let pipes = MockPipelineClient {
+            pipelines: vec![mock_pipeline(
+                "deploy",
+                BuildStatus::Running,
+                vec![mock_stage("Source", vec![("s3", BuildStatus::Succeeded)])],
+            )],
+        };
+        let actions = MockActionsClient {
+            runs: vec![WorkflowRunInfo {
+                workflow_name: "CI".into(),
+                run_id: 1,
+                status: BuildStatus::Running,
+                jobs: vec![JobInfo {
+                    name: "build".into(),
+                    status: BuildStatus::Running,
+                    completed_at: None,
+                }],
+            }],
+        };
+        poll_once(&app, &pipes, &actions).await;
+
+        let mut stopped_runs = std::collections::HashMap::new();
+        apply_links(&app, &mut link_map, &mut stopped_runs);
+
+        let a = app.lock().unwrap();
+        let ci = a.workflow_groups.iter().find(|g| g.name == "CI").unwrap();
+        assert_eq!(
+            ci.summary_status,
+            BuildStatus::Succeeded,
+            "linked GH workflow should be Succeeded when CP is Running"
+        );
+        let build_job = ci.jobs.iter().find(|j| j.name == "build").unwrap();
+        assert_eq!(
+            build_job.status,
+            BuildStatus::Succeeded,
+            "linked GH job should be Succeeded when CP is Running"
+        );
+    }
 }
