@@ -232,6 +232,14 @@ impl LinkMap {
         self.recent_completions.clear();
     }
 
+    /// Check whether a workflow completed recently (within correlation window).
+    pub fn has_recent_completion(&self, workflow_name: &str) -> bool {
+        let cutoff = std::time::Duration::from_secs(CORRELATION_WINDOW_SECS);
+        self.recent_completions
+            .iter()
+            .any(|(n, t)| n == workflow_name && t.elapsed() < cutoff)
+    }
+
     fn prune_expired(&mut self) {
         let cutoff = std::time::Duration::from_secs(CORRELATION_WINDOW_SECS);
         self.recent_completions
@@ -554,7 +562,9 @@ fn set_pending_links(app: &mut App, link_map: &LinkMap) {
                 .workflow_groups
                 .iter()
                 .any(|wg| wg.name == wf_name && wg.summary_status == BuildStatus::Running);
-            pg.pending_link = linked_wf_running && pg.summary_status != BuildStatus::Running;
+            let recently_completed = link_map.has_recent_completion(wf_name);
+            pg.pending_link = (linked_wf_running || recently_completed)
+                && pg.summary_status != BuildStatus::Running;
         } else {
             pg.pending_link = false;
         }
@@ -1073,6 +1083,22 @@ source = "YamlDiscovered"
             .push(("CI".to_string(), Instant::now() - Duration::from_secs(60)));
         let result = map.try_correlate("pipe");
         assert_eq!(result, None);
+    }
+
+    #[test]
+    fn has_recent_completion_within_window() {
+        let mut map = LinkMap::new();
+        map.record_workflow_completion("CI");
+        assert!(map.has_recent_completion("CI"));
+        assert!(!map.has_recent_completion("Other"));
+    }
+
+    #[test]
+    fn has_recent_completion_expired() {
+        let mut map = LinkMap::new();
+        map.recent_completions
+            .push(("CI".to_string(), Instant::now() - Duration::from_secs(60)));
+        assert!(!map.has_recent_completion("CI"));
     }
 
     #[test]
@@ -1682,7 +1708,7 @@ source = "YamlDiscovered"
     }
 
     #[test]
-    fn pending_link_false_when_gh_succeeded() {
+    fn pending_link_true_when_gh_recently_completed() {
         let mut app = App::new();
         app.workflow_groups.push(WorkflowGroup {
             name: "CI".into(),
@@ -1705,12 +1731,13 @@ source = "YamlDiscovered"
         let mut link_map = LinkMap::new();
         link_map.add_discovered("deploy-pipe".into(), "CI".into(), "b".into(), "k".into());
 
+        // apply_links records "CI" into recent_completions (since Succeeded)
         apply_links(&app, &mut link_map, &mut HashMap::new());
 
         let a = app.lock().unwrap();
         assert!(
-            !a.pipeline_groups[0].pending_link,
-            "pending_link should be false when GH workflow Succeeded"
+            a.pipeline_groups[0].pending_link,
+            "pending_link should be true when GH recently completed and CP still Idle"
         );
     }
 

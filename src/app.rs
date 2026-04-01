@@ -138,6 +138,7 @@ impl App {
         self.pipeline_groups.iter().any(|g| {
             g.summary_status == BuildStatus::Running
                 || g.stages.iter().any(|s| s.status == BuildStatus::Running)
+                || g.pending_link
         }) || self.workflow_groups.iter().any(|g| {
             g.summary_status == BuildStatus::Running
                 || g.jobs.iter().any(|j| j.status == BuildStatus::Running)
@@ -233,6 +234,19 @@ mod tests {
             run_id: None,
             category: WorkflowCategory::default(),
             linked_pipeline: None,
+        });
+        assert!(app.has_any_running());
+    }
+
+    #[test]
+    fn has_any_running_true_when_pending_link() {
+        let mut app = App::new();
+        app.pipeline_groups.push(PipelineGroup {
+            name: "deploy".into(),
+            stages: vec![],
+            gone: false,
+            summary_status: BuildStatus::Idle,
+            pending_link: true,
         });
         assert!(app.has_any_running());
     }
