@@ -18,6 +18,9 @@ pub struct StatusBar<'a> {
     pub poll_state: &'a PollState,
     pub tick: usize,
     pub cooldown_remaining: Option<Duration>,
+    pub idle_remaining: Option<Duration>,
+    pub watching_remaining: Option<Duration>,
+    pub active_elapsed: Option<Duration>,
     pub warnings: &'a [String],
     pub hook_status: &'a HookStatus,
     pub has_global_hooks_path: bool,
@@ -56,9 +59,14 @@ impl Widget for StatusBar<'_> {
             Span::styled(empty_str, Style::default().fg(theme::FG_DIM)),
         ];
 
-        if let Some(cd) = self.cooldown_remaining {
+        let state_duration = self
+            .idle_remaining
+            .or(self.watching_remaining)
+            .or(self.cooldown_remaining)
+            .or(self.active_elapsed);
+        if let Some(d) = state_duration {
             spans.push(dim_sep.clone());
-            spans.push(Span::raw(format!("Cooldown: {}s", cd.as_secs())));
+            spans.push(Span::raw(format_duration(d)));
         }
 
         let boost_active = self
@@ -153,6 +161,15 @@ impl Widget for StatusBar<'_> {
     }
 }
 
+fn format_duration(d: Duration) -> String {
+    let secs = d.as_secs();
+    if secs >= 60 {
+        format!("{}m{:02}s", secs / 60, secs % 60)
+    } else {
+        format!("{secs}s")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -182,6 +199,9 @@ mod tests {
             poll_state: state,
             tick,
             cooldown_remaining: cooldown,
+            idle_remaining: None,
+            watching_remaining: None,
+            active_elapsed: None,
             warnings: &[],
             hook_status,
             has_global_hooks_path,
@@ -270,7 +290,7 @@ mod tests {
     fn cooldown_shows_cool_with_timer() {
         let content = render_bar(&PollState::Cooldown, 0, Some(Duration::from_secs(42)));
         assert!(content.contains("Cool"), "got: {content}");
-        assert!(content.contains("Cooldown: 42s"), "got: {content}");
+        assert!(content.contains("42s"), "got: {content}");
     }
 
     #[test]
@@ -283,6 +303,85 @@ mod tests {
     fn long_idle_shows_sleep() {
         let content = render_bar(&PollState::LongIdle, 0, None);
         assert!(content.contains("Sleep"), "got: {content}");
+    }
+
+    // --- state timer display tests ---
+
+    fn render_bar_with_timers(
+        state: &PollState,
+        idle_remaining: Option<Duration>,
+        watching_remaining: Option<Duration>,
+        active_elapsed: Option<Duration>,
+        cooldown_remaining: Option<Duration>,
+    ) -> String {
+        let bar = StatusBar {
+            poll_state: state,
+            tick: 0,
+            cooldown_remaining,
+            idle_remaining,
+            watching_remaining,
+            active_elapsed,
+            warnings: &[],
+            hook_status: &HookStatus::Installed(HookLocation::Local),
+            has_global_hooks_path: false,
+            boost_pressed_at: None,
+            push_signal_at: None,
+            linkage_broken: false,
+            linkage_discovering: false,
+        };
+        let area = Rect::new(0, 0, 120, 3);
+        let mut buf = Buffer::empty(area);
+        bar.render(area, &mut buf);
+        (0..120)
+            .map(|x| buf.cell((x, 1)).unwrap().symbol().to_string())
+            .collect()
+    }
+
+    #[test]
+    fn idle_shows_remaining_time() {
+        let content = render_bar_with_timers(
+            &PollState::Idle,
+            Some(Duration::from_secs(192)),
+            None,
+            None,
+            None,
+        );
+        assert!(content.contains("Slow"), "got: {content}");
+        assert!(content.contains("3m12s"), "got: {content}");
+    }
+
+    #[test]
+    fn watching_shows_remaining_time() {
+        let content = render_bar_with_timers(
+            &PollState::Watching,
+            None,
+            Some(Duration::from_secs(42)),
+            None,
+            None,
+        );
+        assert!(content.contains("Scan:GH"), "got: {content}");
+        assert!(content.contains("42s"), "got: {content}");
+    }
+
+    #[test]
+    fn active_shows_elapsed_time() {
+        let content = render_bar_with_timers(
+            &PollState::Active,
+            None,
+            None,
+            Some(Duration::from_secs(65)),
+            None,
+        );
+        assert!(content.contains("Fast"), "got: {content}");
+        assert!(content.contains("1m05s"), "got: {content}");
+    }
+
+    #[test]
+    fn long_idle_shows_no_timer() {
+        let content = render_bar_with_timers(&PollState::LongIdle, None, None, None, None);
+        assert!(content.contains("Sleep"), "got: {content}");
+        // No duration string should appear between ticks and the separator
+        assert!(!content.contains("0s"), "got: {content}");
     }
 
     #[test]
@@ -343,6 +442,9 @@ mod tests {
             poll_state: &PollState::Idle,
             tick: 0,
             cooldown_remaining: None,
+            idle_remaining: None,
+            watching_remaining: None,
+            active_elapsed: None,
             warnings: &[],
             hook_status: &HookStatus::Installed(HookLocation::Local),
             has_global_hooks_path: false,
@@ -368,6 +470,9 @@ mod tests {
             poll_state: &PollState::Idle,
             tick: 0,
             cooldown_remaining: None,
+            idle_remaining: None,
+            watching_remaining: None,
+            active_elapsed: None,
             warnings: &[],
             hook_status: &HookStatus::Installed(HookLocation::Local),
             has_global_hooks_path: false,
@@ -404,6 +509,9 @@ mod tests {
             poll_state: &PollState::Idle,
             tick: 0,
             cooldown_remaining: None,
+            idle_remaining: None,
+            watching_remaining: None,
+            active_elapsed: None,
             warnings: &[],
             hook_status: &HookStatus::Installed(HookLocation::Local),
             has_global_hooks_path: false,
@@ -436,6 +544,9 @@ mod tests {
             poll_state: &PollState::Idle,
             tick: 0,
             cooldown_remaining: None,
+            idle_remaining: None,
+            watching_remaining: None,
+            active_elapsed: None,
             warnings: &[],
             hook_status: &HookStatus::Installed(HookLocation::Local),
             has_global_hooks_path: false,
@@ -469,6 +580,9 @@ mod tests {
             poll_state: &PollState::Idle,
             tick: 0,
             cooldown_remaining: None,
+            idle_remaining: None,
+            watching_remaining: None,
+            active_elapsed: None,
             warnings: &[],
             hook_status: &HookStatus::Installed(HookLocation::Local),
             has_global_hooks_path: false,
@@ -513,6 +627,9 @@ mod tests {
             poll_state: state,
             tick,
             cooldown_remaining: cooldown,
+            idle_remaining: None,
+            watching_remaining: None,
+            active_elapsed: None,
             warnings: &[],
             hook_status: &HookStatus::Installed(HookLocation::Local),
             has_global_hooks_path: false,
@@ -581,6 +698,9 @@ mod tests {
             poll_state: &PollState::Idle,
             tick: 0,
             cooldown_remaining: None,
+            idle_remaining: None,
+            watching_remaining: None,
+            active_elapsed: None,
             warnings: &[],
             hook_status: &HookStatus::Installed(HookLocation::Local),
             has_global_hooks_path: false,
@@ -606,6 +726,9 @@ mod tests {
             poll_state: &PollState::Idle,
             tick: 0,
             cooldown_remaining: None,
+            idle_remaining: None,
+            watching_remaining: None,
+            active_elapsed: None,
             warnings: &[],
             hook_status: &HookStatus::Installed(HookLocation::Local),
             has_global_hooks_path: false,
@@ -635,6 +758,9 @@ mod tests {
             poll_state: state,
             tick,
             cooldown_remaining: cooldown,
+            idle_remaining: None,
+            watching_remaining: None,
+            active_elapsed: None,
             warnings,
             hook_status,
             has_global_hooks_path: false,
@@ -681,6 +807,9 @@ mod tests {
             poll_state: &PollState::Idle,
             tick: 0,
             cooldown_remaining: None,
+            idle_remaining: None,
+            watching_remaining: None,
+            active_elapsed: None,
             warnings: &[],
             hook_status: &HookStatus::Installed(HookLocation::Local),
             has_global_hooks_path: false,
@@ -706,6 +835,9 @@ mod tests {
             poll_state: &PollState::Idle,
             tick: 0,
             cooldown_remaining: None,
+            idle_remaining: None,
+            watching_remaining: None,
+            active_elapsed: None,
             warnings: &[],
             hook_status: &HookStatus::Installed(HookLocation::Local),
             has_global_hooks_path: false,
@@ -730,6 +862,9 @@ mod tests {
             poll_state: &PollState::Idle,
             tick: 0,
             cooldown_remaining: None,
+            idle_remaining: None,
+            watching_remaining: None,
+            active_elapsed: None,
             warnings: &[],
             hook_status: &HookStatus::Installed(HookLocation::Local),
             has_global_hooks_path: false,
@@ -753,6 +888,9 @@ mod tests {
             poll_state: &PollState::Idle,
             tick: 0,
             cooldown_remaining: None,
+            idle_remaining: None,
+            watching_remaining: None,
+            active_elapsed: None,
             warnings: &[],
             hook_status: &HookStatus::Installed(HookLocation::Local),
             has_global_hooks_path: false,
@@ -776,6 +914,9 @@ mod tests {
             poll_state: &PollState::Idle,
             tick: 0,
             cooldown_remaining: None,
+            idle_remaining: None,
+            watching_remaining: None,
+            active_elapsed: None,
             warnings: &[],
             hook_status: &HookStatus::NoGitDir,
             has_global_hooks_path: false,
@@ -793,5 +934,32 @@ mod tests {
         assert!(!content.contains("✓hook"), "got: {content}");
         assert!(!content.contains("p=install"), "got: {content}");
         assert!(!content.contains("pushed!"), "got: {content}");
+    }
+
+    // --- format_duration tests ---
+
+    #[test]
+    fn format_duration_seconds_only() {
+        assert_eq!(format_duration(Duration::from_secs(42)), "42s");
+    }
+
+    #[test]
+    fn format_duration_minutes_and_seconds() {
+        assert_eq!(format_duration(Duration::from_secs(192)), "3m12s");
+    }
+
+    #[test]
+    fn format_duration_zero() {
+        assert_eq!(format_duration(Duration::from_secs(0)), "0s");
+    }
+
+    #[test]
+    fn format_duration_exact_minute() {
+        assert_eq!(format_duration(Duration::from_secs(60)), "1m00s");
+    }
+
+    #[test]
+    fn format_duration_five_minutes() {
+        assert_eq!(format_duration(Duration::from_secs(300)), "5m00s");
     }
 }

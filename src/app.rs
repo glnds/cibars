@@ -38,6 +38,12 @@ pub struct App {
     pub last_tick_advance: Option<Instant>,
     /// Cooldown remaining, set by orchestrator for UI display.
     pub cooldown_remaining: Option<std::time::Duration>,
+    /// Idle remaining until LongIdle, set by orchestrator for UI display.
+    pub idle_remaining: Option<std::time::Duration>,
+    /// Watching remaining until Idle, set by orchestrator for UI display.
+    pub watching_remaining: Option<std::time::Duration>,
+    /// Time spent in Active state, set by orchestrator for UI display.
+    pub active_elapsed: Option<std::time::Duration>,
     /// Git pre-push hook status for boost integration.
     pub hook_status: HookStatus,
     /// True when core.hooksPath overrides .git/hooks (global hooks dir active).
@@ -76,6 +82,9 @@ impl App {
             status_tick: 0,
             last_tick_advance: None,
             cooldown_remaining: None,
+            idle_remaining: None,
+            watching_remaining: None,
+            active_elapsed: None,
             hook_status: HookStatus::NoGitDir,
             has_global_hooks_path: false,
             aws_health: SourceHealth::Unknown,

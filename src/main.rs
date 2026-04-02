@@ -186,6 +186,9 @@ async fn run_poll_orchestrator(
             scheduler.transition(any_running);
             a.poll_state = scheduler.state();
             a.cooldown_remaining = scheduler.cooldown_remaining();
+            a.idle_remaining = scheduler.idle_remaining();
+            a.watching_remaining = scheduler.watching_remaining();
+            a.active_elapsed = scheduler.active_elapsed();
             any_running
         };
 
