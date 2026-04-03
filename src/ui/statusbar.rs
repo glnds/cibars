@@ -75,10 +75,8 @@ impl Widget for StatusBar<'_> {
         ];
 
         if let Some(timer) = &self.state_timer {
-            if !matches!(self.poll_state, PollState::LongIdle) {
-                spans.push(dim_sep.clone());
-                spans.push(Span::raw(format_duration(timer.display_duration())));
-            }
+            spans.push(dim_sep.clone());
+            spans.push(Span::raw(format_duration(timer.display_duration())));
         }
 
         let boost_active = self
@@ -389,14 +387,11 @@ mod tests {
     }
 
     #[test]
-    fn long_idle_shows_no_timer() {
-        // LongIdle has a state_timer (for block sync) but timer text is suppressed
+    fn long_idle_shows_elapsed_timer() {
         let timer = StateTimer::elapsed(Instant::now() - Duration::from_secs(60));
         let content = render_bar_with_timers(&PollState::LongIdle, Some(timer));
         assert!(content.contains("Sleep"), "got: {content}");
-        // No duration string should appear between ticks and the separator
-        assert!(!content.contains("0s"), "got: {content}");
-        assert!(!content.contains("1m"), "got: {content}");
+        assert!(content.contains("1m00s"), "got: {content}");
     }
 
     #[test]
