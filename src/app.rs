@@ -6,7 +6,7 @@ use chrono::{DateTime, Utc};
 use crate::config::HookStatus;
 use crate::linkage::JobAssignment;
 use crate::model::{BuildStatus, PipelineGroup, WorkflowGroup};
-use crate::poll_scheduler::PollState;
+use crate::poll_scheduler::{PollState, StateTimer};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SourceHealth {
@@ -36,14 +36,8 @@ pub struct App {
     pub status_tick: usize,
     /// When the status tick counter last advanced.
     pub last_tick_advance: Option<Instant>,
-    /// Cooldown remaining, set by orchestrator for UI display.
-    pub cooldown_remaining: Option<std::time::Duration>,
-    /// Idle remaining until LongIdle, set by orchestrator for UI display.
-    pub idle_remaining: Option<std::time::Duration>,
-    /// Watching remaining until Idle, set by orchestrator for UI display.
-    pub watching_remaining: Option<std::time::Duration>,
-    /// Time spent in Active state, set by orchestrator for UI display.
-    pub active_elapsed: Option<std::time::Duration>,
+    /// State timer for UI display — holds timestamp, computed fresh each render.
+    pub state_timer: Option<StateTimer>,
     /// Git pre-push hook status for boost integration.
     pub hook_status: HookStatus,
     /// True when core.hooksPath overrides .git/hooks (global hooks dir active).
@@ -81,10 +75,7 @@ impl App {
             poll_state: PollState::Idle,
             status_tick: 0,
             last_tick_advance: None,
-            cooldown_remaining: None,
-            idle_remaining: None,
-            watching_remaining: None,
-            active_elapsed: None,
+            state_timer: None,
             hook_status: HookStatus::NoGitDir,
             has_global_hooks_path: false,
             aws_health: SourceHealth::Unknown,

@@ -9,7 +9,7 @@ use ratatui::widgets::{Block, BorderType, Widget};
 use super::theme;
 use crate::app::App;
 use crate::config::HookStatus;
-use crate::poll_scheduler::PollState;
+use crate::poll_scheduler::{PollState, StateTimer};
 
 const BOOST_FLASH_DURATION: Duration = Duration::from_millis(750);
 const PUSH_SIGNAL_DURATION: Duration = Duration::from_millis(1500);
@@ -17,10 +17,7 @@ const PUSH_SIGNAL_DURATION: Duration = Duration::from_millis(1500);
 pub struct StatusBar<'a> {
     pub poll_state: &'a PollState,
     pub tick: usize,
-    pub cooldown_remaining: Option<Duration>,
-    pub idle_remaining: Option<Duration>,
-    pub watching_remaining: Option<Duration>,
-    pub active_elapsed: Option<Duration>,
+    pub state_timer: Option<StateTimer>,
     pub warnings: &'a [String],
     pub hook_status: &'a HookStatus,
     pub has_global_hooks_path: bool,
@@ -59,14 +56,9 @@ impl Widget for StatusBar<'_> {
             Span::styled(empty_str, Style::default().fg(theme::FG_DIM)),
         ];
 
-        let state_duration = self
-            .idle_remaining
-            .or(self.watching_remaining)
-            .or(self.cooldown_remaining)
-            .or(self.active_elapsed);
-        if let Some(d) = state_duration {
+        if let Some(timer) = &self.state_timer {
             spans.push(dim_sep.clone());
-            spans.push(Span::raw(format_duration(d)));
+            spans.push(Span::raw(format_duration(timer.display_duration())));
         }
 
         let boost_active = self
@@ -178,11 +170,11 @@ mod tests {
     use ratatui::layout::Rect;
 
     /// Extract content from row 1 (inner area of bordered block).
-    fn render_bar(state: &PollState, tick: usize, cooldown: Option<Duration>) -> String {
+    fn render_bar(state: &PollState, tick: usize, state_timer: Option<StateTimer>) -> String {
         render_bar_with_hook(
             state,
             tick,
-            cooldown,
+            state_timer,
             &HookStatus::Installed(HookLocation::Local),
             false,
         )
@@ -191,17 +183,14 @@ mod tests {
     fn render_bar_with_hook(
         state: &PollState,
         tick: usize,
-        cooldown: Option<Duration>,
+        state_timer: Option<StateTimer>,
         hook_status: &HookStatus,
         has_global_hooks_path: bool,
     ) -> String {
         let bar = StatusBar {
             poll_state: state,
             tick,
-            cooldown_remaining: cooldown,
-            idle_remaining: None,
-            watching_remaining: None,
-            active_elapsed: None,
+            state_timer,
             warnings: &[],
             hook_status,
             has_global_hooks_path,
@@ -288,9 +277,16 @@ mod tests {
 
     #[test]
     fn cooldown_shows_cool_with_timer() {
-        let content = render_bar(&PollState::Cooldown, 0, Some(Duration::from_secs(42)));
+        let timer = StateTimer::countdown(
+            Instant::now() - Duration::from_secs(18),
+            Duration::from_secs(60),
+        );
+        let content = render_bar(&PollState::Cooldown, 0, Some(timer));
         assert!(content.contains("Cool"), "got: {content}");
-        assert!(content.contains("42s"), "got: {content}");
+        assert!(
+            content.contains("42s") || content.contains("41s"),
+            "got: {content}"
+        );
     }
 
     #[test]
@@ -307,20 +303,11 @@ mod tests {
 
     // --- state timer display tests ---
 
-    fn render_bar_with_timers(
-        state: &PollState,
-        idle_remaining: Option<Duration>,
-        watching_remaining: Option<Duration>,
-        active_elapsed: Option<Duration>,
-        cooldown_remaining: Option<Duration>,
-    ) -> String {
+    fn render_bar_with_timers(state: &PollState, state_timer: Option<StateTimer>) -> String {
         let bar = StatusBar {
             poll_state: state,
             tick: 0,
-            cooldown_remaining,
-            idle_remaining,
-            watching_remaining,
-            active_elapsed,
+            state_timer,
             warnings: &[],
             hook_status: &HookStatus::Installed(HookLocation::Local),
             has_global_hooks_path: false,
@@ -339,46 +326,47 @@ mod tests {
 
     #[test]
     fn idle_shows_remaining_time() {
-        let content = render_bar_with_timers(
-            &PollState::Idle,
-            Some(Duration::from_secs(192)),
-            None,
-            None,
-            None,
+        let timer = StateTimer::countdown(
+            Instant::now() - Duration::from_secs(108),
+            Duration::from_secs(300),
         );
+        let content = render_bar_with_timers(&PollState::Idle, Some(timer));
         assert!(content.contains("Slow"), "got: {content}");
-        assert!(content.contains("3m12s"), "got: {content}");
+        // ~192s remaining = 3m12s (could be 3m11s due to test timing)
+        assert!(
+            content.contains("3m12s") || content.contains("3m11s"),
+            "got: {content}"
+        );
     }
 
     #[test]
     fn watching_shows_remaining_time() {
-        let content = render_bar_with_timers(
-            &PollState::Watching,
-            None,
-            Some(Duration::from_secs(42)),
-            None,
-            None,
+        let timer = StateTimer::countdown(
+            Instant::now() - Duration::from_secs(18),
+            Duration::from_secs(60),
         );
+        let content = render_bar_with_timers(&PollState::Watching, Some(timer));
         assert!(content.contains("Scan:GH"), "got: {content}");
-        assert!(content.contains("42s"), "got: {content}");
+        assert!(
+            content.contains("42s") || content.contains("41s"),
+            "got: {content}"
+        );
     }
 
     #[test]
     fn active_shows_elapsed_time() {
-        let content = render_bar_with_timers(
-            &PollState::Active,
-            None,
-            None,
-            Some(Duration::from_secs(65)),
-            None,
-        );
+        let timer = StateTimer::elapsed(Instant::now() - Duration::from_secs(65));
+        let content = render_bar_with_timers(&PollState::Active, Some(timer));
         assert!(content.contains("Fast"), "got: {content}");
-        assert!(content.contains("1m05s"), "got: {content}");
+        assert!(
+            content.contains("1m05s") || content.contains("1m06s"),
+            "got: {content}"
+        );
     }
 
     #[test]
     fn long_idle_shows_no_timer() {
-        let content = render_bar_with_timers(&PollState::LongIdle, None, None, None, None);
+        let content = render_bar_with_timers(&PollState::LongIdle, None);
         assert!(content.contains("Sleep"), "got: {content}");
         // No duration string should appear between ticks and the separator
         assert!(!content.contains("0s"), "got: {content}");
@@ -441,10 +429,7 @@ mod tests {
         let bar = StatusBar {
             poll_state: &PollState::Idle,
             tick: 0,
-            cooldown_remaining: None,
-            idle_remaining: None,
-            watching_remaining: None,
-            active_elapsed: None,
+            state_timer: None,
             warnings: &[],
             hook_status: &HookStatus::Installed(HookLocation::Local),
             has_global_hooks_path: false,
@@ -469,10 +454,7 @@ mod tests {
         let bar = StatusBar {
             poll_state: &PollState::Idle,
             tick: 0,
-            cooldown_remaining: None,
-            idle_remaining: None,
-            watching_remaining: None,
-            active_elapsed: None,
+            state_timer: None,
             warnings: &[],
             hook_status: &HookStatus::Installed(HookLocation::Local),
             has_global_hooks_path: false,
@@ -508,10 +490,7 @@ mod tests {
         let bar = StatusBar {
             poll_state: &PollState::Idle,
             tick: 0,
-            cooldown_remaining: None,
-            idle_remaining: None,
-            watching_remaining: None,
-            active_elapsed: None,
+            state_timer: None,
             warnings: &[],
             hook_status: &HookStatus::Installed(HookLocation::Local),
             has_global_hooks_path: false,
@@ -543,10 +522,7 @@ mod tests {
         let bar = StatusBar {
             poll_state: &PollState::Idle,
             tick: 0,
-            cooldown_remaining: None,
-            idle_remaining: None,
-            watching_remaining: None,
-            active_elapsed: None,
+            state_timer: None,
             warnings: &[],
             hook_status: &HookStatus::Installed(HookLocation::Local),
             has_global_hooks_path: false,
@@ -579,10 +555,7 @@ mod tests {
         let bar = StatusBar {
             poll_state: &PollState::Idle,
             tick: 0,
-            cooldown_remaining: None,
-            idle_remaining: None,
-            watching_remaining: None,
-            active_elapsed: None,
+            state_timer: None,
             warnings: &[],
             hook_status: &HookStatus::Installed(HookLocation::Local),
             has_global_hooks_path: false,
@@ -622,14 +595,11 @@ mod tests {
 
     // --- color assertion helpers ---
 
-    fn render_buf(state: &PollState, tick: usize, cooldown: Option<Duration>) -> Buffer {
+    fn render_buf(state: &PollState, tick: usize, state_timer: Option<StateTimer>) -> Buffer {
         let bar = StatusBar {
             poll_state: state,
             tick,
-            cooldown_remaining: cooldown,
-            idle_remaining: None,
-            watching_remaining: None,
-            active_elapsed: None,
+            state_timer,
             warnings: &[],
             hook_status: &HookStatus::Installed(HookLocation::Local),
             has_global_hooks_path: false,
@@ -697,10 +667,7 @@ mod tests {
         let bar = StatusBar {
             poll_state: &PollState::Idle,
             tick: 0,
-            cooldown_remaining: None,
-            idle_remaining: None,
-            watching_remaining: None,
-            active_elapsed: None,
+            state_timer: None,
             warnings: &[],
             hook_status: &HookStatus::Installed(HookLocation::Local),
             has_global_hooks_path: false,
@@ -725,10 +692,7 @@ mod tests {
         let bar = StatusBar {
             poll_state: &PollState::Idle,
             tick: 0,
-            cooldown_remaining: None,
-            idle_remaining: None,
-            watching_remaining: None,
-            active_elapsed: None,
+            state_timer: None,
             warnings: &[],
             hook_status: &HookStatus::Installed(HookLocation::Local),
             has_global_hooks_path: false,
@@ -750,17 +714,14 @@ mod tests {
     fn render_bar_with_warnings(
         state: &PollState,
         tick: usize,
-        cooldown: Option<Duration>,
+        state_timer: Option<StateTimer>,
         hook_status: &HookStatus,
         warnings: &[String],
     ) -> String {
         let bar = StatusBar {
             poll_state: state,
             tick,
-            cooldown_remaining: cooldown,
-            idle_remaining: None,
-            watching_remaining: None,
-            active_elapsed: None,
+            state_timer,
             warnings,
             hook_status,
             has_global_hooks_path: false,
@@ -806,10 +767,7 @@ mod tests {
         let bar = StatusBar {
             poll_state: &PollState::Idle,
             tick: 0,
-            cooldown_remaining: None,
-            idle_remaining: None,
-            watching_remaining: None,
-            active_elapsed: None,
+            state_timer: None,
             warnings: &[],
             hook_status: &HookStatus::Installed(HookLocation::Local),
             has_global_hooks_path: false,
@@ -834,10 +792,7 @@ mod tests {
         let bar = StatusBar {
             poll_state: &PollState::Idle,
             tick: 0,
-            cooldown_remaining: None,
-            idle_remaining: None,
-            watching_remaining: None,
-            active_elapsed: None,
+            state_timer: None,
             warnings: &[],
             hook_status: &HookStatus::Installed(HookLocation::Local),
             has_global_hooks_path: false,
@@ -861,10 +816,7 @@ mod tests {
         let bar = StatusBar {
             poll_state: &PollState::Idle,
             tick: 0,
-            cooldown_remaining: None,
-            idle_remaining: None,
-            watching_remaining: None,
-            active_elapsed: None,
+            state_timer: None,
             warnings: &[],
             hook_status: &HookStatus::Installed(HookLocation::Local),
             has_global_hooks_path: false,
@@ -887,10 +839,7 @@ mod tests {
         let bar = StatusBar {
             poll_state: &PollState::Idle,
             tick: 0,
-            cooldown_remaining: None,
-            idle_remaining: None,
-            watching_remaining: None,
-            active_elapsed: None,
+            state_timer: None,
             warnings: &[],
             hook_status: &HookStatus::Installed(HookLocation::Local),
             has_global_hooks_path: false,
@@ -913,10 +862,7 @@ mod tests {
         let bar = StatusBar {
             poll_state: &PollState::Idle,
             tick: 0,
-            cooldown_remaining: None,
-            idle_remaining: None,
-            watching_remaining: None,
-            active_elapsed: None,
+            state_timer: None,
             warnings: &[],
             hook_status: &HookStatus::NoGitDir,
             has_global_hooks_path: false,

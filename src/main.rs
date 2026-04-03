@@ -185,10 +185,7 @@ async fn run_poll_orchestrator(
             let any_running = a.has_any_running();
             scheduler.transition(any_running);
             a.poll_state = scheduler.state();
-            a.cooldown_remaining = scheduler.cooldown_remaining();
-            a.idle_remaining = scheduler.idle_remaining();
-            a.watching_remaining = scheduler.watching_remaining();
-            a.active_elapsed = scheduler.active_elapsed();
+            a.state_timer = scheduler.state_timer();
             any_running
         };
 
@@ -259,6 +256,7 @@ fn handle_poll_interrupt(
     scheduler.boost();
     let mut a = app.lock().expect("app mutex poisoned");
     a.poll_state = scheduler.state();
+    a.state_timer = scheduler.state_timer();
     if source == InterruptSource::Sigusr1 {
         a.push_signal_at = Some(Instant::now());
     }

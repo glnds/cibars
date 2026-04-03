@@ -121,9 +121,16 @@ impl LinkMap {
 
     /// Record a GH workflow completion for runtime correlation.
     pub fn record_workflow_completion(&mut self, workflow_name: &str) {
-        self.recent_completions
-            .push((workflow_name.to_string(), Instant::now()));
         self.prune_expired();
+        let cutoff = std::time::Duration::from_secs(CORRELATION_WINDOW_SECS);
+        let already_recorded = self
+            .recent_completions
+            .iter()
+            .any(|(n, t)| n == workflow_name && t.elapsed() < cutoff);
+        if !already_recorded {
+            self.recent_completions
+                .push((workflow_name.to_string(), Instant::now()));
+        }
         // Cap to prevent unbounded growth in long-running sessions
         if self.recent_completions.len() > 500 {
             self.recent_completions
@@ -2395,5 +2402,29 @@ jobs:
         let mut link_map = LinkMap::new();
         link_map.add_discovered("deploy".into(), "CI".into(), "b".into(), "k".into());
         assert_eq!(link_map.workflow_for_pipeline("deploy"), Some("CI"));
+    }
+
+    #[test]
+    fn record_completion_deduplicates() {
+        let mut map = LinkMap::new();
+        map.record_workflow_completion("CI");
+        map.record_workflow_completion("CI");
+        map.record_workflow_completion("CI");
+        assert_eq!(
+            map.recent_completions
+                .iter()
+                .filter(|(n, _)| n == "CI")
+                .count(),
+            1,
+            "should only have one entry for CI"
+        );
+    }
+
+    #[test]
+    fn record_completion_allows_different_workflows() {
+        let mut map = LinkMap::new();
+        map.record_workflow_completion("CI");
+        map.record_workflow_completion("Deploy");
+        assert_eq!(map.recent_completions.len(), 2);
     }
 }

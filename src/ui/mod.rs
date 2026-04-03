@@ -494,10 +494,7 @@ fn render_pipeline_centric(
         StatusBar {
             poll_state: &app.poll_state,
             tick: app.status_tick,
-            cooldown_remaining: app.cooldown_remaining,
-            idle_remaining: app.idle_remaining,
-            watching_remaining: app.watching_remaining,
-            active_elapsed: app.active_elapsed,
+            state_timer: app.state_timer,
             warnings: &app.warnings,
             hook_status: &app.hook_status,
             has_global_hooks_path: app.has_global_hooks_path,
@@ -875,10 +872,7 @@ pub fn run_ui(
                 StatusBar {
                     poll_state: &app.poll_state,
                     tick: app.status_tick,
-                    cooldown_remaining: app.cooldown_remaining,
-                    idle_remaining: app.idle_remaining,
-                    watching_remaining: app.watching_remaining,
-                    active_elapsed: app.active_elapsed,
+                    state_timer: app.state_timer,
                     warnings: &app.warnings,
                     hook_status: &app.hook_status,
                     has_global_hooks_path: app.has_global_hooks_path,

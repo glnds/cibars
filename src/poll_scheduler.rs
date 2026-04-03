@@ -6,6 +6,36 @@ const ACTIVE_INTERVAL: Duration = Duration::from_secs(5);
 const COOLDOWN_DURATION: Duration = Duration::from_secs(60);
 const IDLE_TO_LONG_DURATION: Duration = Duration::from_secs(300);
 
+#[derive(Debug, Clone, Copy)]
+pub struct StateTimer {
+    pub started: Instant,
+    pub total: Option<Duration>,
+}
+
+impl StateTimer {
+    pub fn countdown(started: Instant, total: Duration) -> Self {
+        Self {
+            started,
+            total: Some(total),
+        }
+    }
+
+    pub fn elapsed(started: Instant) -> Self {
+        Self {
+            started,
+            total: None,
+        }
+    }
+
+    pub fn display_duration(&self) -> Duration {
+        let elapsed = self.started.elapsed();
+        match self.total {
+            Some(total) => total.saturating_sub(elapsed),
+            None => elapsed,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PollState {
     Idle,
@@ -143,41 +173,20 @@ impl PollScheduler {
         self.idle_started = Some(Instant::now() - IDLE_TO_LONG_DURATION - Duration::from_secs(1));
     }
 
-    pub fn cooldown_remaining(&self) -> Option<Duration> {
-        if self.state != PollState::Cooldown {
-            return None;
+    pub fn state_timer(&self) -> Option<StateTimer> {
+        match self.state {
+            PollState::Idle => self
+                .idle_started
+                .map(|t| StateTimer::countdown(t, IDLE_TO_LONG_DURATION)),
+            PollState::Watching => self
+                .watching_started
+                .map(|t| StateTimer::countdown(t, COOLDOWN_DURATION)),
+            PollState::Cooldown => self
+                .cooldown_started
+                .map(|t| StateTimer::countdown(t, COOLDOWN_DURATION)),
+            PollState::Active => self.active_started.map(StateTimer::elapsed),
+            PollState::LongIdle => None,
         }
-        self.cooldown_started.map(|t| {
-            let elapsed = t.elapsed();
-            COOLDOWN_DURATION.saturating_sub(elapsed)
-        })
-    }
-
-    pub fn idle_remaining(&self) -> Option<Duration> {
-        if self.state != PollState::Idle {
-            return None;
-        }
-        self.idle_started.map(|t| {
-            let elapsed = t.elapsed();
-            IDLE_TO_LONG_DURATION.saturating_sub(elapsed)
-        })
-    }
-
-    pub fn watching_remaining(&self) -> Option<Duration> {
-        if self.state != PollState::Watching {
-            return None;
-        }
-        self.watching_started.map(|t| {
-            let elapsed = t.elapsed();
-            COOLDOWN_DURATION.saturating_sub(elapsed)
-        })
-    }
-
-    pub fn active_elapsed(&self) -> Option<Duration> {
-        if self.state != PollState::Active {
-            return None;
-        }
-        self.active_started.map(|t| t.elapsed())
     }
 }
 
@@ -306,24 +315,6 @@ mod tests {
         assert_eq!(s.interval(), Duration::from_secs(5));
     }
 
-    // --- cooldown_remaining tests ---
-
-    #[test]
-    fn cooldown_remaining_none_when_not_cooldown() {
-        let s = PollScheduler::new();
-        assert!(s.cooldown_remaining().is_none());
-    }
-
-    #[test]
-    fn cooldown_remaining_some_when_cooldown() {
-        let mut s = PollScheduler::new();
-        s.transition(true);
-        s.transition(false);
-        let remaining = s.cooldown_remaining().unwrap();
-        assert!(remaining <= Duration::from_secs(60));
-        assert!(remaining > Duration::from_secs(58));
-    }
-
     // --- boost tests ---
 
     #[test]
@@ -401,16 +392,6 @@ mod tests {
         assert_eq!(s.interval(), Duration::from_secs(5));
     }
 
-    // --- cooldown_remaining None in Watching ---
-
-    #[test]
-    fn cooldown_remaining_none_in_watching() {
-        let mut s = PollScheduler::new();
-        s.transition(false);
-        s.boost();
-        assert!(s.cooldown_remaining().is_none());
-    }
-
     // --- long idle tests ---
 
     #[test]
@@ -480,15 +461,6 @@ mod tests {
     }
 
     #[test]
-    fn cooldown_remaining_none_in_long_idle() {
-        let mut s = PollScheduler::new();
-        s.transition(false);
-        s.force_expire_idle();
-        s.transition(false); // → LongIdle
-        assert!(s.cooldown_remaining().is_none());
-    }
-
-    #[test]
     fn idle_to_active_clears_idle_timer() {
         let mut s = PollScheduler::new();
         s.transition(false); // sets idle_started
@@ -509,91 +481,6 @@ mod tests {
         s.boost(); // → Watching
         s.boost(); // should stay Watching
         assert_eq!(s.state(), PollState::Watching);
-    }
-
-    #[test]
-    fn cooldown_remaining_none_in_active() {
-        let mut s = PollScheduler::new();
-        s.transition(true); // → Active
-        assert!(s.cooldown_remaining().is_none());
-    }
-
-    // --- idle_remaining tests ---
-
-    #[test]
-    fn idle_remaining_none_when_not_idle() {
-        let mut s = PollScheduler::new();
-        s.transition(true); // → Active
-        assert!(s.idle_remaining().is_none());
-    }
-
-    #[test]
-    fn idle_remaining_some_when_idle() {
-        let mut s = PollScheduler::new();
-        s.transition(false); // Idle, sets idle_started
-        let remaining = s.idle_remaining().unwrap();
-        assert!(remaining <= Duration::from_secs(300));
-        assert!(remaining > Duration::from_secs(298));
-    }
-
-    #[test]
-    fn idle_remaining_none_in_long_idle() {
-        let mut s = PollScheduler::new();
-        s.transition(false);
-        s.force_expire_idle();
-        s.transition(false); // → LongIdle
-        assert!(s.idle_remaining().is_none());
-    }
-
-    // --- watching_remaining tests ---
-
-    #[test]
-    fn watching_remaining_none_when_not_watching() {
-        let s = PollScheduler::new();
-        assert!(s.watching_remaining().is_none());
-    }
-
-    #[test]
-    fn watching_remaining_some_when_watching() {
-        let mut s = PollScheduler::new();
-        s.transition(false);
-        s.boost(); // → Watching
-        let remaining = s.watching_remaining().unwrap();
-        assert!(remaining <= Duration::from_secs(60));
-        assert!(remaining > Duration::from_secs(58));
-    }
-
-    // --- active_elapsed tests ---
-
-    #[test]
-    fn active_elapsed_none_when_not_active() {
-        let s = PollScheduler::new();
-        assert!(s.active_elapsed().is_none());
-    }
-
-    #[test]
-    fn active_elapsed_some_when_active() {
-        let mut s = PollScheduler::new();
-        s.transition(true); // → Active
-        let elapsed = s.active_elapsed().unwrap();
-        assert!(elapsed < Duration::from_secs(1));
-    }
-
-    #[test]
-    fn active_started_set_on_transition_to_active() {
-        let mut s = PollScheduler::new();
-        assert!(s.active_elapsed().is_none());
-        s.transition(true); // → Active
-        assert!(s.active_elapsed().is_some());
-    }
-
-    #[test]
-    fn active_started_cleared_on_leave_active() {
-        let mut s = PollScheduler::new();
-        s.transition(true); // → Active
-        assert!(s.active_elapsed().is_some());
-        s.transition(false); // → Cooldown
-        assert!(s.active_elapsed().is_none());
     }
 
     // --- PollState::interval() tests ---
@@ -621,5 +508,85 @@ mod tests {
     #[test]
     fn poll_state_interval_cooldown() {
         assert_eq!(PollState::Cooldown.interval(), Duration::from_secs(5));
+    }
+
+    // --- StateTimer tests ---
+
+    #[test]
+    fn state_timer_countdown_display() {
+        let timer = StateTimer::countdown(
+            Instant::now() - Duration::from_secs(10),
+            Duration::from_secs(60),
+        );
+        let d = timer.display_duration();
+        assert!(d >= Duration::from_secs(49) && d <= Duration::from_secs(50));
+    }
+
+    #[test]
+    fn state_timer_countdown_saturates_to_zero() {
+        let timer = StateTimer::countdown(
+            Instant::now() - Duration::from_secs(120),
+            Duration::from_secs(60),
+        );
+        assert_eq!(timer.display_duration(), Duration::ZERO);
+    }
+
+    #[test]
+    fn state_timer_elapsed_display() {
+        let timer = StateTimer::elapsed(Instant::now() - Duration::from_secs(5));
+        let d = timer.display_duration();
+        assert!(d >= Duration::from_secs(5) && d < Duration::from_secs(6));
+    }
+
+    // --- state_timer() method tests ---
+
+    #[test]
+    fn state_timer_none_in_fresh_scheduler() {
+        let s = PollScheduler::new();
+        assert!(s.state_timer().is_none());
+    }
+
+    #[test]
+    fn state_timer_countdown_in_idle() {
+        let mut s = PollScheduler::new();
+        s.transition(false); // Idle, sets idle_started
+        let timer = s.state_timer().unwrap();
+        assert!(timer.total.is_some());
+        assert_eq!(timer.total.unwrap(), Duration::from_secs(300));
+    }
+
+    #[test]
+    fn state_timer_countdown_in_watching() {
+        let mut s = PollScheduler::new();
+        s.transition(false);
+        s.boost(); // → Watching
+        let timer = s.state_timer().unwrap();
+        assert_eq!(timer.total.unwrap(), Duration::from_secs(60));
+    }
+
+    #[test]
+    fn state_timer_countdown_in_cooldown() {
+        let mut s = PollScheduler::new();
+        s.transition(true); // → Active
+        s.transition(false); // → Cooldown
+        let timer = s.state_timer().unwrap();
+        assert_eq!(timer.total.unwrap(), Duration::from_secs(60));
+    }
+
+    #[test]
+    fn state_timer_elapsed_in_active() {
+        let mut s = PollScheduler::new();
+        s.transition(true); // → Active
+        let timer = s.state_timer().unwrap();
+        assert!(timer.total.is_none());
+    }
+
+    #[test]
+    fn state_timer_none_in_long_idle() {
+        let mut s = PollScheduler::new();
+        s.transition(false);
+        s.force_expire_idle();
+        s.transition(false); // → LongIdle
+        assert!(s.state_timer().is_none());
     }
 }
