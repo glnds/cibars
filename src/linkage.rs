@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -63,6 +63,8 @@ pub struct LinkMap {
     links: Vec<PipelineLink>,
     /// Track recent GH workflow completions for runtime correlation.
     recent_completions: Vec<(String, Instant)>,
+    /// Run IDs already recorded, to avoid re-recording the same completion.
+    recorded_run_ids: HashSet<u64>,
 }
 
 /// Correlation window: a CP pipeline must start within this duration
@@ -74,6 +76,7 @@ impl LinkMap {
         Self {
             links: Vec::new(),
             recent_completions: Vec::new(),
+            recorded_run_ids: HashSet::new(),
         }
     }
 
@@ -463,9 +466,18 @@ pub fn apply_links(
 ) {
     let a = app.lock().expect("app mutex poisoned");
 
-    // Record GH workflow completions (non-Running terminal states)
+    // Record GH workflow completions (non-Running terminal states).
+    // Only record once per run_id to prevent the correlation window
+    // from being refreshed every poll cycle.
     for wg in &a.workflow_groups {
-        if wg.summary_status == BuildStatus::Succeeded || wg.summary_status == BuildStatus::Failed {
+        if (wg.summary_status == BuildStatus::Succeeded || wg.summary_status == BuildStatus::Failed)
+            && wg
+                .run_id
+                .is_some_and(|id| !link_map.recorded_run_ids.contains(&id))
+        {
+            if let Some(id) = wg.run_id {
+                link_map.recorded_run_ids.insert(id);
+            }
             link_map.record_workflow_completion(&wg.name);
         }
     }
@@ -2426,5 +2438,60 @@ jobs:
         map.record_workflow_completion("CI");
         map.record_workflow_completion("Deploy");
         assert_eq!(map.recent_completions.len(), 2);
+    }
+
+    #[test]
+    fn pending_link_expires_after_correlation_window() {
+        // Setup: linked workflow completed, pipeline idle
+        let mut app = App::new();
+        app.workflow_groups.push(WorkflowGroup {
+            name: "CI".into(),
+            jobs: vec![],
+            gone: false,
+            summary_status: BuildStatus::Succeeded,
+            run_id: Some(100),
+            category: WorkflowCategory::default(),
+            linked_pipeline: None,
+        });
+        app.pipeline_groups.push(PipelineGroup {
+            name: "deploy-pipe".into(),
+            stages: vec![],
+            gone: false,
+            summary_status: BuildStatus::Idle,
+            pending_link: false,
+        });
+
+        let app = Arc::new(Mutex::new(app));
+        let mut link_map = LinkMap::new();
+        link_map.add_discovered("deploy-pipe".into(), "CI".into(), "b".into(), "k".into());
+        let mut stopped = HashMap::new();
+
+        // First call: records completion, sets pending_link = true
+        apply_links(&app, &mut link_map, &mut stopped);
+        assert!(
+            app.lock().unwrap().pipeline_groups[0].pending_link,
+            "pending_link should be true right after completion"
+        );
+
+        // Simulate repeated calls (as in real polling) — dedup prevents
+        // window refresh, so pending_link stays true but doesn't extend
+        apply_links(&app, &mut link_map, &mut stopped);
+        assert!(
+            app.lock().unwrap().pipeline_groups[0].pending_link,
+            "pending_link should still be true within window"
+        );
+
+        // Expire the completion by replacing with an old timestamp
+        link_map.recent_completions.clear();
+        link_map
+            .recent_completions
+            .push(("CI".into(), Instant::now() - Duration::from_secs(60)));
+
+        // Next apply_links: expired completion → pending_link = false
+        apply_links(&app, &mut link_map, &mut stopped);
+        assert!(
+            !app.lock().unwrap().pipeline_groups[0].pending_link,
+            "pending_link should be false after correlation window expires"
+        );
     }
 }

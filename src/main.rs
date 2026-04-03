@@ -497,6 +497,26 @@ mod tests {
     }
 
     #[test]
+    fn handle_interrupt_sets_state_timer() {
+        let app = Arc::new(Mutex::new(App::new()));
+        let mut scheduler = PollScheduler::new();
+        handle_poll_interrupt(&app, &mut scheduler, InterruptSource::Boost);
+        let a = app.lock().unwrap();
+        let timer = a
+            .state_timer
+            .expect("state_timer should be set after boost");
+        assert!(
+            timer.total.is_some(),
+            "Watching timer should be a countdown"
+        );
+        assert_eq!(
+            timer.total.unwrap(),
+            std::time::Duration::from_secs(60),
+            "Watching countdown should be 60s"
+        );
+    }
+
+    #[test]
     fn e2e_double_boost_stays_watching() {
         let app = Arc::new(Mutex::new(App::new()));
         let mut scheduler = PollScheduler::new();
