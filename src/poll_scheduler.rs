@@ -34,6 +34,19 @@ impl StateTimer {
             None => elapsed,
         }
     }
+
+    /// Number of filled tick blocks (0..num_ticks) derived from elapsed time.
+    /// Both this and `display_duration` use the same `started` Instant,
+    /// keeping blocks and timer visually in sync.
+    pub fn tick_filled(&self, poll_interval: Duration, num_ticks: usize) -> usize {
+        let interval_secs = poll_interval.as_secs();
+        if interval_secs == 0 {
+            return 0;
+        }
+        let elapsed_secs = self.started.elapsed().as_secs();
+        let cycle_secs = elapsed_secs % interval_secs;
+        (cycle_secs as usize * num_ticks) / interval_secs as usize
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -61,6 +74,7 @@ pub struct PollScheduler {
     watching_started: Option<Instant>,
     idle_started: Option<Instant>,
     active_started: Option<Instant>,
+    long_idle_started: Option<Instant>,
     needs_initial_poll: bool,
 }
 
@@ -72,6 +86,7 @@ impl PollScheduler {
             watching_started: None,
             idle_started: None,
             active_started: None,
+            long_idle_started: None,
             needs_initial_poll: true,
         }
     }
@@ -90,6 +105,7 @@ impl PollScheduler {
             self.state = PollState::Watching;
             self.watching_started = Some(Instant::now());
             self.idle_started = None;
+            self.long_idle_started = None;
             tracing::info!(?prev, "boost: → Watching");
         } else {
             tracing::info!(state = ?self.state, "boost: no-op (not idle)");
@@ -115,6 +131,7 @@ impl PollScheduler {
                 {
                     self.state = PollState::LongIdle;
                     self.idle_started = None;
+                    self.long_idle_started = Some(Instant::now());
                 } else if self.idle_started.is_none() {
                     self.idle_started = Some(Instant::now());
                 }
@@ -123,6 +140,7 @@ impl PollScheduler {
                 if any_running {
                     self.state = PollState::Active;
                     self.active_started = Some(Instant::now());
+                    self.long_idle_started = None;
                 }
             }
             PollState::Watching => {
@@ -185,7 +203,7 @@ impl PollScheduler {
                 .cooldown_started
                 .map(|t| StateTimer::countdown(t, COOLDOWN_DURATION)),
             PollState::Active => self.active_started.map(StateTimer::elapsed),
-            PollState::LongIdle => None,
+            PollState::LongIdle => self.long_idle_started.map(StateTimer::elapsed),
         }
     }
 }
@@ -582,11 +600,74 @@ mod tests {
     }
 
     #[test]
-    fn state_timer_none_in_long_idle() {
+    fn state_timer_elapsed_in_long_idle() {
         let mut s = PollScheduler::new();
         s.transition(false);
         s.force_expire_idle();
         s.transition(false); // → LongIdle
-        assert!(s.state_timer().is_none());
+        let timer = s.state_timer().unwrap();
+        assert!(
+            timer.total.is_none(),
+            "LongIdle should be elapsed, not countdown"
+        );
+    }
+
+    // --- tick_filled() tests ---
+
+    #[test]
+    fn tick_filled_zero_at_cycle_start() {
+        let timer = StateTimer::elapsed(Instant::now());
+        assert_eq!(timer.tick_filled(Duration::from_secs(5), 5), 0);
+    }
+
+    #[test]
+    fn tick_filled_one_per_second_active() {
+        // Active: 5s interval, 5 ticks → 1 tick per second
+        let timer = StateTimer::elapsed(Instant::now() - Duration::from_secs(2));
+        assert_eq!(timer.tick_filled(Duration::from_secs(5), 5), 2);
+    }
+
+    #[test]
+    fn tick_filled_wraps_at_interval() {
+        // 7 seconds elapsed, 5s interval → cycle_secs = 2
+        let timer = StateTimer::elapsed(Instant::now() - Duration::from_secs(7));
+        assert_eq!(timer.tick_filled(Duration::from_secs(5), 5), 2);
+    }
+
+    #[test]
+    fn tick_filled_idle_one_per_six_seconds() {
+        // Idle: 30s interval, 5 ticks → 1 tick per 6 seconds
+        let timer = StateTimer::elapsed(Instant::now() - Duration::from_secs(12));
+        assert_eq!(timer.tick_filled(Duration::from_secs(30), 5), 2);
+    }
+
+    #[test]
+    fn tick_filled_long_idle_one_per_sixty_seconds() {
+        // LongIdle: 300s interval, 5 ticks → 1 tick per 60 seconds
+        let timer = StateTimer::elapsed(Instant::now() - Duration::from_secs(180));
+        assert_eq!(timer.tick_filled(Duration::from_secs(300), 5), 3);
+    }
+
+    #[test]
+    fn tick_filled_max_is_four_not_five() {
+        // At 4s into 5s cycle: 4*5/5 = 4 (never reaches 5)
+        let timer = StateTimer::elapsed(Instant::now() - Duration::from_secs(4));
+        assert_eq!(timer.tick_filled(Duration::from_secs(5), 5), 4);
+    }
+
+    #[test]
+    fn tick_filled_countdown_uses_same_epoch() {
+        // Countdown timers also use started for tick computation
+        let timer = StateTimer::countdown(
+            Instant::now() - Duration::from_secs(3),
+            Duration::from_secs(60),
+        );
+        assert_eq!(timer.tick_filled(Duration::from_secs(5), 5), 3);
+    }
+
+    #[test]
+    fn tick_filled_zero_interval_returns_zero() {
+        let timer = StateTimer::elapsed(Instant::now() - Duration::from_secs(5));
+        assert_eq!(timer.tick_filled(Duration::from_secs(0), 5), 0);
     }
 }
