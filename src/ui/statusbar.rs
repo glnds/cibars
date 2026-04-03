@@ -219,7 +219,7 @@ mod tests {
 
     #[test]
     fn active_2s_elapsed_shows_two_filled() {
-        // Active: 5s interval, 5 ticks → 1 tick/sec; 2s → 2 filled
+        // Active: 6s interval, 5 ticks; 2s → 2 filled
         let timer = StateTimer::elapsed(Instant::now() - Duration::from_secs(2));
         let content = render_bar(&PollState::Active, Some(timer));
         let filled2: String = std::iter::repeat(theme::TICK_FILLED).take(2).collect();
@@ -645,7 +645,7 @@ mod tests {
 
     #[test]
     fn tick_uses_state_color() {
-        // 2s elapsed in Active (5s interval) → 2 filled ticks
+        // 2s elapsed in Active (6s interval) → 2 filled ticks
         let timer = StateTimer::elapsed(Instant::now() - Duration::from_secs(2));
         let buf = render_buf(&PollState::Active, Some(timer));
         let tick_col = (1u16..119)

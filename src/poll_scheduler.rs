@@ -2,7 +2,7 @@ use std::time::{Duration, Instant};
 
 const IDLE_INTERVAL: Duration = Duration::from_secs(30);
 const LONG_IDLE_INTERVAL: Duration = Duration::from_secs(300);
-const ACTIVE_INTERVAL: Duration = Duration::from_secs(5);
+const ACTIVE_INTERVAL: Duration = Duration::from_secs(6);
 const COOLDOWN_DURATION: Duration = Duration::from_secs(60);
 const IDLE_TO_LONG_DURATION: Duration = Duration::from_secs(300);
 
@@ -35,7 +35,7 @@ impl StateTimer {
         }
     }
 
-    /// Number of filled tick blocks (0..num_ticks) derived from elapsed time.
+    /// Number of filled tick blocks (0..=num_ticks) derived from elapsed time.
     /// Both this and `display_duration` use the same `started` Instant,
     /// keeping blocks and timer visually in sync.
     pub fn tick_filled(&self, poll_interval: Duration, num_ticks: usize) -> usize {
@@ -45,7 +45,7 @@ impl StateTimer {
         }
         let elapsed_secs = self.started.elapsed().as_secs();
         let cycle_secs = elapsed_secs % interval_secs;
-        (cycle_secs as usize * num_ticks) / interval_secs as usize
+        ((cycle_secs as usize + 1) * num_ticks / interval_secs as usize).min(num_ticks)
     }
 }
 
@@ -319,18 +319,18 @@ mod tests {
     }
 
     #[test]
-    fn interval_5s_in_active() {
+    fn interval_6s_in_active() {
         let mut s = PollScheduler::new();
         s.transition(true);
-        assert_eq!(s.interval(), Duration::from_secs(5));
+        assert_eq!(s.interval(), Duration::from_secs(6));
     }
 
     #[test]
-    fn interval_5s_in_cooldown() {
+    fn interval_6s_in_cooldown() {
         let mut s = PollScheduler::new();
         s.transition(true);
         s.transition(false);
-        assert_eq!(s.interval(), Duration::from_secs(5));
+        assert_eq!(s.interval(), Duration::from_secs(6));
     }
 
     // --- boost tests ---
@@ -400,14 +400,14 @@ mod tests {
         assert!(!s.should_poll_aws());
     }
 
-    // --- watching: interval is 5s ---
+    // --- watching: interval is 6s ---
 
     #[test]
-    fn interval_5s_in_watching() {
+    fn interval_6s_in_watching() {
         let mut s = PollScheduler::new();
         s.transition(false);
         s.boost();
-        assert_eq!(s.interval(), Duration::from_secs(5));
+        assert_eq!(s.interval(), Duration::from_secs(6));
     }
 
     // --- long idle tests ---
@@ -505,7 +505,7 @@ mod tests {
 
     #[test]
     fn poll_state_interval_active() {
-        assert_eq!(PollState::Active.interval(), Duration::from_secs(5));
+        assert_eq!(PollState::Active.interval(), Duration::from_secs(6));
     }
 
     #[test]
@@ -520,12 +520,12 @@ mod tests {
 
     #[test]
     fn poll_state_interval_watching() {
-        assert_eq!(PollState::Watching.interval(), Duration::from_secs(5));
+        assert_eq!(PollState::Watching.interval(), Duration::from_secs(6));
     }
 
     #[test]
     fn poll_state_interval_cooldown() {
-        assert_eq!(PollState::Cooldown.interval(), Duration::from_secs(5));
+        assert_eq!(PollState::Cooldown.interval(), Duration::from_secs(6));
     }
 
     // --- StateTimer tests ---
@@ -617,21 +617,21 @@ mod tests {
     #[test]
     fn tick_filled_zero_at_cycle_start() {
         let timer = StateTimer::elapsed(Instant::now());
-        assert_eq!(timer.tick_filled(Duration::from_secs(5), 5), 0);
+        assert_eq!(timer.tick_filled(Duration::from_secs(6), 5), 0);
     }
 
     #[test]
     fn tick_filled_one_per_second_active() {
-        // Active: 5s interval, 5 ticks → 1 tick per second
+        // Active: 6s interval, 5 ticks; 2s → (3*5)/6 = 2
         let timer = StateTimer::elapsed(Instant::now() - Duration::from_secs(2));
-        assert_eq!(timer.tick_filled(Duration::from_secs(5), 5), 2);
+        assert_eq!(timer.tick_filled(Duration::from_secs(6), 5), 2);
     }
 
     #[test]
     fn tick_filled_wraps_at_interval() {
-        // 7 seconds elapsed, 5s interval → cycle_secs = 2
+        // 7 seconds elapsed, 6s interval → cycle_secs = 1: (2*5)/6 = 1
         let timer = StateTimer::elapsed(Instant::now() - Duration::from_secs(7));
-        assert_eq!(timer.tick_filled(Duration::from_secs(5), 5), 2);
+        assert_eq!(timer.tick_filled(Duration::from_secs(6), 5), 1);
     }
 
     #[test]
@@ -649,10 +649,10 @@ mod tests {
     }
 
     #[test]
-    fn tick_filled_max_is_four_not_five() {
-        // At 4s into 5s cycle: 4*5/5 = 4 (never reaches 5)
-        let timer = StateTimer::elapsed(Instant::now() - Duration::from_secs(4));
-        assert_eq!(timer.tick_filled(Duration::from_secs(5), 5), 4);
+    fn tick_filled_reaches_num_ticks_at_last_second() {
+        // At 5s into 6s cycle: last block should fill
+        let timer = StateTimer::elapsed(Instant::now() - Duration::from_secs(5));
+        assert_eq!(timer.tick_filled(Duration::from_secs(6), 5), 5);
     }
 
     #[test]
@@ -662,7 +662,7 @@ mod tests {
             Instant::now() - Duration::from_secs(3),
             Duration::from_secs(60),
         );
-        assert_eq!(timer.tick_filled(Duration::from_secs(5), 5), 3);
+        assert_eq!(timer.tick_filled(Duration::from_secs(6), 5), 3);
     }
 
     #[test]
