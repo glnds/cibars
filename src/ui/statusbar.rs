@@ -24,6 +24,8 @@ pub struct StatusBar<'a> {
     pub push_signal_at: Option<Instant>,
     pub linkage_broken: bool,
     pub linkage_discovering: bool,
+    pub heartbeat_at: Option<Instant>,
+    pub poll_interval: Duration,
 }
 
 impl Widget for StatusBar<'_> {
@@ -52,7 +54,21 @@ impl Widget for StatusBar<'_> {
 
         let dim_sep = Span::styled(" \u{2502} ", Style::default().fg(theme::SEPARATOR));
 
+        let led_color = match self.heartbeat_at {
+            Some(t) => {
+                let elapsed = t.elapsed().as_secs_f32();
+                let interval = self.poll_interval.as_secs_f32();
+                let progress = (elapsed / interval).min(1.0);
+                theme::lerp_color(theme::STATUS_RUNNING, theme::FG_DIM, progress)
+            }
+            None => theme::FG_DIM,
+        };
+
         let mut spans = vec![
+            Span::styled(
+                format!("{} ", theme::SYMBOL_HEARTBEAT),
+                Style::default().fg(led_color),
+            ),
             Span::styled(format!("{label} "), Style::default().fg(color)),
             Span::styled(filled_str, Style::default().fg(color)),
             Span::styled(empty_str, Style::default().fg(theme::FG_DIM)),
@@ -172,6 +188,7 @@ mod tests {
     use crate::config::HookLocation;
     use ratatui::buffer::Buffer;
     use ratatui::layout::Rect;
+    use ratatui::style::Color;
 
     /// Extract content from row 1 (inner area of bordered block).
     fn render_bar(state: &PollState, state_timer: Option<StateTimer>) -> String {
@@ -199,6 +216,8 @@ mod tests {
             push_signal_at: None,
             linkage_broken: false,
             linkage_discovering: false,
+            heartbeat_at: None,
+            poll_interval: Duration::from_secs(30),
         };
         let area = Rect::new(0, 0, 120, 3);
         let mut buf = Buffer::empty(area);
@@ -318,6 +337,8 @@ mod tests {
             push_signal_at: None,
             linkage_broken: false,
             linkage_discovering: false,
+            heartbeat_at: None,
+            poll_interval: Duration::from_secs(30),
         };
         let area = Rect::new(0, 0, 120, 3);
         let mut buf = Buffer::empty(area);
@@ -441,6 +462,8 @@ mod tests {
             push_signal_at: None,
             linkage_broken: false,
             linkage_discovering: false,
+            heartbeat_at: None,
+            poll_interval: Duration::from_secs(30),
         };
         let area = Rect::new(0, 0, 120, 3);
         let mut buf = Buffer::empty(area);
@@ -466,6 +489,8 @@ mod tests {
             push_signal_at: None,
             linkage_broken: false,
             linkage_discovering: false,
+            heartbeat_at: None,
+            poll_interval: Duration::from_secs(30),
         };
         let area = Rect::new(0, 0, 120, 3);
         let mut buf = Buffer::empty(area);
@@ -502,6 +527,8 @@ mod tests {
             push_signal_at: None,
             linkage_broken: false,
             linkage_discovering: false,
+            heartbeat_at: None,
+            poll_interval: Duration::from_secs(30),
         };
         let area = Rect::new(0, 0, 120, 3);
         let mut buf = Buffer::empty(area);
@@ -534,6 +561,8 @@ mod tests {
             push_signal_at: None,
             linkage_broken: false,
             linkage_discovering: false,
+            heartbeat_at: None,
+            poll_interval: Duration::from_secs(30),
         };
         let area = Rect::new(0, 0, 120, 3);
         let mut buf = Buffer::empty(area);
@@ -567,6 +596,8 @@ mod tests {
             push_signal_at: None,
             linkage_broken,
             linkage_discovering,
+            heartbeat_at: None,
+            poll_interval: Duration::from_secs(30),
         };
         let area = Rect::new(0, 0, 120, 3);
         let mut buf = Buffer::empty(area);
@@ -610,6 +641,8 @@ mod tests {
             push_signal_at: None,
             linkage_broken: false,
             linkage_discovering: false,
+            heartbeat_at: None,
+            poll_interval: Duration::from_secs(30),
         };
         let area = Rect::new(0, 0, 120, 3);
         let mut buf = Buffer::empty(area);
@@ -680,6 +713,8 @@ mod tests {
             push_signal_at: None,
             linkage_broken: false,
             linkage_discovering: false,
+            heartbeat_at: None,
+            poll_interval: Duration::from_secs(30),
         };
         let area = Rect::new(0, 0, 40, 3);
         let mut buf = Buffer::empty(area);
@@ -705,6 +740,8 @@ mod tests {
             push_signal_at: None,
             linkage_broken: false,
             linkage_discovering: false,
+            heartbeat_at: None,
+            poll_interval: Duration::from_secs(30),
         };
         let area = Rect::new(0, 0, 40, 3);
         let mut buf = Buffer::empty(area);
@@ -732,6 +769,8 @@ mod tests {
             push_signal_at: None,
             linkage_broken: false,
             linkage_discovering: false,
+            heartbeat_at: None,
+            poll_interval: Duration::from_secs(30),
         };
         let area = Rect::new(0, 0, 120, 3);
         let mut buf = Buffer::empty(area);
@@ -777,6 +816,8 @@ mod tests {
             push_signal_at: Some(Instant::now()),
             linkage_broken: false,
             linkage_discovering: false,
+            heartbeat_at: None,
+            poll_interval: Duration::from_secs(30),
         };
         let area = Rect::new(0, 0, 120, 3);
         let mut buf = Buffer::empty(area);
@@ -802,6 +843,8 @@ mod tests {
             push_signal_at: Some(expired),
             linkage_broken: false,
             linkage_discovering: false,
+            heartbeat_at: None,
+            poll_interval: Duration::from_secs(30),
         };
         let area = Rect::new(0, 0, 120, 3);
         let mut buf = Buffer::empty(area);
@@ -826,6 +869,8 @@ mod tests {
             push_signal_at: Some(Instant::now()),
             linkage_broken: false,
             linkage_discovering: false,
+            heartbeat_at: None,
+            poll_interval: Duration::from_secs(30),
         };
         let area = Rect::new(0, 0, 120, 3);
         let mut buf = Buffer::empty(area);
@@ -849,6 +894,8 @@ mod tests {
             push_signal_at: None,
             linkage_broken: false,
             linkage_discovering: false,
+            heartbeat_at: None,
+            poll_interval: Duration::from_secs(30),
         };
         let area = Rect::new(0, 0, 120, 3);
         let mut buf = Buffer::empty(area);
@@ -872,6 +919,8 @@ mod tests {
             push_signal_at: None,
             linkage_broken: false,
             linkage_discovering: false,
+            heartbeat_at: None,
+            poll_interval: Duration::from_secs(30),
         };
         let area = Rect::new(0, 0, 120, 3);
         let mut buf = Buffer::empty(area);
@@ -882,6 +931,89 @@ mod tests {
         assert!(!content.contains("✓hook"), "got: {content}");
         assert!(!content.contains("p=install"), "got: {content}");
         assert!(!content.contains("pushed!"), "got: {content}");
+    }
+
+    // --- heartbeat LED tests ---
+
+    fn render_heartbeat_buf(heartbeat_at: Option<Instant>, poll_interval: Duration) -> Buffer {
+        let bar = StatusBar {
+            poll_state: &PollState::Active,
+            state_timer: None,
+            warnings: &[],
+            hook_status: &HookStatus::Installed(HookLocation::Local),
+            has_global_hooks_path: false,
+            boost_pressed_at: None,
+            push_signal_at: None,
+            linkage_broken: false,
+            linkage_discovering: false,
+            heartbeat_at,
+            poll_interval,
+        };
+        let area = Rect::new(0, 0, 120, 3);
+        let mut buf = Buffer::empty(area);
+        bar.render(area, &mut buf);
+        buf
+    }
+
+    fn find_heartbeat_col(buf: &Buffer) -> u16 {
+        (1u16..119)
+            .find(|&x| buf.cell((x, 1)).unwrap().symbol() == "\u{25C9}")
+            .expect("◉ heartbeat not found in row 1")
+    }
+
+    #[test]
+    fn heartbeat_led_dim_when_no_builds() {
+        let buf = render_heartbeat_buf(None, Duration::from_secs(30));
+        let col = find_heartbeat_col(&buf);
+        assert_eq!(
+            buf.cell((col, 1)).unwrap().fg,
+            theme::FG_DIM,
+            "LED should be dim when no builds running"
+        );
+    }
+
+    #[test]
+    fn heartbeat_led_bright_when_just_polled() {
+        let buf = render_heartbeat_buf(Some(Instant::now()), Duration::from_secs(6));
+        let col = find_heartbeat_col(&buf);
+        assert_eq!(
+            buf.cell((col, 1)).unwrap().fg,
+            theme::STATUS_RUNNING,
+            "LED should be full brightness immediately after poll"
+        );
+    }
+
+    #[test]
+    fn heartbeat_led_mid_fade() {
+        let three_secs_ago = Instant::now() - Duration::from_secs(3);
+        let buf = render_heartbeat_buf(Some(three_secs_ago), Duration::from_secs(6));
+        let col = find_heartbeat_col(&buf);
+        let color = buf.cell((col, 1)).unwrap().fg;
+        // Should be between full brightness and dim (not either extreme)
+        assert_ne!(
+            color,
+            theme::STATUS_RUNNING,
+            "should not be full brightness"
+        );
+        assert_ne!(color, theme::FG_DIM, "should not be fully dim");
+        // Verify it's close to the 50% midpoint (allow ±2 for timing drift)
+        if let Color::Rgb(r, g, b) = color {
+            let mid = theme::lerp_color(theme::STATUS_RUNNING, theme::FG_DIM, 0.5);
+            if let Color::Rgb(mr, mg, mb) = mid {
+                assert!(
+                    (r as i16 - mr as i16).unsigned_abs() <= 2,
+                    "red off: {r} vs {mr}"
+                );
+                assert!(
+                    (g as i16 - mg as i16).unsigned_abs() <= 2,
+                    "green off: {g} vs {mg}"
+                );
+                assert!(
+                    (b as i16 - mb as i16).unsigned_abs() <= 2,
+                    "blue off: {b} vs {mb}"
+                );
+            }
+        }
     }
 
     // --- format_duration tests ---
