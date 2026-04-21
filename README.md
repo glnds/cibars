@@ -196,12 +196,12 @@ fire until you push or press `b`.
         └─────────────────────────► Sleep
 ```
 
-| Phase                | Interval | API calls   | Entry                                       |
+| Phase | Interval | API calls | Entry |
 | --- | --- | --- | --- |
-| Sleep                | none     | none        | Startup, or 90s grace expired, or 60s cooldown expired |
-| Polling{Grace}       | 3s       | GH + AWS    | SIGUSR1 (pre-push hook) or `b` key from Sleep |
-| Polling{Active}      | 3s       | GH + AWS    | A running build is observed during Polling   |
-| Polling{Cooldown}    | 3s       | GH + AWS    | All builds finished (from Active), 60s timer |
+| Sleep | none | none | Startup, or 90s grace, or 60s cooldown expired |
+| Polling{Grace} | 3s | GH + AWS | SIGUSR1 (pre-push hook) or `b` key from Sleep |
+| Polling{Active} | 3s | GH + AWS | A running build is observed during Polling |
+| Polling{Cooldown} | 3s | GH + AWS | All builds finished (from Active), 60s timer |
 
 **Key transitions:**
 

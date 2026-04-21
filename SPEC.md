@@ -14,7 +14,7 @@ or tmux pane.
 The application accepts three required arguments at startup:
 
 | Parameter | Flag | Format | Example |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | AWS Profile | `--aws-profile` | Named profile string | `staging` |
 | AWS Region | `--region` | AWS region identifier | `eu-west-1` |
 | GitHub Repository | `--github-repo` | `owner/repo` | `acme/backend` |
@@ -104,7 +104,7 @@ and rendered in grey.
 ### 4.3 Bar Color Summary
 
 | State | Color |
-|---|---|
+| --- | --- |
 | Running | Yellow |
 | Succeeded | Green |
 | Failed | Red |
@@ -146,7 +146,7 @@ workflow name.
 ## 5. Key Bindings
 
 | Key | Action |
-|---|---|
+| --- | --- |
 | `q` | Quit the application |
 | `Ctrl-C` | Quit the application |
 | `e` | Toggle expand/collapse GitHub Actions jobs |
@@ -158,7 +158,7 @@ workflow name.
 ## 6. Error Handling
 
 | Condition | Behaviour |
-|---|---|
+| --- | --- |
 | Missing/invalid startup arg | Exit before rendering, print error to stderr |
 | Missing `GITHUB_TOKEN` | Exit before rendering, print error to stderr |
 | AWS credentials expired | Display warning in status bar, continue polling |
@@ -172,7 +172,7 @@ workflow name.
 ## 7. Non-Functional Requirements
 
 | Property | Requirement |
-|---|---|
+| --- | --- |
 | Language | Rust (stable toolchain) |
 | Binary | Single statically-linked binary, no runtime dependencies |
 | Memory footprint | Under 50 MB RSS during normal operation |
@@ -211,7 +211,7 @@ presses `b`.
 ```
 
 | Phase | Interval | API calls | Entry |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | Sleep | none | none | Startup, 90s grace expired, or 60s cooldown expired |
 | Polling{Grace} | 3s | GH + AWS | SIGUSR1 (pre-push hook) or `b` key from Sleep |
 | Polling{Active} | 3s | GH + AWS | A running build is observed during Polling |
