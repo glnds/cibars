@@ -89,7 +89,7 @@ fn sorted_workflow_groups(groups: &[WorkflowGroup]) -> Vec<&WorkflowGroup> {
     sorted
 }
 
-const TICK_RATE_MS: u64 = 250;
+const EVENT_POLL_INTERVAL_MS: u64 = 250;
 const ANIMATION_INTERVAL: Duration = Duration::from_secs(1);
 
 /// Toggle expand/collapse for both GitHub Actions and CodePipelines.
@@ -101,13 +101,16 @@ fn toggle_expand(app: &Arc<Mutex<App>>) {
     }
 }
 
-/// Handle boost key: optimistically update poll state to Watching.
-/// Returns true if state was changed (Idle/LongIdle → Watching).
+/// Handle boost key: optimistically flip Sleep → Polling{Grace} for snappy UI feedback.
+/// Returns true if state was changed.
 fn handle_boost(app: &Arc<Mutex<App>>) -> bool {
     if let Ok(mut a) = app.lock() {
         a.boost_pressed_at = Some(Instant::now());
-        if matches!(a.poll_state, PollState::Idle | PollState::LongIdle) {
-            a.poll_state = PollState::Watching;
+        if matches!(a.poll_state, PollState::Sleep) {
+            a.poll_state = PollState::Polling {
+                phase: crate::poll_scheduler::PollingPhase::Grace,
+                since: Instant::now(),
+            };
             return true;
         }
     }
@@ -493,7 +496,6 @@ fn render_pipeline_centric(
     frame.render_widget(
         StatusBar {
             poll_state: &app.poll_state,
-            state_timer: app.state_timer,
             warnings: &app.warnings,
             hook_status: &app.hook_status,
             has_global_hooks_path: app.has_global_hooks_path,
@@ -535,7 +537,13 @@ pub fn run_ui(
             }
 
             let app = app.lock().expect("app mutex poisoned");
-            let dim = app.poll_state != PollState::Active;
+            let dim = !matches!(
+                app.poll_state,
+                PollState::Polling {
+                    phase: crate::poll_scheduler::PollingPhase::Active,
+                    ..
+                }
+            );
 
             // Pipeline-centric rendering path
             if let Some(ref assignment) = app.job_assignment {
@@ -857,7 +865,6 @@ pub fn run_ui(
             frame.render_widget(
                 StatusBar {
                     poll_state: &app.poll_state,
-                    state_timer: app.state_timer,
                     warnings: &app.warnings,
                     hook_status: &app.hook_status,
                     has_global_hooks_path: app.has_global_hooks_path,
@@ -900,7 +907,7 @@ pub fn run_ui(
             }
         }
 
-        if event::poll(Duration::from_millis(TICK_RATE_MS))? {
+        if event::poll(Duration::from_millis(EVENT_POLL_INTERVAL_MS))? {
             if let Event::Key(key) = event::read()? {
                 if key.kind != KeyEventKind::Press {
                     continue;
@@ -1639,44 +1646,35 @@ mod tests {
     }
 
     #[test]
-    fn handle_boost_idle_to_watching() {
+    fn handle_boost_sleep_to_grace() {
+        use crate::poll_scheduler::PollingPhase;
         let app = Arc::new(Mutex::new(App::new()));
-        app.lock().unwrap().poll_state = PollState::Idle;
+        app.lock().unwrap().poll_state = PollState::Sleep;
         assert!(handle_boost(&app));
-        assert_eq!(app.lock().unwrap().poll_state, PollState::Watching);
+        assert!(matches!(
+            app.lock().unwrap().poll_state,
+            PollState::Polling {
+                phase: PollingPhase::Grace,
+                ..
+            }
+        ));
         assert!(app.lock().unwrap().boost_pressed_at.is_some());
     }
 
     #[test]
-    fn handle_boost_long_idle_to_watching() {
+    fn handle_boost_noop_when_already_polling() {
+        use crate::poll_scheduler::PollingPhase;
         let app = Arc::new(Mutex::new(App::new()));
-        app.lock().unwrap().poll_state = PollState::LongIdle;
-        assert!(handle_boost(&app));
-        assert_eq!(app.lock().unwrap().poll_state, PollState::Watching);
-    }
-
-    #[test]
-    fn handle_boost_noop_in_active() {
-        let app = Arc::new(Mutex::new(App::new()));
-        app.lock().unwrap().poll_state = PollState::Active;
+        let state = PollState::Polling {
+            phase: PollingPhase::Active,
+            since: Instant::now(),
+        };
+        app.lock().unwrap().poll_state = state;
         assert!(!handle_boost(&app));
-        assert_eq!(app.lock().unwrap().poll_state, PollState::Active);
-    }
-
-    #[test]
-    fn handle_boost_noop_in_cooldown() {
-        let app = Arc::new(Mutex::new(App::new()));
-        app.lock().unwrap().poll_state = PollState::Cooldown;
-        assert!(!handle_boost(&app));
-        assert_eq!(app.lock().unwrap().poll_state, PollState::Cooldown);
-    }
-
-    #[test]
-    fn handle_boost_noop_in_watching() {
-        let app = Arc::new(Mutex::new(App::new()));
-        app.lock().unwrap().poll_state = PollState::Watching;
-        assert!(!handle_boost(&app));
-        assert_eq!(app.lock().unwrap().poll_state, PollState::Watching);
+        assert!(matches!(
+            app.lock().unwrap().poll_state,
+            PollState::Polling { .. }
+        ));
     }
 
     #[test]

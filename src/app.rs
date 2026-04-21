@@ -6,7 +6,7 @@ use chrono::{DateTime, Utc};
 use crate::config::HookStatus;
 use crate::linkage::JobAssignment;
 use crate::model::{BuildStatus, PipelineGroup, WorkflowGroup};
-use crate::poll_scheduler::{PollState, StateTimer};
+use crate::poll_scheduler::PollState;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SourceHealth {
@@ -32,8 +32,6 @@ pub struct App {
     pub loading_actions: bool,
     /// Current poll state machine state, for UI display.
     pub poll_state: PollState,
-    /// State timer for UI display — holds timestamp, computed fresh each render.
-    pub state_timer: Option<StateTimer>,
     /// Git pre-push hook status for boost integration.
     pub hook_status: HookStatus,
     /// True when core.hooksPath overrides .git/hooks (global hooks dir active).
@@ -56,7 +54,6 @@ pub struct App {
 
 impl App {
     pub const MAX_WARNINGS: usize = 10;
-    pub const NUM_TICKS: usize = 5;
 
     pub fn new() -> Self {
         Self {
@@ -70,8 +67,7 @@ impl App {
             rate_limited_until: None,
             loading_pipelines: true,
             loading_actions: true,
-            poll_state: PollState::Idle,
-            state_timer: None,
+            poll_state: PollState::Sleep,
             hook_status: HookStatus::NoGitDir,
             has_global_hooks_path: false,
             aws_health: SourceHealth::Unknown,
@@ -142,7 +138,6 @@ impl Default for App {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::Duration;
 
     use crate::model::{Bar, WorkflowCategory, WorkflowGroup};
 

@@ -21,12 +21,11 @@ pub const STATUS_RUNNING_TIP: Color = Color::Rgb(255, 158, 100);
 pub const STATUS_FAILED: Color = Color::Rgb(255, 64, 64);
 pub const STATUS_IDLE: Color = Color::Rgb(85, 85, 85);
 
-// Poll state colors (btop-inspired urgency gradient)
-pub const POLL_SLEEP: Color = Color::Rgb(85, 85, 85); // LongIdle — inactive_fg
-pub const POLL_SLOW: Color = Color::Rgb(135, 135, 95); // Idle — mem_box
-pub const POLL_SCAN: Color = Color::Rgb(72, 151, 212); // Watching — temp_start
-pub const POLL_FAST: Color = Color::Rgb(240, 160, 60); // Active — warm amber
-pub const POLL_COOL: Color = Color::Rgb(95, 135, 135); // Cooldown — cpu_box
+// Poll state colors
+pub const POLL_SLEEP: Color = Color::Rgb(184, 134, 11); // DarkGoldenrod — Sleep moon
+pub const POLL_SCAN: Color = Color::Rgb(72, 151, 212); // accent — push/relink flashes
+pub const POLL_FAST: Color = Color::Rgb(240, 160, 60); // Polling label — warm amber
+pub const POLL_COOL: Color = Color::Rgb(95, 135, 135); // Cooldown label — cpu_box
 
 /// Linearly interpolate between two RGB colors. `t` is clamped to [0.0, 1.0].
 pub fn lerp_color(from: Color, to: Color, t: f32) -> Color {
@@ -57,10 +56,6 @@ pub const CHECK_MARK: char = '\u{2713}'; // ✓
 
 // Heartbeat LED character
 pub const SYMBOL_HEARTBEAT: char = '\u{25C9}'; // ◉
-
-// Tick bar characters
-pub const TICK_FILLED: char = '\u{25AE}'; // ▮
-pub const TICK_EMPTY: char = '\u{25AF}'; // ▯
 
 #[cfg(test)]
 mod tests {
@@ -96,12 +91,6 @@ mod tests {
     }
 
     #[test]
-    fn tick_chars_are_correct_unicode() {
-        assert_eq!(TICK_FILLED, '▮');
-        assert_eq!(TICK_EMPTY, '▯');
-    }
-
-    #[test]
     fn check_mark_is_correct_unicode() {
         assert_eq!(CHECK_MARK, '✓');
     }
@@ -124,8 +113,7 @@ mod tests {
 
     #[test]
     fn poll_state_colors_are_correct_rgb() {
-        assert_eq!(POLL_SLEEP, Color::Rgb(85, 85, 85));
-        assert_eq!(POLL_SLOW, Color::Rgb(135, 135, 95));
+        assert_eq!(POLL_SLEEP, Color::Rgb(184, 134, 11));
         assert_eq!(POLL_SCAN, Color::Rgb(72, 151, 212));
         assert_eq!(POLL_FAST, Color::Rgb(240, 160, 60));
         assert_eq!(POLL_COOL, Color::Rgb(95, 135, 135));

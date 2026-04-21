@@ -4,6 +4,7 @@ mod linkage;
 mod model;
 mod poll_scheduler;
 mod poller;
+mod sso_health;
 mod ui;
 
 use std::sync::atomic::AtomicBool;
@@ -14,11 +15,10 @@ use tokio::signal::unix::{signal, SignalKind};
 
 use anyhow::{Context, Result};
 
-use app::{App, SourceHealth};
-use chrono::Utc;
+use app::App;
 use config::Config;
 use linkage::LinkMap;
-use poll_scheduler::{PollScheduler, PollState};
+use poll_scheduler::PollScheduler;
 
 fn setup_tracing() -> Result<()> {
     use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
@@ -34,9 +34,7 @@ fn setup_tracing() -> Result<()> {
     Ok(())
 }
 
-async fn init_aws_client(
-    config: &Config,
-) -> (poller::aws::AwsPipelineClient, poller::aws::StsAuthClient) {
+async fn init_aws_pipeline_client(config: &Config) -> poller::aws::AwsPipelineClient {
     let aws_config = aws_config::defaults(aws_config::BehaviorVersion::latest())
         .profile_name(&config.aws_profile)
         .region(aws_config::Region::new(config.region.clone()))
@@ -47,11 +45,7 @@ async fn init_aws_client(
         )
         .load()
         .await;
-
-    let pipeline_client =
-        poller::aws::AwsPipelineClient::new(aws_sdk_codepipeline::Client::new(&aws_config));
-    let sts_client = poller::aws::StsAuthClient::new(aws_sdk_sts::Client::new(&aws_config));
-    (pipeline_client, sts_client)
+    poller::aws::AwsPipelineClient::new(aws_sdk_codepipeline::Client::new(&aws_config))
 }
 
 async fn run_poll_orchestrator(
@@ -75,162 +69,144 @@ async fn run_poll_orchestrator(
     )?;
 
     let mut aws_client: Option<poller::aws::AwsPipelineClient> = None;
-    let mut sts_client: Option<poller::aws::StsAuthClient> = None;
     let mut scheduler = PollScheduler::new();
     let mut link_map = LinkMap::new();
     let cache_path = cwd.join(".cibars-links.toml");
     let mut stopped_runs = std::collections::HashMap::new();
-    let mut force_next_aws = false;
 
     loop {
-        let cycle_start = Instant::now();
-
-        let force_aws = force_next_aws || {
-            let a = app.lock().expect("app mutex poisoned");
-            match &a.aws_health {
-                SourceHealth::AuthFailed { since } => {
-                    let elapsed = Utc::now()
-                        .signed_duration_since(*since)
-                        .num_seconds()
-                        .unsigned_abs();
-                    elapsed >= 300 // 5 minutes
-                }
-                SourceHealth::Unknown | SourceHealth::Healthy => false,
-            }
-        };
-        force_next_aws = false; // consumed
-
-        let need_aws = scheduler.should_poll_aws();
-        let poll_aws = need_aws || force_aws;
-
-        // Lazy-init AWS on first need + cache-first link discovery
-        if need_aws && aws_client.is_none() {
-            tracing::info!("initializing AWS client (first active poll)");
-            let (client, sts) = init_aws_client(&config).await;
-            sts_client = Some(sts);
-
-            // Cache-first: try loading from disk
-            match linkage::load_link_cache(&cache_path) {
-                Ok(Some(cache)) => {
-                    let cached_assignment = cache.job_assignment.clone();
-                    link_map.load_from_cache(cache);
-                    linkage::sync_linked_pipelines(&app, &link_map);
-                    if let Some(assignment) = cached_assignment {
-                        app.lock().expect("app mutex poisoned").job_assignment = Some(assignment);
+        if scheduler.is_polling() {
+            // Lazy-init AWS + link cache on first Polling tick.
+            if aws_client.is_none() {
+                tracing::info!("initializing AWS client (first Polling tick)");
+                let client = init_aws_pipeline_client(&config).await;
+                match linkage::load_link_cache(&cache_path) {
+                    Ok(Some(cache)) => {
+                        let cached_assignment = cache.job_assignment.clone();
+                        link_map.load_from_cache(cache);
+                        linkage::sync_linked_pipelines(&app, &link_map);
+                        if let Some(assignment) = cached_assignment {
+                            app.lock().expect("app mutex poisoned").job_assignment =
+                                Some(assignment);
+                        }
+                        tracing::info!(
+                            links = link_map.links().len(),
+                            "loaded link cache from disk"
+                        );
                     }
-                    tracing::info!(
-                        links = link_map.links().len(),
-                        "loaded link cache from disk"
-                    );
+                    Ok(None) => {
+                        link_map =
+                            linkage::run_discovery(&client, &gh_client, &app, &cache_path).await;
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "corrupt link cache, re-discovering");
+                        let _ = std::fs::remove_file(&cache_path);
+                        link_map =
+                            linkage::run_discovery(&client, &gh_client, &app, &cache_path).await;
+                    }
                 }
-                Ok(None) => {
-                    link_map = linkage::run_discovery(&client, &gh_client, &app, &cache_path).await;
-                }
-                Err(e) => {
-                    tracing::warn!(error = %e, "corrupt link cache, re-discovering");
-                    let _ = std::fs::remove_file(&cache_path);
-                    link_map = linkage::run_discovery(&client, &gh_client, &app, &cache_path).await;
-                }
+                aws_client = Some(client);
             }
 
-            aws_client = Some(client);
-        }
+            let aws = aws_client
+                .as_ref()
+                .expect("aws_client just initialized above");
+            let cycle_start = Instant::now();
 
-        // Poll with boost/SIGUSR1 interruption — if a signal arrives
-        // mid-API-call, cancel the poll and restart in Watching mode.
-        let source = tokio::select! {
-            biased;
-            _ = boost_notify.notified() => Some(InterruptSource::Boost),
-            _ = sigusr1.recv() => Some(InterruptSource::Sigusr1),
-            _ = async {
-                if let Some(aws) = aws_client.as_ref().filter(|_| poll_aws) {
+            let interrupt = tokio::select! {
+                biased;
+                _ = boost_notify.notified() => Some(InterruptSource::Boost),
+                _ = sigusr1.recv() => Some(InterruptSource::Sigusr1),
+                _ = async {
                     tokio::join!(
                         poller::poll_actions_tick(&app, &gh_client),
-                        poller::poll_pipelines_tick(&app, aws, &config.aws_profile, force_aws),
+                        poller::poll_pipelines_tick(&app, aws, &config.aws_profile, false),
                     );
-                } else if let Some(sts) = sts_client.as_ref()
-                    .filter(|_| scheduler.state() == PollState::LongIdle)
-                {
-                    tokio::join!(
-                        poller::poll_actions_tick(&app, &gh_client),
-                        poller::check_aws_auth(&app, sts, &config.aws_profile),
-                    );
-                } else {
-                    poller::poll_actions_tick(&app, &gh_client).await;
-                }
-            } => None,
-        };
-
-        if let Some(source) = source {
-            handle_poll_interrupt(&app, &mut scheduler, source);
-            force_next_aws = true;
-            tracing::info!(state = ?scheduler.state(), ?source, "boost interrupted poll");
-            continue;
-        }
-
-        // Classify workflows by category (CI vs Review)
-        {
-            let mut a = app.lock().expect("app mutex poisoned");
-            poller::classify_workflows(&mut a, &config);
-        }
-
-        // Apply linkage: mark GH workflows as Succeeded when linked CP starts Running
-        linkage::apply_links(&app, &mut link_map, &mut stopped_runs);
-
-        // Sync linked_pipeline, check health, transition + update display state
-        linkage::sync_linked_pipelines(&app, &link_map);
-        let any_running = {
-            let mut a = app.lock().expect("app mutex poisoned");
-            a.check_linkage_health(&link_map);
-            let any_running = a.has_any_running();
-            a.heartbeat_at = if any_running {
-                Some(Instant::now())
-            } else {
-                None
+                } => None,
             };
-            scheduler.transition(any_running);
-            a.poll_state = scheduler.state();
-            a.state_timer = scheduler.state_timer();
-            any_running
-        };
 
-        // Sleep only the remaining interval after poll duration
-        let remaining = scheduler.interval().saturating_sub(cycle_start.elapsed());
+            if let Some(source) = interrupt {
+                handle_poll_interrupt(&app, &mut scheduler, source);
+                tracing::info!(state = ?scheduler.state(), ?source, "interrupt during poll");
+                continue;
+            }
 
-        tracing::info!(
-            state = ?scheduler.state(),
-            any_running,
-            interval = ?scheduler.interval(),
-            ?remaining,
-            "poll cycle complete"
-        );
-        tokio::select! {
-            biased;
-            _ = boost_notify.notified() => {
-                handle_poll_interrupt(&app, &mut scheduler, InterruptSource::Boost);
-                force_next_aws = true;
-                tracing::info!(state = ?scheduler.state(), "boost triggered by key");
+            // Process poll results
+            {
+                let mut a = app.lock().expect("app mutex poisoned");
+                poller::classify_workflows(&mut a, &config);
             }
-            _ = sigusr1.recv() => {
-                handle_poll_interrupt(&app, &mut scheduler, InterruptSource::Sigusr1);
-                force_next_aws = true;
-                tracing::info!(state = ?scheduler.state(), "boost triggered by SIGUSR1");
-            }
-            _ = link_notify.notified() => {
-                tracing::info!("link re-discovery triggered by 'l' key");
-                link_map.clear();
-                if let Some(aws) = aws_client.as_ref() {
-                    link_map = linkage::run_discovery(aws, &gh_client, &app, &cache_path).await;
+            linkage::apply_links(&app, &mut link_map, &mut stopped_runs);
+            linkage::sync_linked_pipelines(&app, &link_map);
+
+            let any_running = {
+                let mut a = app.lock().expect("app mutex poisoned");
+                a.check_linkage_health(&link_map);
+                let any_running = a.has_any_running();
+                a.heartbeat_at = if any_running {
+                    Some(Instant::now())
+                } else {
+                    None
+                };
+                scheduler.transition(any_running);
+                a.poll_state = scheduler.state();
+                any_running
+            };
+
+            let remaining = scheduler.interval().saturating_sub(cycle_start.elapsed());
+            tracing::info!(
+                state = ?scheduler.state(),
+                any_running,
+                ?remaining,
+                "poll cycle complete"
+            );
+
+            tokio::select! {
+                biased;
+                _ = boost_notify.notified() => {
+                    handle_poll_interrupt(&app, &mut scheduler, InterruptSource::Boost);
                 }
-                {
-                    let mut a = app.lock().expect("app mutex poisoned");
-                    a.linkage_broken = false;
-                    a.check_linkage_health(&link_map);
+                _ = sigusr1.recv() => {
+                    handle_poll_interrupt(&app, &mut scheduler, InterruptSource::Sigusr1);
+                }
+                _ = link_notify.notified() => {
+                    handle_link_notify(&app, &mut link_map, &gh_client, aws_client.as_ref(), &cache_path).await;
+                }
+                _ = tokio::time::sleep(remaining) => {}
+            }
+        } else {
+            // Sleep — park on signals, never wake on a timer.
+            tokio::select! {
+                biased;
+                _ = boost_notify.notified() => {
+                    handle_poll_interrupt(&app, &mut scheduler, InterruptSource::Boost);
+                }
+                _ = sigusr1.recv() => {
+                    handle_poll_interrupt(&app, &mut scheduler, InterruptSource::Sigusr1);
+                }
+                _ = link_notify.notified() => {
+                    handle_link_notify(&app, &mut link_map, &gh_client, aws_client.as_ref(), &cache_path).await;
                 }
             }
-            _ = tokio::time::sleep(remaining) => {}
         }
     }
+}
+
+async fn handle_link_notify(
+    app: &Arc<Mutex<App>>,
+    link_map: &mut LinkMap,
+    gh_client: &poller::github::GitHubActionsClient,
+    aws_client: Option<&poller::aws::AwsPipelineClient>,
+    cache_path: &std::path::Path,
+) {
+    tracing::info!("link re-discovery triggered by 'l' key");
+    link_map.clear();
+    if let Some(aws) = aws_client {
+        *link_map = linkage::run_discovery(aws, gh_client, app, cache_path).await;
+    }
+    let mut a = app.lock().expect("app mutex poisoned");
+    a.linkage_broken = false;
+    a.check_linkage_health(link_map);
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -261,7 +237,6 @@ fn handle_poll_interrupt(
     scheduler.boost();
     let mut a = app.lock().expect("app mutex poisoned");
     a.poll_state = scheduler.state();
-    a.state_timer = scheduler.state_timer();
     if source == InterruptSource::Sigusr1 {
         a.push_signal_at = Some(Instant::now());
     }
@@ -285,24 +260,27 @@ fn main() -> Result<()> {
     app_state.has_global_hooks_path = config::has_global_hooks_path(&cwd);
     let app = Arc::new(Mutex::new(app_state));
 
-    // Build tokio runtime for async polling
     let rt = tokio::runtime::Runtime::new()?;
     let _guard = rt.enter();
 
-    // Notify for boost (manual poll trigger, zero overhead)
     let boost_notify = Arc::new(tokio::sync::Notify::new());
     let link_notify = Arc::new(tokio::sync::Notify::new());
 
-    // SIGTERM handling: set flag checked by UI loop
     let term_flag = Arc::new(AtomicBool::new(false));
     signal_hook::flag::register(signal_hook::consts::SIGTERM, Arc::clone(&term_flag))
         .context("failed to register SIGTERM handler")?;
 
-    // SIGUSR1 handling: external boost trigger (e.g. git pre-push hook)
     let sigusr1 =
         signal(SignalKind::user_defined1()).context("failed to register SIGUSR1 handler")?;
 
-    // Spawn single poll orchestrator
+    // SSO health task: independent 5-min loop, runs always.
+    rt.spawn(sso_health::run_sso_health_loop(
+        app.clone(),
+        config.aws_profile.clone(),
+        config.region.clone(),
+    ));
+
+    // Poll orchestrator
     let poll_app = app.clone();
     let poll_config = config.clone();
     let poll_boost = boost_notify.clone();
@@ -324,7 +302,6 @@ fn main() -> Result<()> {
         }
     });
 
-    // Init TUI and run event loop on main thread
     let terminal = ratatui::init();
     let result = ui::run_ui(
         app.clone(),
@@ -346,24 +323,29 @@ fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::poll_scheduler::{PollState, PollingPhase};
     use std::sync::{Arc, Mutex};
 
+    fn polling_phase(state: PollState) -> PollingPhase {
+        match state {
+            PollState::Polling { phase, .. } => phase,
+            other => panic!("expected Polling, got {other:?}"),
+        }
+    }
+
     /// E2E: simulates the pre-push hook shell command sending SIGUSR1 via PID file,
-    /// then verifies the full chain: signal received → scheduler boosts → Watching
+    /// then verifies the full chain: signal received → scheduler boosts → Polling{Grace}
     /// state + push_signal_at set.
     #[tokio::test]
-    async fn e2e_hook_signal_triggers_fast_polling() {
+    async fn e2e_hook_signal_triggers_polling() {
         use tokio::signal::unix::{signal, SignalKind};
 
-        // 1. Write PID file (as cibars does on startup)
         let dir = tempfile::tempdir().unwrap();
         let pid_path = dir.path().join("cibars.pid");
         write_pid_file(&pid_path).unwrap();
 
-        // 2. Register SIGUSR1 handler (as cibars does on startup)
         let mut sigusr1 = signal(SignalKind::user_defined1()).unwrap();
 
-        // 3. Execute the exact hook command that pre-push runs
         let hook_cmd = format!(
             "kill -USR1 $(cat {} 2>/dev/null) 2>/dev/null || true",
             pid_path.display()
@@ -374,7 +356,6 @@ mod tests {
             .status()
             .unwrap();
 
-        // 4. Wait for signal (should arrive within 1s if delivered)
         let received =
             tokio::time::timeout(std::time::Duration::from_millis(500), sigusr1.recv()).await;
         assert!(
@@ -382,19 +363,21 @@ mod tests {
             "SIGUSR1 not received — hook failed to signal"
         );
 
-        // 5. Handle the interrupt (as poll orchestrator does)
         let app = Arc::new(Mutex::new(App::new()));
         let mut scheduler = PollScheduler::new();
         handle_poll_interrupt(&app, &mut scheduler, InterruptSource::Sigusr1);
 
-        // 6. Verify end state: fast polling + visual feedback
         let a = app.lock().unwrap();
-        assert_eq!(a.poll_state, PollState::Watching);
+        assert!(matches!(
+            a.poll_state,
+            PollState::Polling {
+                phase: PollingPhase::Grace,
+                ..
+            }
+        ));
         assert!(a.push_signal_at.is_some());
     }
 
-    /// E2E: hook command is harmless when PID file doesn't exist (graceful
-    /// degradation for projects without a running cibars instance).
     #[tokio::test]
     async fn e2e_hook_noop_without_pid_file() {
         let cmd = "kill -USR1 $(cat /nonexistent/cibars.pid 2>/dev/null) 2>/dev/null || true";
@@ -406,18 +389,13 @@ mod tests {
         assert!(status.success(), "hook should exit 0 even without PID file");
     }
 
-    /// E2E: hook targeting a different project's PID file does NOT signal this
-    /// process. Verifies per-project isolation with multiple cibars instances.
     #[tokio::test]
     async fn e2e_hook_wrong_pid_does_not_signal() {
         use tokio::signal::unix::{signal, SignalKind};
 
         let mut sigusr1 = signal(SignalKind::user_defined1()).unwrap();
-
-        // Drain any stale signals from prior tests (tokio handlers are global)
         let _ = tokio::time::timeout(std::time::Duration::from_millis(50), sigusr1.recv()).await;
 
-        // Write a PID file pointing to a non-existent process
         let dir = tempfile::tempdir().unwrap();
         let pid_path = dir.path().join("other_project.pid");
         std::fs::write(&pid_path, "999999999").unwrap();
@@ -432,7 +410,6 @@ mod tests {
             .status()
             .unwrap();
 
-        // Signal should NOT arrive (wrong PID)
         let received =
             tokio::time::timeout(std::time::Duration::from_millis(200), sigusr1.recv()).await;
         assert!(
@@ -464,7 +441,7 @@ mod tests {
     fn cleanup_pid_file_noop_when_missing() {
         let dir = tempfile::tempdir().unwrap();
         let pid_path = dir.path().join("cibars.pid");
-        cleanup_pid_file(&pid_path); // should not panic
+        cleanup_pid_file(&pid_path);
     }
 
     #[test]
@@ -484,12 +461,12 @@ mod tests {
     }
 
     #[test]
-    fn handle_interrupt_transitions_to_watching() {
+    fn handle_interrupt_transitions_to_grace_from_sleep() {
         let app = Arc::new(Mutex::new(App::new()));
         let mut scheduler = PollScheduler::new();
-        assert_eq!(scheduler.state(), PollState::Idle);
+        assert_eq!(scheduler.state(), PollState::Sleep);
         handle_poll_interrupt(&app, &mut scheduler, InterruptSource::Boost);
-        assert_eq!(scheduler.state(), PollState::Watching);
+        assert_eq!(polling_phase(scheduler.state()), PollingPhase::Grace);
     }
 
     #[test]
@@ -502,78 +479,24 @@ mod tests {
     }
 
     #[test]
-    fn handle_interrupt_sets_state_timer() {
+    fn handle_interrupt_from_cooldown_re_enters_grace() {
         let app = Arc::new(Mutex::new(App::new()));
         let mut scheduler = PollScheduler::new();
-        handle_poll_interrupt(&app, &mut scheduler, InterruptSource::Boost);
-        let a = app.lock().unwrap();
-        let timer = a
-            .state_timer
-            .expect("state_timer should be set after boost");
-        assert!(
-            timer.total.is_some(),
-            "Watching timer should be a countdown"
-        );
-        assert_eq!(
-            timer.total.unwrap(),
-            std::time::Duration::from_secs(60),
-            "Watching countdown should be 60s"
-        );
-    }
-
-    #[test]
-    fn e2e_double_boost_stays_watching() {
-        let app = Arc::new(Mutex::new(App::new()));
-        let mut scheduler = PollScheduler::new();
-        assert_eq!(scheduler.state(), PollState::Idle);
+        // Drive to Cooldown via boost → Active → Cooldown
+        scheduler.boost();
+        scheduler.transition(true); // Grace → Active
+        scheduler.transition(false); // Active → Cooldown
+        assert_eq!(polling_phase(scheduler.state()), PollingPhase::Cooldown);
 
         handle_poll_interrupt(&app, &mut scheduler, InterruptSource::Boost);
-        assert_eq!(scheduler.state(), PollState::Watching);
-
-        handle_poll_interrupt(&app, &mut scheduler, InterruptSource::Boost);
-        assert_eq!(scheduler.state(), PollState::Watching);
-        assert!(
-            app.lock().unwrap().push_signal_at.is_none(),
-            "boost should never set push_signal_at"
-        );
-    }
-
-    #[test]
-    fn e2e_sigusr1_then_boost_both_watching() {
-        let app = Arc::new(Mutex::new(App::new()));
-        let mut scheduler = PollScheduler::new();
-
-        handle_poll_interrupt(&app, &mut scheduler, InterruptSource::Sigusr1);
-        assert_eq!(scheduler.state(), PollState::Watching);
-        assert!(app.lock().unwrap().push_signal_at.is_some());
-
-        handle_poll_interrupt(&app, &mut scheduler, InterruptSource::Boost);
-        assert_eq!(scheduler.state(), PollState::Watching);
-    }
-
-    #[test]
-    fn e2e_boost_never_sets_push_signal_across_states() {
-        let app = Arc::new(Mutex::new(App::new()));
-        let mut scheduler = PollScheduler::new();
-
-        // Boost from Idle
-        handle_poll_interrupt(&app, &mut scheduler, InterruptSource::Boost);
-        assert!(app.lock().unwrap().push_signal_at.is_none());
-
-        // Boost again from Watching
-        handle_poll_interrupt(&app, &mut scheduler, InterruptSource::Boost);
-        assert!(app.lock().unwrap().push_signal_at.is_none());
+        assert_eq!(polling_phase(scheduler.state()), PollingPhase::Grace);
     }
 
     #[test]
     fn e2e_pid_file_overwritten_on_restart() {
         let dir = tempfile::tempdir().unwrap();
         let pid_path = dir.path().join("cibars.pid");
-
-        // Write initial PID file with fake PID
         std::fs::write(&pid_path, "99999").unwrap();
-
-        // Overwrite with current PID (simulates restart)
         write_pid_file(&pid_path).unwrap();
         let content = std::fs::read_to_string(&pid_path).unwrap();
         assert_eq!(content, std::process::id().to_string());
@@ -583,10 +506,7 @@ mod tests {
     fn e2e_pid_file_creates_nested_parent_dirs() {
         let dir = tempfile::tempdir().unwrap();
         let pid_path = dir.path().join("deep").join("nested").join("cibars.pid");
-
-        // Parent dirs don't exist yet
         assert!(!pid_path.parent().unwrap().exists());
-
         write_pid_file(&pid_path).unwrap();
         assert!(pid_path.exists());
         let content = std::fs::read_to_string(&pid_path).unwrap();

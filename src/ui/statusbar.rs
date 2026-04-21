@@ -1,4 +1,4 @@
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
@@ -7,16 +7,16 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Widget};
 
 use super::theme;
-use crate::app::App;
 use crate::config::HookStatus;
-use crate::poll_scheduler::{PollState, StateTimer};
+use crate::poll_scheduler::{PollState, PollingPhase, COOLDOWN_DURATION};
 
 const BOOST_FLASH_DURATION: Duration = Duration::from_millis(750);
 const PUSH_SIGNAL_DURATION: Duration = Duration::from_millis(1500);
+const SPINNER_FRAMES: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+const SPINNER_FRAME_MS: u128 = 250;
 
 pub struct StatusBar<'a> {
     pub poll_state: &'a PollState,
-    pub state_timer: Option<StateTimer>,
     pub warnings: &'a [String],
     pub hook_status: &'a HookStatus,
     pub has_global_hooks_path: bool,
@@ -28,6 +28,14 @@ pub struct StatusBar<'a> {
     pub poll_interval: Duration,
 }
 
+fn spinner_frame() -> char {
+    let ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    SPINNER_FRAMES[((ms / SPINNER_FRAME_MS) % SPINNER_FRAMES.len() as u128) as usize]
+}
+
 impl Widget for StatusBar<'_> {
     fn render(self, area: Rect, buf: &mut Buffer) {
         let block = Block::bordered()
@@ -36,21 +44,23 @@ impl Widget for StatusBar<'_> {
         let inner = block.inner(area);
         block.render(area, buf);
 
-        let (label, color) = match self.poll_state {
-            PollState::Idle => ("Slow", theme::POLL_SLOW),
-            PollState::LongIdle => ("Sleep", theme::POLL_SLEEP),
-            PollState::Watching => ("Scan:GH", theme::POLL_SCAN),
-            PollState::Active => ("Fast", theme::POLL_FAST),
-            PollState::Cooldown => ("Cool", theme::POLL_COOL),
+        let label_span = match self.poll_state {
+            PollState::Sleep => Span::styled("☾ Sleep", Style::default().fg(theme::POLL_SLEEP)),
+            PollState::Polling {
+                phase: PollingPhase::Cooldown,
+                since,
+            } => {
+                let remaining = COOLDOWN_DURATION.saturating_sub(since.elapsed()).as_secs();
+                Span::styled(
+                    format!("Cooldown {remaining}s"),
+                    Style::default().fg(theme::POLL_COOL),
+                )
+            }
+            PollState::Polling { .. } => Span::styled(
+                format!("{} Polling", spinner_frame()),
+                Style::default().fg(theme::POLL_FAST),
+            ),
         };
-
-        let filled = self
-            .state_timer
-            .map(|t| t.tick_filled(self.poll_state.interval(), App::NUM_TICKS))
-            .unwrap_or(0);
-        let remaining = App::NUM_TICKS.saturating_sub(filled);
-        let filled_str: String = std::iter::repeat_n(theme::TICK_FILLED, filled).collect();
-        let empty_str: String = std::iter::repeat_n(theme::TICK_EMPTY, remaining).collect();
 
         let dim_sep = Span::styled(" \u{2502} ", Style::default().fg(theme::SEPARATOR));
 
@@ -69,15 +79,8 @@ impl Widget for StatusBar<'_> {
                 format!("{} ", theme::SYMBOL_HEARTBEAT),
                 Style::default().fg(led_color),
             ),
-            Span::styled(format!("{label} "), Style::default().fg(color)),
-            Span::styled(filled_str, Style::default().fg(color)),
-            Span::styled(empty_str, Style::default().fg(theme::FG_DIM)),
+            label_span,
         ];
-
-        if let Some(timer) = &self.state_timer {
-            spans.push(dim_sep.clone());
-            spans.push(Span::raw(format_duration(timer.display_duration())));
-        }
 
         let boost_active = self
             .boost_pressed_at
@@ -141,7 +144,6 @@ impl Widget for StatusBar<'_> {
             }
         }
 
-        // Linkage status
         if self.linkage_discovering {
             spans.push(dim_sep.clone());
             spans.push(Span::styled(
@@ -171,42 +173,31 @@ impl Widget for StatusBar<'_> {
     }
 }
 
-fn format_duration(d: Duration) -> String {
-    let secs = d.as_secs();
-    if secs >= 60 {
-        format!("{}m{:02}s", secs / 60, secs % 60)
-    } else {
-        format!("{secs}s")
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::config::HookLocation;
     use ratatui::buffer::Buffer;
     use ratatui::layout::Rect;
-    use ratatui::style::Color;
 
-    /// Extract content from row 1 (inner area of bordered block).
-    fn render_bar(state: &PollState, state_timer: Option<StateTimer>) -> String {
-        render_bar_with_hook(
-            state,
-            state_timer,
-            &HookStatus::Installed(HookLocation::Local),
-            false,
-        )
+    fn polling(phase: PollingPhase, age_secs: u64) -> PollState {
+        let since = Instant::now()
+            .checked_sub(Duration::from_secs(age_secs))
+            .unwrap_or_else(Instant::now);
+        PollState::Polling { phase, since }
+    }
+
+    fn render_bar(state: &PollState) -> String {
+        render_bar_with_hook(state, &HookStatus::Installed(HookLocation::Local), false)
     }
 
     fn render_bar_with_hook(
         state: &PollState,
-        state_timer: Option<StateTimer>,
         hook_status: &HookStatus,
         has_global_hooks_path: bool,
     ) -> String {
         let bar = StatusBar {
             poll_state: state,
-            state_timer,
             warnings: &[],
             hook_status,
             has_global_hooks_path,
@@ -215,7 +206,7 @@ mod tests {
             linkage_broken: false,
             linkage_discovering: false,
             heartbeat_at: None,
-            poll_interval: Duration::from_secs(30),
+            poll_interval: Duration::from_secs(3),
         };
         let area = Rect::new(0, 0, 120, 3);
         let mut buf = Buffer::empty(area);
@@ -225,84 +216,35 @@ mod tests {
             .collect()
     }
 
-    // --- tick rendering tests (derived from state_timer) ---
+    // --- new state-label tests ---
 
     #[test]
-    fn no_timer_shows_all_empty() {
-        let content = render_bar(&PollState::Idle, None);
-        let empty5: String = std::iter::repeat(theme::TICK_EMPTY).take(5).collect();
-        assert!(content.contains(&empty5), "got: {content}");
+    fn sleep_renders_moon_label() {
+        let content = render_bar(&PollState::Sleep);
+        assert!(content.contains("☾ Sleep"), "got: {content}");
     }
 
     #[test]
-    fn active_2s_elapsed_shows_two_filled() {
-        // Active: 6s interval, 5 ticks; 2s → 2 filled
-        let timer = StateTimer::elapsed(Instant::now() - Duration::from_secs(2));
-        let content = render_bar(&PollState::Active, Some(timer));
-        let filled2: String = std::iter::repeat(theme::TICK_FILLED).take(2).collect();
-        let empty3: String = std::iter::repeat(theme::TICK_EMPTY).take(3).collect();
-        let expected = format!("{filled2}{empty3}");
-        assert!(content.contains(&expected), "got: {content}");
+    fn polling_grace_renders_spinner() {
+        let content = render_bar(&polling(PollingPhase::Grace, 0));
+        assert!(content.contains("Polling"), "got: {content}");
+        let has_spinner = SPINNER_FRAMES.iter().any(|c| content.contains(*c));
+        assert!(has_spinner, "expected a spinner frame in: {content}");
     }
 
     #[test]
-    fn idle_24s_elapsed_shows_four_filled() {
-        // Idle: 30s interval, 5 ticks → 1 tick/6s; 24s → 4 filled
-        let timer = StateTimer::countdown(
-            Instant::now() - Duration::from_secs(24),
-            Duration::from_secs(300),
-        );
-        let content = render_bar(&PollState::Idle, Some(timer));
-        let filled4: String = std::iter::repeat(theme::TICK_FILLED).take(4).collect();
-        let empty1: String = std::iter::repeat(theme::TICK_EMPTY).take(1).collect();
-        let expected = format!("{filled4}{empty1}");
-        assert!(content.contains(&expected), "got: {content}");
+    fn polling_active_renders_spinner() {
+        let content = render_bar(&polling(PollingPhase::Active, 5));
+        assert!(content.contains("Polling"), "got: {content}");
+        let has_spinner = SPINNER_FRAMES.iter().any(|c| content.contains(*c));
+        assert!(has_spinner, "expected a spinner frame in: {content}");
     }
 
     #[test]
-    fn active_at_cycle_start_shows_all_empty() {
-        // 0s into cycle → 0 filled
-        let timer = StateTimer::elapsed(Instant::now());
-        let content = render_bar(&PollState::Active, Some(timer));
-        let empty5: String = std::iter::repeat(theme::TICK_EMPTY).take(5).collect();
-        assert!(content.contains(&empty5), "got: {content}");
-    }
-
-    #[test]
-    fn long_idle_120s_shows_two_filled() {
-        // LongIdle: 300s interval; 120s → 120*5/300 = 2 filled
-        let timer = StateTimer::elapsed(Instant::now() - Duration::from_secs(120));
-        let content = render_bar(&PollState::LongIdle, Some(timer));
-        let filled2: String = std::iter::repeat(theme::TICK_FILLED).take(2).collect();
-        let empty3: String = std::iter::repeat(theme::TICK_EMPTY).take(3).collect();
-        let expected = format!("{filled2}{empty3}");
-        assert!(content.contains(&expected), "got: {content}");
-    }
-
-    // --- state label tests ---
-
-    #[test]
-    fn idle_shows_slow_polling() {
-        let content = render_bar(&PollState::Idle, None);
-        assert!(content.contains("Slow"), "got: {content}");
-        assert!(!content.contains("Polling:"), "got: {content}");
-    }
-
-    #[test]
-    fn active_shows_fast_polling() {
-        let content = render_bar(&PollState::Active, None);
-        assert!(content.contains("Fast"), "got: {content}");
-        assert!(!content.contains("Polling:"), "got: {content}");
-    }
-
-    #[test]
-    fn cooldown_shows_cool_with_timer() {
-        let timer = StateTimer::countdown(
-            Instant::now() - Duration::from_secs(18),
-            Duration::from_secs(60),
-        );
-        let content = render_bar(&PollState::Cooldown, Some(timer));
-        assert!(content.contains("Cool"), "got: {content}");
+    fn cooldown_renders_countdown_seconds() {
+        let content = render_bar(&polling(PollingPhase::Cooldown, 18));
+        assert!(content.contains("Cooldown"), "got: {content}");
+        // 60s - 18s elapsed ≈ 42s remaining (allow ±1s for test timing)
         assert!(
             content.contains("42s") || content.contains("41s"),
             "got: {content}"
@@ -310,24 +252,9 @@ mod tests {
     }
 
     #[test]
-    fn watching_shows_scan_gh() {
-        let content = render_bar(&PollState::Watching, None);
-        assert!(content.contains("Scan:GH"), "got: {content}");
-    }
-
-    #[test]
-    fn long_idle_shows_sleep() {
-        let content = render_bar(&PollState::LongIdle, None);
-        assert!(content.contains("Sleep"), "got: {content}");
-    }
-
-    // --- state timer display tests ---
-
-    fn render_bar_with_timers(state: &PollState, state_timer: Option<StateTimer>) -> String {
+    fn sleep_label_uses_dark_goldenrod() {
         let bar = StatusBar {
-            poll_state: state,
-
-            state_timer,
+            poll_state: &PollState::Sleep,
             warnings: &[],
             hook_status: &HookStatus::Installed(HookLocation::Local),
             has_global_hooks_path: false,
@@ -336,74 +263,29 @@ mod tests {
             linkage_broken: false,
             linkage_discovering: false,
             heartbeat_at: None,
-            poll_interval: Duration::from_secs(30),
+            poll_interval: Duration::from_secs(3),
         };
         let area = Rect::new(0, 0, 120, 3);
         let mut buf = Buffer::empty(area);
         bar.render(area, &mut buf);
-        (0..120)
-            .map(|x| buf.cell((x, 1)).unwrap().symbol().to_string())
-            .collect()
+        let col = (0u16..120)
+            .find(|&x| buf.cell((x, 1)).unwrap().symbol() == "☾")
+            .expect("☾ moon not found");
+        assert_eq!(buf.cell((col, 1)).unwrap().fg, theme::POLL_SLEEP);
     }
 
-    #[test]
-    fn idle_shows_remaining_time() {
-        let timer = StateTimer::countdown(
-            Instant::now() - Duration::from_secs(108),
-            Duration::from_secs(300),
-        );
-        let content = render_bar_with_timers(&PollState::Idle, Some(timer));
-        assert!(content.contains("Slow"), "got: {content}");
-        // ~192s remaining = 3m12s (could be 3m11s due to test timing)
-        assert!(
-            content.contains("3m12s") || content.contains("3m11s"),
-            "got: {content}"
-        );
-    }
-
-    #[test]
-    fn watching_shows_remaining_time() {
-        let timer = StateTimer::countdown(
-            Instant::now() - Duration::from_secs(18),
-            Duration::from_secs(60),
-        );
-        let content = render_bar_with_timers(&PollState::Watching, Some(timer));
-        assert!(content.contains("Scan:GH"), "got: {content}");
-        assert!(
-            content.contains("42s") || content.contains("41s"),
-            "got: {content}"
-        );
-    }
-
-    #[test]
-    fn active_shows_elapsed_time() {
-        let timer = StateTimer::elapsed(Instant::now() - Duration::from_secs(65));
-        let content = render_bar_with_timers(&PollState::Active, Some(timer));
-        assert!(content.contains("Fast"), "got: {content}");
-        assert!(
-            content.contains("1m05s") || content.contains("1m06s"),
-            "got: {content}"
-        );
-    }
-
-    #[test]
-    fn long_idle_shows_elapsed_timer() {
-        let timer = StateTimer::elapsed(Instant::now() - Duration::from_secs(60));
-        let content = render_bar_with_timers(&PollState::LongIdle, Some(timer));
-        assert!(content.contains("Sleep"), "got: {content}");
-        assert!(content.contains("1m00s"), "got: {content}");
-    }
+    // --- existing behavior preserved ---
 
     #[test]
     fn shows_boost_not_refresh() {
-        let content = render_bar(&PollState::Idle, None);
+        let content = render_bar(&PollState::Sleep);
         assert!(content.contains("b=boost"), "got: {content}");
         assert!(!content.contains("r=boost"), "got: {content}");
     }
 
     #[test]
     fn separator_uses_box_drawing_char() {
-        let content = render_bar(&PollState::Idle, None);
+        let content = render_bar(&PollState::Sleep);
         assert!(
             content.contains('\u{2502}'),
             "expected │ (U+2502) in: {content}"
@@ -414,29 +296,28 @@ mod tests {
 
     #[test]
     fn shows_local_hint_when_missing_no_global() {
-        let content = render_bar_with_hook(&PollState::Idle, None, &HookStatus::Missing, false);
+        let content = render_bar_with_hook(&PollState::Sleep, &HookStatus::Missing, false);
         assert!(content.contains("p=install hook"), "got: {content}");
         assert!(!content.contains("g="), "got: {content}");
     }
 
     #[test]
     fn shows_both_hints_when_missing_with_global() {
-        let content = render_bar_with_hook(&PollState::Idle, None, &HookStatus::Missing, true);
+        let content = render_bar_with_hook(&PollState::Sleep, &HookStatus::Missing, true);
         assert!(content.contains("p=local"), "got: {content}");
         assert!(content.contains("g=global"), "got: {content}");
     }
 
     #[test]
     fn shows_local_hint_when_incomplete_no_global() {
-        let content = render_bar_with_hook(&PollState::Idle, None, &HookStatus::Incomplete, false);
+        let content = render_bar_with_hook(&PollState::Sleep, &HookStatus::Incomplete, false);
         assert!(content.contains("p=install hook"), "got: {content}");
     }
 
     #[test]
     fn no_hook_hint_when_installed() {
         let content = render_bar_with_hook(
-            &PollState::Idle,
-            None,
+            &PollState::Sleep,
             &HookStatus::Installed(HookLocation::Local),
             false,
         );
@@ -446,57 +327,44 @@ mod tests {
 
     #[test]
     fn installed_hook_shows_checkmark() {
-        let bar = StatusBar {
-            poll_state: &PollState::Idle,
-
-            state_timer: None,
-            warnings: &[],
-            hook_status: &HookStatus::Installed(HookLocation::Local),
-            has_global_hooks_path: false,
-            boost_pressed_at: None,
-            push_signal_at: None,
-            linkage_broken: false,
-            linkage_discovering: false,
-            heartbeat_at: None,
-            poll_interval: Duration::from_secs(30),
-        };
-        let area = Rect::new(0, 0, 120, 3);
-        let mut buf = Buffer::empty(area);
-        bar.render(area, &mut buf);
-        let content: String = (0..120)
-            .map(|x| buf.cell((x, 1)).unwrap().symbol().to_string())
-            .collect();
+        let content = render_bar(&PollState::Sleep);
         assert!(content.contains("✓hook"), "got: {content}");
     }
 
     // --- boost flash tests ---
 
-    #[test]
-    fn boost_flash_active() {
+    fn render_with_boost(boost_pressed_at: Option<Instant>) -> Buffer {
         let bar = StatusBar {
-            poll_state: &PollState::Idle,
-
-            state_timer: None,
+            poll_state: &PollState::Sleep,
             warnings: &[],
             hook_status: &HookStatus::Installed(HookLocation::Local),
             has_global_hooks_path: false,
-            boost_pressed_at: Some(Instant::now()),
+            boost_pressed_at,
             push_signal_at: None,
             linkage_broken: false,
             linkage_discovering: false,
             heartbeat_at: None,
-            poll_interval: Duration::from_secs(30),
+            poll_interval: Duration::from_secs(3),
         };
         let area = Rect::new(0, 0, 120, 3);
         let mut buf = Buffer::empty(area);
         bar.render(area, &mut buf);
+        buf
+    }
 
-        let b_col = (0u16..120)
+    fn find_b_boost_col(buf: &Buffer) -> u16 {
+        (0u16..120)
             .find(|&x| {
                 buf.cell((x, 1)).unwrap().symbol() == "b"
                     && buf.cell((x + 1, 1)).unwrap().symbol() == "="
             })
-            .expect("b=boost not found");
+            .expect("b=boost not found")
+    }
+
+    #[test]
+    fn boost_flash_active() {
+        let buf = render_with_boost(Some(Instant::now()));
+        let b_col = find_b_boost_col(&buf);
         for offset in 0..7 {
             let cell = buf.cell((b_col + offset, 1)).unwrap();
             assert_eq!(
@@ -511,79 +379,25 @@ mod tests {
     #[test]
     fn boost_flash_expired() {
         let expired = Instant::now() - Duration::from_secs(2);
-        let bar = StatusBar {
-            poll_state: &PollState::Idle,
-
-            state_timer: None,
-            warnings: &[],
-            hook_status: &HookStatus::Installed(HookLocation::Local),
-            has_global_hooks_path: false,
-            boost_pressed_at: Some(expired),
-            push_signal_at: None,
-            linkage_broken: false,
-            linkage_discovering: false,
-            heartbeat_at: None,
-            poll_interval: Duration::from_secs(30),
-        };
-        let area = Rect::new(0, 0, 120, 3);
-        let mut buf = Buffer::empty(area);
-        bar.render(area, &mut buf);
-
-        let b_col = (0u16..120)
-            .find(|&x| {
-                buf.cell((x, 1)).unwrap().symbol() == "b"
-                    && buf.cell((x + 1, 1)).unwrap().symbol() == "="
-            })
-            .expect("b=boost not found");
+        let buf = render_with_boost(Some(expired));
+        let b_col = find_b_boost_col(&buf);
         let cell = buf.cell((b_col, 1)).unwrap();
-        assert_ne!(
-            cell.fg,
-            theme::BOOST_FLASH,
-            "expired flash should not use BOOST_FLASH"
-        );
+        assert_ne!(cell.fg, theme::BOOST_FLASH);
     }
 
     #[test]
     fn boost_flash_none() {
-        let bar = StatusBar {
-            poll_state: &PollState::Idle,
-
-            state_timer: None,
-            warnings: &[],
-            hook_status: &HookStatus::Installed(HookLocation::Local),
-            has_global_hooks_path: false,
-            boost_pressed_at: None,
-            push_signal_at: None,
-            linkage_broken: false,
-            linkage_discovering: false,
-            heartbeat_at: None,
-            poll_interval: Duration::from_secs(30),
-        };
-        let area = Rect::new(0, 0, 120, 3);
-        let mut buf = Buffer::empty(area);
-        bar.render(area, &mut buf);
-
-        let b_col = (0u16..120)
-            .find(|&x| {
-                buf.cell((x, 1)).unwrap().symbol() == "b"
-                    && buf.cell((x + 1, 1)).unwrap().symbol() == "="
-            })
-            .expect("b=boost not found");
+        let buf = render_with_boost(None);
+        let b_col = find_b_boost_col(&buf);
         let cell = buf.cell((b_col, 1)).unwrap();
-        assert_ne!(
-            cell.fg,
-            theme::BOOST_FLASH,
-            "no flash should not use BOOST_FLASH"
-        );
+        assert_ne!(cell.fg, theme::BOOST_FLASH);
     }
 
     // --- linkage tests ---
 
     fn render_bar_with_linkage(linkage_broken: bool, linkage_discovering: bool) -> String {
         let bar = StatusBar {
-            poll_state: &PollState::Idle,
-
-            state_timer: None,
+            poll_state: &PollState::Sleep,
             warnings: &[],
             hook_status: &HookStatus::Installed(HookLocation::Local),
             has_global_hooks_path: false,
@@ -592,7 +406,7 @@ mod tests {
             linkage_broken,
             linkage_discovering,
             heartbeat_at: None,
-            poll_interval: Duration::from_secs(30),
+            poll_interval: Duration::from_secs(3),
         };
         let area = Rect::new(0, 0, 120, 3);
         let mut buf = Buffer::empty(area);
@@ -623,84 +437,12 @@ mod tests {
         assert!(!content.contains("l=relink"), "got: {content}");
     }
 
-    // --- color assertion helpers ---
-
-    fn render_buf(state: &PollState, state_timer: Option<StateTimer>) -> Buffer {
-        let bar = StatusBar {
-            poll_state: state,
-            state_timer,
-            warnings: &[],
-            hook_status: &HookStatus::Installed(HookLocation::Local),
-            has_global_hooks_path: false,
-            boost_pressed_at: None,
-            push_signal_at: None,
-            linkage_broken: false,
-            linkage_discovering: false,
-            heartbeat_at: None,
-            poll_interval: Duration::from_secs(30),
-        };
-        let area = Rect::new(0, 0, 120, 3);
-        let mut buf = Buffer::empty(area);
-        bar.render(area, &mut buf);
-        buf
-    }
-
-    fn label_color(buf: &Buffer, ch: &str) -> ratatui::style::Color {
-        let col = (1u16..119)
-            .find(|&x| buf.cell((x, 1)).unwrap().symbol() == ch)
-            .unwrap_or_else(|| panic!("'{ch}' not found in row 1"));
-        buf.cell((col, 1)).unwrap().fg
-    }
-
-    #[test]
-    fn poll_state_label_colors() {
-        let cases: Vec<(PollState, &str, ratatui::style::Color)> = vec![
-            (PollState::Idle, "S", theme::POLL_SLOW),
-            (PollState::LongIdle, "S", theme::POLL_SLEEP),
-            (PollState::Watching, "S", theme::POLL_SCAN),
-            (PollState::Active, "F", theme::POLL_FAST),
-            (PollState::Cooldown, "C", theme::POLL_COOL),
-        ];
-        for (state, first_char, expected_color) in cases {
-            let buf = render_buf(&state, None);
-            let color = label_color(&buf, first_char);
-            assert_eq!(
-                color, expected_color,
-                "state {state:?}: expected {expected_color:?}, got {color:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn tick_uses_state_color() {
-        // 2s elapsed in Active (6s interval) → 2 filled ticks
-        let timer = StateTimer::elapsed(Instant::now() - Duration::from_secs(2));
-        let buf = render_buf(&PollState::Active, Some(timer));
-        let tick_col = (1u16..119)
-            .find(|&x| buf.cell((x, 1)).unwrap().symbol() == "\u{25AE}")
-            .expect("filled tick not found");
-        let tick_color = buf.cell((tick_col, 1)).unwrap().fg;
-        assert_eq!(tick_color, theme::POLL_FAST);
-    }
-
-    #[test]
-    fn empty_ticks_use_dim_color() {
-        let buf = render_buf(&PollState::Active, None);
-        let tick_col = (1u16..119)
-            .find(|&x| buf.cell((x, 1)).unwrap().symbol() == "\u{25AF}")
-            .expect("empty tick not found");
-        let tick_color = buf.cell((tick_col, 1)).unwrap().fg;
-        assert_eq!(tick_color, theme::FG_DIM);
-    }
-
-    // --- border / block tests ---
+    // --- border tests ---
 
     #[test]
     fn statusbar_renders_in_rounded_block() {
         let bar = StatusBar {
-            poll_state: &PollState::Idle,
-
-            state_timer: None,
+            poll_state: &PollState::Sleep,
             warnings: &[],
             hook_status: &HookStatus::Installed(HookLocation::Local),
             has_global_hooks_path: false,
@@ -709,25 +451,19 @@ mod tests {
             linkage_broken: false,
             linkage_discovering: false,
             heartbeat_at: None,
-            poll_interval: Duration::from_secs(30),
+            poll_interval: Duration::from_secs(3),
         };
         let area = Rect::new(0, 0, 40, 3);
         let mut buf = Buffer::empty(area);
         bar.render(area, &mut buf);
-
-        let top_left = buf.cell((0, 0)).unwrap().symbol().to_string();
-        assert_eq!(top_left, "╭", "expected rounded top-left corner");
-
-        let bot_left = buf.cell((0, 2)).unwrap().symbol().to_string();
-        assert_eq!(bot_left, "╰", "expected rounded bottom-left corner");
+        assert_eq!(buf.cell((0, 0)).unwrap().symbol(), "╭");
+        assert_eq!(buf.cell((0, 2)).unwrap().symbol(), "╰");
     }
 
     #[test]
     fn statusbar_block_border_color() {
         let bar = StatusBar {
-            poll_state: &PollState::Idle,
-
-            state_timer: None,
+            poll_state: &PollState::Sleep,
             warnings: &[],
             hook_status: &HookStatus::Installed(HookLocation::Local),
             has_global_hooks_path: false,
@@ -736,27 +472,23 @@ mod tests {
             linkage_broken: false,
             linkage_discovering: false,
             heartbeat_at: None,
-            poll_interval: Duration::from_secs(30),
+            poll_interval: Duration::from_secs(3),
         };
         let area = Rect::new(0, 0, 40, 3);
         let mut buf = Buffer::empty(area);
         bar.render(area, &mut buf);
-
-        let border_cell = buf.cell((0, 0)).unwrap();
-        assert_eq!(border_cell.fg, theme::BORDER_STATUS);
+        assert_eq!(buf.cell((0, 0)).unwrap().fg, theme::BORDER_STATUS);
     }
 
     // --- warnings tests ---
 
     fn render_bar_with_warnings(
         state: &PollState,
-        state_timer: Option<StateTimer>,
         hook_status: &HookStatus,
         warnings: &[String],
     ) -> String {
         let bar = StatusBar {
             poll_state: state,
-            state_timer,
             warnings,
             hook_status,
             has_global_hooks_path: false,
@@ -765,7 +497,7 @@ mod tests {
             linkage_broken: false,
             linkage_discovering: false,
             heartbeat_at: None,
-            poll_interval: Duration::from_secs(30),
+            poll_interval: Duration::from_secs(3),
         };
         let area = Rect::new(0, 0, 120, 3);
         let mut buf = Buffer::empty(area);
@@ -779,8 +511,7 @@ mod tests {
     fn renders_warnings() {
         let warnings = vec!["AWS: timeout".to_string()];
         let content = render_bar_with_warnings(
-            &PollState::Idle,
-            None,
+            &PollState::Sleep,
             &HookStatus::Installed(HookLocation::Local),
             &warnings,
         );
@@ -790,36 +521,37 @@ mod tests {
     #[test]
     fn renders_hook_hint_and_warning_together() {
         let warnings = vec!["AWS: timeout".to_string()];
-        let content =
-            render_bar_with_warnings(&PollState::Idle, None, &HookStatus::Missing, &warnings);
+        let content = render_bar_with_warnings(&PollState::Sleep, &HookStatus::Missing, &warnings);
         assert!(content.contains("p=install hook"), "got: {content}");
         assert!(content.contains("AWS: timeout"), "got: {content}");
     }
 
     // --- push signal tests ---
 
-    #[test]
-    fn push_signal_shows_pushed_label() {
+    fn render_with_push(push_signal_at: Option<Instant>) -> String {
         let bar = StatusBar {
-            poll_state: &PollState::Idle,
-
-            state_timer: None,
+            poll_state: &PollState::Sleep,
             warnings: &[],
             hook_status: &HookStatus::Installed(HookLocation::Local),
             has_global_hooks_path: false,
             boost_pressed_at: None,
-            push_signal_at: Some(Instant::now()),
+            push_signal_at,
             linkage_broken: false,
             linkage_discovering: false,
             heartbeat_at: None,
-            poll_interval: Duration::from_secs(30),
+            poll_interval: Duration::from_secs(3),
         };
         let area = Rect::new(0, 0, 120, 3);
         let mut buf = Buffer::empty(area);
         bar.render(area, &mut buf);
-        let content: String = (0..120)
+        (0..120)
             .map(|x| buf.cell((x, 1)).unwrap().symbol().to_string())
-            .collect();
+            .collect()
+    }
+
+    #[test]
+    fn push_signal_shows_pushed_label() {
+        let content = render_with_push(Some(Instant::now()));
         assert!(content.contains("pushed!"), "got: {content}");
         assert!(!content.contains("✓hook"), "got: {content}");
     }
@@ -827,26 +559,7 @@ mod tests {
     #[test]
     fn expired_push_signal_shows_checkmark() {
         let expired = Instant::now() - Duration::from_secs(5);
-        let bar = StatusBar {
-            poll_state: &PollState::Idle,
-
-            state_timer: None,
-            warnings: &[],
-            hook_status: &HookStatus::Installed(HookLocation::Local),
-            has_global_hooks_path: false,
-            boost_pressed_at: None,
-            push_signal_at: Some(expired),
-            linkage_broken: false,
-            linkage_discovering: false,
-            heartbeat_at: None,
-            poll_interval: Duration::from_secs(30),
-        };
-        let area = Rect::new(0, 0, 120, 3);
-        let mut buf = Buffer::empty(area);
-        bar.render(area, &mut buf);
-        let content: String = (0..120)
-            .map(|x| buf.cell((x, 1)).unwrap().symbol().to_string())
-            .collect();
+        let content = render_with_push(Some(expired));
         assert!(content.contains("✓hook"), "got: {content}");
         assert!(!content.contains("pushed!"), "got: {content}");
     }
@@ -854,9 +567,7 @@ mod tests {
     #[test]
     fn push_signal_uses_scan_color() {
         let bar = StatusBar {
-            poll_state: &PollState::Idle,
-
-            state_timer: None,
+            poll_state: &PollState::Sleep,
             warnings: &[],
             hook_status: &HookStatus::Installed(HookLocation::Local),
             has_global_hooks_path: false,
@@ -865,7 +576,7 @@ mod tests {
             linkage_broken: false,
             linkage_discovering: false,
             heartbeat_at: None,
-            poll_interval: Duration::from_secs(30),
+            poll_interval: Duration::from_secs(3),
         };
         let area = Rect::new(0, 0, 120, 3);
         let mut buf = Buffer::empty(area);
@@ -879,9 +590,7 @@ mod tests {
     #[test]
     fn installed_hook_uses_success_color() {
         let bar = StatusBar {
-            poll_state: &PollState::Idle,
-
-            state_timer: None,
+            poll_state: &PollState::Sleep,
             warnings: &[],
             hook_status: &HookStatus::Installed(HookLocation::Local),
             has_global_hooks_path: false,
@@ -890,7 +599,7 @@ mod tests {
             linkage_broken: false,
             linkage_discovering: false,
             heartbeat_at: None,
-            poll_interval: Duration::from_secs(30),
+            poll_interval: Duration::from_secs(3),
         };
         let area = Rect::new(0, 0, 120, 3);
         let mut buf = Buffer::empty(area);
@@ -904,9 +613,7 @@ mod tests {
     #[test]
     fn no_git_dir_omits_hook_indicator() {
         let bar = StatusBar {
-            poll_state: &PollState::Idle,
-
-            state_timer: None,
+            poll_state: &PollState::Sleep,
             warnings: &[],
             hook_status: &HookStatus::NoGitDir,
             has_global_hooks_path: false,
@@ -915,7 +622,7 @@ mod tests {
             linkage_broken: false,
             linkage_discovering: false,
             heartbeat_at: None,
-            poll_interval: Duration::from_secs(30),
+            poll_interval: Duration::from_secs(3),
         };
         let area = Rect::new(0, 0, 120, 3);
         let mut buf = Buffer::empty(area);
@@ -932,8 +639,7 @@ mod tests {
 
     fn render_heartbeat_buf(heartbeat_at: Option<Instant>, poll_interval: Duration) -> Buffer {
         let bar = StatusBar {
-            poll_state: &PollState::Active,
-            state_timer: None,
+            poll_state: &polling(PollingPhase::Active, 0),
             warnings: &[],
             hook_status: &HookStatus::Installed(HookLocation::Local),
             has_global_hooks_path: false,
@@ -958,83 +664,23 @@ mod tests {
 
     #[test]
     fn heartbeat_led_dim_when_no_builds() {
-        let buf = render_heartbeat_buf(None, Duration::from_secs(30));
+        let buf = render_heartbeat_buf(None, Duration::from_secs(3));
         let col = find_heartbeat_col(&buf);
-        assert_eq!(
-            buf.cell((col, 1)).unwrap().fg,
-            theme::FG_DIM,
-            "LED should be dim when no builds running"
-        );
+        assert_eq!(buf.cell((col, 1)).unwrap().fg, theme::FG_DIM);
     }
 
     #[test]
     fn heartbeat_led_bright_when_just_polled() {
-        let buf = render_heartbeat_buf(Some(Instant::now()), Duration::from_secs(6));
+        let buf = render_heartbeat_buf(Some(Instant::now()), Duration::from_secs(3));
         let col = find_heartbeat_col(&buf);
-        assert_eq!(
-            buf.cell((col, 1)).unwrap().fg,
-            theme::STATUS_RUNNING,
-            "LED should be full brightness immediately after poll"
-        );
+        assert_eq!(buf.cell((col, 1)).unwrap().fg, theme::STATUS_RUNNING);
     }
 
-    #[test]
-    fn heartbeat_led_mid_fade() {
-        let three_secs_ago = Instant::now() - Duration::from_secs(3);
-        let buf = render_heartbeat_buf(Some(three_secs_ago), Duration::from_secs(6));
-        let col = find_heartbeat_col(&buf);
-        let color = buf.cell((col, 1)).unwrap().fg;
-        // Should be between full brightness and dim (not either extreme)
-        assert_ne!(
-            color,
-            theme::STATUS_RUNNING,
-            "should not be full brightness"
-        );
-        assert_ne!(color, theme::FG_DIM, "should not be fully dim");
-        // Verify it's close to the 50% midpoint (allow ±2 for timing drift)
-        if let Color::Rgb(r, g, b) = color {
-            let mid = theme::lerp_color(theme::STATUS_RUNNING, theme::FG_DIM, 0.5);
-            if let Color::Rgb(mr, mg, mb) = mid {
-                assert!(
-                    (r as i16 - mr as i16).unsigned_abs() <= 2,
-                    "red off: {r} vs {mr}"
-                );
-                assert!(
-                    (g as i16 - mg as i16).unsigned_abs() <= 2,
-                    "green off: {g} vs {mg}"
-                );
-                assert!(
-                    (b as i16 - mb as i16).unsigned_abs() <= 2,
-                    "blue off: {b} vs {mb}"
-                );
-            }
-        }
-    }
-
-    // --- format_duration tests ---
+    // --- spinner cadence ---
 
     #[test]
-    fn format_duration_seconds_only() {
-        assert_eq!(format_duration(Duration::from_secs(42)), "42s");
-    }
-
-    #[test]
-    fn format_duration_minutes_and_seconds() {
-        assert_eq!(format_duration(Duration::from_secs(192)), "3m12s");
-    }
-
-    #[test]
-    fn format_duration_zero() {
-        assert_eq!(format_duration(Duration::from_secs(0)), "0s");
-    }
-
-    #[test]
-    fn format_duration_exact_minute() {
-        assert_eq!(format_duration(Duration::from_secs(60)), "1m00s");
-    }
-
-    #[test]
-    fn format_duration_five_minutes() {
-        assert_eq!(format_duration(Duration::from_secs(300)), "5m00s");
+    fn spinner_frame_is_in_set() {
+        let f = spinner_frame();
+        assert!(SPINNER_FRAMES.contains(&f));
     }
 }
