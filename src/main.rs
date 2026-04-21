@@ -74,6 +74,8 @@ async fn run_poll_orchestrator(
     let cache_path = cwd.join(".cibars-links.toml");
     let mut stopped_runs = std::collections::HashMap::new();
 
+    bootstrap_initial_poll(&app, &mut scheduler);
+
     loop {
         if scheduler.is_polling() {
             // Lazy-init AWS + link cache on first Polling tick.
@@ -240,6 +242,12 @@ fn handle_poll_interrupt(
     if source == InterruptSource::Sigusr1 {
         a.push_signal_at = Some(Instant::now());
     }
+}
+
+fn bootstrap_initial_poll(app: &Arc<Mutex<App>>, scheduler: &mut PollScheduler) {
+    scheduler.boost();
+    let mut a = app.lock().expect("app mutex poisoned");
+    a.poll_state = scheduler.state();
 }
 
 fn main() -> Result<()> {
@@ -476,6 +484,18 @@ mod tests {
         handle_poll_interrupt(&app, &mut scheduler, InterruptSource::Sigusr1);
         let a = app.lock().unwrap();
         assert_eq!(a.poll_state, scheduler.state());
+    }
+
+    #[test]
+    fn bootstrap_initial_poll_transitions_sleep_to_grace() {
+        let app = Arc::new(Mutex::new(App::new()));
+        let mut scheduler = PollScheduler::new();
+        assert_eq!(scheduler.state(), PollState::Sleep);
+
+        bootstrap_initial_poll(&app, &mut scheduler);
+
+        assert_eq!(polling_phase(scheduler.state()), PollingPhase::Grace);
+        assert_eq!(app.lock().unwrap().poll_state, scheduler.state());
     }
 
     #[test]

@@ -60,8 +60,9 @@ See `README.md` for the full state machine diagram and transitions.
 Dev details: `PollScheduler` lives in `src/poll_scheduler.rs`.
 Boost signal uses `Arc<AtomicBool>` shared between UI thread and
 poll orchestrator — UI sets flag on `b` press, orchestrator swaps
-it and calls `scheduler.boost()`. Initial poll uses
-`needs_initial_poll` flag to poll both GH+AWS on startup.
+it and calls `scheduler.boost()`. Initial poll: orchestrator calls
+`scheduler.boost()` once on startup so the first tick populates UI
+with current GH+AWS state.
 
 ## Testing
 
