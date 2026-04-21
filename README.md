@@ -13,8 +13,8 @@ single screen -- no browser required.
 ### Core Monitoring
 
 - Live polling of AWS CodePipelines and GitHub Actions in a single TUI
-- Intelligent polling state machine: Idle (30s) -> LongIdle (5min) ->
-  Watching (5s) -> Active (5s) -> Cooldown (5s, 60s timer)
+- Hook-driven polling: Sleep (zero polls) until `git push` or `b` key
+  triggers Polling (3s) — 90s grace, 60s cooldown after builds finish
 - Auto-discovery of new pipelines and workflow runs (no restart needed)
 - Branch filtering for GitHub Actions (`--branch` flag)
 - Workflow categorization: CI vs Review (auto-detected via heuristics +
@@ -40,8 +40,8 @@ single screen -- no browser required.
 
 ### AWS SSO Support
 
-- SSO token health monitoring via STS `GetCallerIdentity` during
-  LongIdle
+- SSO token health monitoring via independent 5-min STS
+  `GetCallerIdentity` loop (decoupled from poll cycle)
 - Visual SSO expired indicator in header
 
 ### UI
@@ -52,8 +52,9 @@ single screen -- no browser required.
 - Braille-character bar fill with gradient animation
 - Expand/collapse all sections (`e` key)
 - Boost key (`b`) with visual flash feedback
-- Status bar with poll state indicator, animated tick counter,
-  keybindings, hook status, linkage status, and warnings
+- Status bar with poll state indicator (☾ Sleep moon, spinner during
+  Polling, countdown during Cooldown), keybindings, hook status,
+  linkage status, and warnings
 - Completion timestamps per bar (HH:MM)
 
 ### Operational
@@ -130,7 +131,7 @@ cp config.toml.example config.toml
 | Key | Action |
 | --- | --- |
 | `e` | Expand / collapse all sections |
-| `b` | Boost: trigger immediate poll (Idle/LongIdle -> Watching) |
+| `b` | Boost: trigger Polling (Sleep -> Polling{Grace}) |
 | `p` | Install pre-push hook in `.git/hooks/` (local) |
 | `g` | Install pre-push hook in global hooks dir (when `core.hooksPath` is set) |
 | `l` | Re-discover GH Actions / CodePipeline linkage |
@@ -155,7 +156,7 @@ cp config.toml.example config.toml
 │ infra-pipeline     ⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿  14:28 │
 ╰───────────────────────────────────────────────────────────────────────╯
 ╭───────────────────────────────────────────────────────────────────────╮
-│ Slow ▮▯▯▯▯ │ e=expand b=boost q=quit │ hook │ l=relink               │
+│ ☾ Sleep │ e=expand b=boost q=quit │ ✓hook │ l=relink                 │
 ╰───────────────────────────────────────────────────────────────────────╯
 ```
 
@@ -171,55 +172,54 @@ pipelines indent under their GitHub Action with a `└` connector.
 
 ## Polling State Machine
 
-cibars uses an intelligent polling strategy to minimize API calls
-while staying responsive. AWS CodePipeline depends on GitHub
-Actions, so AWS is only polled when GitHub detects running builds.
+cibars polls only when it has a reason to. There are two top-level
+states: **Sleep** (zero API calls) and **Polling** (3s ticks, both
+GitHub and AWS together). Polling has three internal phases that
+drive the status-bar visual.
 
-**Startup:** The first poll cycle always polls both GitHub and AWS
-to give immediate visibility into current status.
+**Startup:** the daemon launches in Sleep — no GitHub or AWS calls
+fire until you push or press `b`.
 
 ```text
-              boost (b key)
-    ┌──────────────────────────┐
-    │                          ▼
-  Idle ──────────────────► Watching
-  30s GH, no AWS           5s GH, no AWS
-    ▲         │                │
-    │         │ 5min idle      │ GH finds running
-    │         ▼                ▼
-  LongIdle  Cooldown ◄──── Active
-  5min GH   5s GH+AWS      5s GH+AWS
-  no AWS    60s timer           │
-    │         │                 │ nothing running
-    │         └─────────────────┘
-    │  boost (b key)
-    └──────────────────► Watching
+                   git push (SIGUSR1) or `b` key
+        ┌──────────────────────────────────────────────┐
+        ▼                                              │
+      Sleep ──────────────────────────────────► Polling{Grace}
+      ☾, no polls                                3s GH+AWS, 90s window
+        ▲                                              │
+        │ 60s with no builds                           │ build seen
+        │                                              ▼
+  Polling{Cooldown} ◄────── builds finished ──── Polling{Active}
+  3s GH+AWS, 60s timer                           3s GH+AWS, no timeout
+        │
+        │ 90s window expired with no build seen
+        └─────────────────────────► Sleep
 ```
 
-| State | GH interval | Poll AWS? | Entry |
+| Phase                | Interval | API calls   | Entry                                       |
 | --- | --- | --- | --- |
-| Idle | 30s | No | Startup (after initial poll), or cooldown expired |
-| LongIdle | 5min | No | 5min of Idle with no running builds |
-| Watching | 5s | No | User pressed `b` from Idle or LongIdle |
-| Active | 5s | Yes | GitHub detects running builds |
-| Cooldown | 5s | Yes | Nothing running (from Active), 60s timer |
+| Sleep                | none     | none        | Startup, or 90s grace expired, or 60s cooldown expired |
+| Polling{Grace}       | 3s       | GH + AWS    | SIGUSR1 (pre-push hook) or `b` key from Sleep |
+| Polling{Active}      | 3s       | GH + AWS    | A running build is observed during Polling   |
+| Polling{Cooldown}    | 3s       | GH + AWS    | All builds finished (from Active), 60s timer |
 
 **Key transitions:**
 
-- Press `b` or send SIGUSR1 in Idle/LongIdle -> Watching (fast
-  GH-only polling)
-- 5min of Idle with no running builds -> LongIdle (5min polling)
-- GitHub finds running builds -> Active (adds AWS polling)
-- All builds finish -> Cooldown (keeps fast polling for 60s)
-- 60s of inactivity -> back to Idle
-- Pressing `b` in Active/Cooldown is a no-op (already fast)
+- Press `b` or send SIGUSR1 from Sleep enters Polling{Grace}
+- A running build seen during Grace or Cooldown enters Active
+- All builds finish (from Active) enters Cooldown (60s timer)
+- 90s of Grace without ever seeing a build returns to Sleep
+- 60s of Cooldown without a new build returns to Sleep
+- Pressing `b` during Cooldown restarts a fresh 90s Grace window
+- Pressing `b` during Active is a no-op (already polling at 3s)
 
 **Notes:**
 
-- During LongIdle, cibars also polls STS `GetCallerIdentity` to
-  monitor AWS SSO session health.
+- AWS SSO health is checked by an independent 5-min `STS
+  GetCallerIdentity` task that runs always, regardless of Sleep or
+  Polling state.
 - SIGUSR1 during an active poll cancels the current API call and
-  restarts in Watching mode.
+  restarts in Polling{Grace}.
 
 ## Git Hook Integration
 
