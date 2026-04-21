@@ -7,9 +7,9 @@ edition = "2021"
 anyhow = "1"
 base64 = "0.22"
 async-trait = "0.1"
-aws-config = { version = "1", features = ["behavior-version-latest", "sso"] }
-aws-sdk-codepipeline = "1"
-aws-sdk-sts = "1"
+aws-config = { version = "1", default-features = false, features = ["behavior-version-latest", "credentials-process", "default-https-client", "rt-tokio", "sso"] }
+aws-sdk-codepipeline = { version = "1", default-features = false, features = ["default-https-client", "rt-tokio"] }
+aws-sdk-sts = { version = "1", default-features = false, features = ["default-https-client", "rt-tokio", "sigv4a"] }
 chrono = "0.4"
 clap = { version = "4", features = ["derive"] }
 crossterm = "0.29"
