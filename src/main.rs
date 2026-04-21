@@ -145,11 +145,6 @@ async fn run_poll_orchestrator(
                 let mut a = app.lock().expect("app mutex poisoned");
                 a.check_linkage_health(&link_map);
                 let any_running = a.has_any_running();
-                a.heartbeat_at = if any_running {
-                    Some(Instant::now())
-                } else {
-                    None
-                };
                 scheduler.transition(any_running);
                 a.poll_state = scheduler.state();
                 any_running

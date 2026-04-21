@@ -503,8 +503,6 @@ fn render_pipeline_centric(
             push_signal_at: app.push_signal_at,
             linkage_broken: app.linkage_broken,
             linkage_discovering: app.linkage_discovering,
-            heartbeat_at: app.heartbeat_at,
-            poll_interval: app.poll_state.interval(),
         },
         status_area,
     );
@@ -872,8 +870,6 @@ pub fn run_ui(
                     push_signal_at: app.push_signal_at,
                     linkage_broken: app.linkage_broken,
                     linkage_discovering: app.linkage_discovering,
-                    heartbeat_at: app.heartbeat_at,
-                    poll_interval: app.poll_state.interval(),
                 },
                 areas[4],
             );

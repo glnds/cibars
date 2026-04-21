@@ -48,8 +48,6 @@ pub struct App {
     pub linkage_discovering: bool,
     /// Per-job assignment for pipeline-centric UI (set after link discovery).
     pub job_assignment: Option<JobAssignment>,
-    /// Instant of last poll that detected running builds (for heartbeat LED fade).
-    pub heartbeat_at: Option<Instant>,
 }
 
 impl App {
@@ -76,7 +74,6 @@ impl App {
             linkage_broken: false,
             linkage_discovering: false,
             job_assignment: None,
-            heartbeat_at: None,
         }
     }
 
@@ -295,12 +292,6 @@ mod tests {
             pending_link: false,
         });
         assert!(app.has_any_running());
-    }
-
-    #[test]
-    fn app_starts_with_no_heartbeat() {
-        let app = App::new();
-        assert!(app.heartbeat_at.is_none());
     }
 
     #[test]

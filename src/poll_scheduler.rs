@@ -17,12 +17,6 @@ pub enum PollState {
     Polling { phase: PollingPhase, since: Instant },
 }
 
-impl PollState {
-    pub fn interval(&self) -> Duration {
-        POLL_INTERVAL
-    }
-}
-
 pub struct PollScheduler {
     state: PollState,
 }

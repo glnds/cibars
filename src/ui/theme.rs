@@ -54,9 +54,6 @@ pub const BOOST_FLASH: Color = Color::Rgb(255, 85, 85);
 // SSO status character
 pub const CHECK_MARK: char = '\u{2713}'; // ✓
 
-// Heartbeat LED character
-pub const SYMBOL_HEARTBEAT: char = '\u{25C9}'; // ◉
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -93,11 +90,6 @@ mod tests {
     #[test]
     fn check_mark_is_correct_unicode() {
         assert_eq!(CHECK_MARK, '✓');
-    }
-
-    #[test]
-    fn heartbeat_symbol_is_correct_unicode() {
-        assert_eq!(SYMBOL_HEARTBEAT, '◉');
     }
 
     #[test]
