@@ -829,6 +829,105 @@ mod tests {
         );
     }
 
+    // --- T10: end-to-end linger-after-PR scenarios ---
+
+    #[tokio::test]
+    async fn e2e_pr_run_keeps_polling_active() {
+        use crate::poll_scheduler::{
+            PollScheduler, PollState, PollingPhase, COOLDOWN_DURATION, PR_WATCH_CAP,
+        };
+
+        let app = Arc::new(Mutex::new(App::new()));
+        let mut pr_numbers = std::collections::HashSet::new();
+        pr_numbers.insert(11);
+        let client = MockActionsClient {
+            runs: vec![],
+            pr_numbers,
+            ..Default::default()
+        };
+        poll_actions_tick(&app, &client).await;
+
+        let mut scheduler = PollScheduler::new();
+        scheduler.boost();
+        scheduler.transition(true); // Grace -> Active
+        scheduler.transition(false); // Active -> Cooldown
+        scheduler.force_phase_since(
+            PollingPhase::Cooldown,
+            COOLDOWN_DURATION + Duration::from_secs(1),
+        );
+
+        let now = Instant::now();
+        let a = app.lock().unwrap();
+        let any = a.has_any_running() || a.has_watched_open_prs(PR_WATCH_CAP, now);
+        drop(a);
+        assert!(
+            any,
+            "harvested watched PR must make effective_any_running true"
+        );
+
+        scheduler.transition(any);
+        assert_ne!(
+            scheduler.state(),
+            PollState::Sleep,
+            "scheduler must not drain to Sleep while PR is Open"
+        );
+    }
+
+    #[tokio::test]
+    async fn e2e_pr_merge_flips_scheduler_back_to_grace() {
+        use crate::poll_scheduler::{PollScheduler, PollState, PollingPhase};
+
+        let app = Arc::new(Mutex::new(App::new()));
+        set_pr(&app, 11, crate::model::WatchedPrState::Open, None);
+
+        let mock = PrStateMock::with_responses(&[(11, &[crate::model::WatchedPrState::Merged])]);
+
+        let mut scheduler = PollScheduler::new();
+        scheduler.boost();
+        scheduler.transition(true); // Grace -> Active
+        scheduler.transition(false); // Active -> Cooldown
+        match scheduler.state() {
+            PollState::Polling {
+                phase: PollingPhase::Cooldown,
+                ..
+            } => {}
+            other => panic!("expected Cooldown, got {other:?}"),
+        }
+
+        let merge_detected = poll_pr_states_tick(&app, &mock, Duration::from_secs(30)).await;
+        assert!(merge_detected, "Open → Merged must surface from the tick");
+
+        // Orchestrator's handle_pr_merge_detected is scheduler.boost() + state sync.
+        scheduler.boost();
+        match scheduler.state() {
+            PollState::Polling {
+                phase: PollingPhase::Grace,
+                ..
+            } => {}
+            other => panic!("expected Grace after merge-boost, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn e2e_pr_watch_expires_after_cap() {
+        use crate::poll_scheduler::PR_WATCH_CAP;
+
+        let mut app = App::new();
+        let t0 = Instant::now();
+        app.add_or_update_watched_prs(&[11], t0);
+
+        let later = t0 + PR_WATCH_CAP + Duration::from_secs(1);
+        assert!(
+            !app.has_watched_open_prs(PR_WATCH_CAP, later),
+            "past-cap PR must not keep polling active"
+        );
+        app.prune_expired_prs(PR_WATCH_CAP, later);
+        assert!(
+            !app.watched_prs.contains_key(&11),
+            "prune_expired_prs must drop entries past cap"
+        );
+    }
+
     #[tokio::test]
     async fn poll_actions_tick_records_pr_numbers_in_app() {
         let app = Arc::new(Mutex::new(App::new()));
