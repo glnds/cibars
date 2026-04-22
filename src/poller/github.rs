@@ -55,6 +55,8 @@ impl ActionsClient for GitHubActionsClient {
     async fn list_latest_runs(&self) -> Result<Vec<WorkflowRunSummary>> {
         let mut latest_per_workflow: std::collections::HashMap<String, (u64, BuildStatus)> =
             std::collections::HashMap::new();
+        // Harvested for T3+; T2 only accumulates them here.
+        let mut pr_numbers: std::collections::HashSet<u64> = std::collections::HashSet::new();
 
         let mut page: u32 = 1;
         // Safety cap to avoid infinite loops on API misbehaviour.
@@ -69,7 +71,12 @@ impl ActionsClient for GitHubActionsClient {
                 .context("failed to list workflow runs")?;
 
             let prev_count = latest_per_workflow.len();
-            parse_workflow_runs(&resp, &mut latest_per_workflow, self.branch.as_deref());
+            parse_workflow_runs(
+                &resp,
+                &mut latest_per_workflow,
+                &mut pr_numbers,
+                self.branch.as_deref(),
+            );
             let new_count = latest_per_workflow.len();
 
             let total_count = resp["total_count"].as_u64().unwrap_or(0);
@@ -327,10 +334,15 @@ fn parse_job_completed_at(job: &serde_json::Value) -> Option<chrono::DateTime<ch
 
 /// Parse workflow runs from a JSON response page into the latest-per-workflow map.
 /// Skips runs with missing IDs (logs a warning).
-/// When `branch_filter` is Some, only runs whose `head_branch` matches are kept.
+/// When `branch_filter` is Some, only runs whose `head_branch` matches are
+/// kept in `latest`. PR numbers are harvested into `prs` for every run whose
+/// `event` is `pull_request` or `pull_request_target`, regardless of the
+/// bot-actor and head_branch filters — downstream code uses these to watch
+/// the PR for merge even when the run itself is hidden from the UI.
 fn parse_workflow_runs(
     resp: &serde_json::Value,
     latest: &mut std::collections::HashMap<String, (u64, BuildStatus)>,
+    prs: &mut std::collections::HashSet<u64>,
     branch_filter: Option<&str>,
 ) {
     if let Some(runs) = resp["workflow_runs"].as_array() {
@@ -342,6 +354,20 @@ fn parse_workflow_runs(
                     continue;
                 }
             };
+
+            // Harvest PR numbers BEFORE any filter: Claude-review runs (bot
+            // actors) and off-branch PR runs must still contribute here so
+            // the linger-after-PR scheduler hook can see them.
+            let event = run["event"].as_str().unwrap_or("");
+            if event == "pull_request" || event == "pull_request_target" {
+                if let Some(arr) = run["pull_requests"].as_array() {
+                    for pr in arr {
+                        if let Some(n) = pr["number"].as_u64() {
+                            prs.insert(n);
+                        }
+                    }
+                }
+            }
 
             // Skip all bot-triggered runs (dependabot, etc.)
             let actor = run["actor"]["login"].as_str().unwrap_or("");
@@ -415,7 +441,12 @@ mod tests {
             ]
         });
         let mut latest = std::collections::HashMap::new();
-        parse_workflow_runs(&resp, &mut latest, None);
+        parse_workflow_runs(
+            &resp,
+            &mut latest,
+            &mut std::collections::HashSet::new(),
+            None,
+        );
         assert_eq!(latest.len(), 1);
         assert!(latest.contains_key("Deploy"));
         assert!(!latest.contains_key("CI"));
@@ -430,7 +461,12 @@ mod tests {
             ]
         });
         let mut latest = std::collections::HashMap::new();
-        parse_workflow_runs(&resp, &mut latest, None);
+        parse_workflow_runs(
+            &resp,
+            &mut latest,
+            &mut std::collections::HashSet::new(),
+            None,
+        );
         assert!(latest.is_empty());
     }
 
@@ -444,7 +480,12 @@ mod tests {
             ]
         });
         let mut latest = std::collections::HashMap::new();
-        parse_workflow_runs(&resp, &mut latest, None);
+        parse_workflow_runs(
+            &resp,
+            &mut latest,
+            &mut std::collections::HashSet::new(),
+            None,
+        );
         assert_eq!(latest.len(), 1);
         assert_eq!(latest["CI"].0, 10);
         assert_eq!(latest["CI"].1, BuildStatus::Succeeded);
@@ -657,7 +698,12 @@ jobs:
             ]
         });
         let mut latest = std::collections::HashMap::new();
-        parse_workflow_runs(&resp, &mut latest, None);
+        parse_workflow_runs(
+            &resp,
+            &mut latest,
+            &mut std::collections::HashSet::new(),
+            None,
+        );
         assert_eq!(latest.len(), 1);
         assert!(latest.contains_key("CI"));
         assert!(!latest.contains_key("Claude Code"));
@@ -672,7 +718,12 @@ jobs:
             ]
         });
         let mut latest = std::collections::HashMap::new();
-        parse_workflow_runs(&resp, &mut latest, None);
+        parse_workflow_runs(
+            &resp,
+            &mut latest,
+            &mut std::collections::HashSet::new(),
+            None,
+        );
         assert_eq!(latest.len(), 1);
         assert_eq!(latest["CI"].0, 49);
         assert_eq!(latest["CI"].1, BuildStatus::Succeeded);
@@ -687,7 +738,12 @@ jobs:
             ]
         });
         let mut latest = std::collections::HashMap::new();
-        parse_workflow_runs(&resp, &mut latest, None);
+        parse_workflow_runs(
+            &resp,
+            &mut latest,
+            &mut std::collections::HashSet::new(),
+            None,
+        );
         assert!(latest.is_empty());
     }
 
@@ -700,7 +756,12 @@ jobs:
             ]
         });
         let mut latest = std::collections::HashMap::new();
-        parse_workflow_runs(&resp, &mut latest, Some("master"));
+        parse_workflow_runs(
+            &resp,
+            &mut latest,
+            &mut std::collections::HashSet::new(),
+            Some("master"),
+        );
         assert_eq!(latest.len(), 1);
         assert_eq!(latest["CI"].0, 10);
     }
@@ -715,7 +776,12 @@ jobs:
             ]
         });
         let mut latest = std::collections::HashMap::new();
-        parse_workflow_runs(&resp, &mut latest, None);
+        parse_workflow_runs(
+            &resp,
+            &mut latest,
+            &mut std::collections::HashSet::new(),
+            None,
+        );
         assert_eq!(latest.len(), 1);
         assert!(latest.contains_key("CI"));
     }
@@ -729,7 +795,12 @@ jobs:
             ]
         });
         let mut latest = std::collections::HashMap::new();
-        parse_workflow_runs(&resp, &mut latest, None);
+        parse_workflow_runs(
+            &resp,
+            &mut latest,
+            &mut std::collections::HashSet::new(),
+            None,
+        );
         assert_eq!(latest.len(), 2);
     }
 
@@ -744,7 +815,12 @@ jobs:
             ]
         });
         let mut latest = std::collections::HashMap::new();
-        parse_workflow_runs(&page1, &mut latest, None);
+        parse_workflow_runs(
+            &page1,
+            &mut latest,
+            &mut std::collections::HashSet::new(),
+            None,
+        );
         assert_eq!(latest.len(), 1);
 
         // Second page: only has older "CI" run — no new workflows added
@@ -754,7 +830,12 @@ jobs:
             ]
         });
         let prev_count = latest.len();
-        parse_workflow_runs(&page2, &mut latest, None);
+        parse_workflow_runs(
+            &page2,
+            &mut latest,
+            &mut std::collections::HashSet::new(),
+            None,
+        );
         let new_count = latest.len();
         // Stale page: no new workflow names discovered
         assert_eq!(prev_count, new_count);
@@ -768,7 +849,12 @@ jobs:
             ]
         });
         let mut latest = std::collections::HashMap::new();
-        parse_workflow_runs(&page1, &mut latest, None);
+        parse_workflow_runs(
+            &page1,
+            &mut latest,
+            &mut std::collections::HashSet::new(),
+            None,
+        );
 
         // Second page has a new workflow "Deploy"
         let page2 = serde_json::json!({
@@ -777,7 +863,12 @@ jobs:
             ]
         });
         let prev_count = latest.len();
-        parse_workflow_runs(&page2, &mut latest, None);
+        parse_workflow_runs(
+            &page2,
+            &mut latest,
+            &mut std::collections::HashSet::new(),
+            None,
+        );
         let new_count = latest.len();
         // Fresh page: new workflow discovered
         assert!(new_count > prev_count);
@@ -789,7 +880,12 @@ jobs:
             "workflow_runs": [{"id": 1, "status": "completed", "conclusion": "success"}]
         });
         let mut latest = std::collections::HashMap::new();
-        parse_workflow_runs(&resp, &mut latest, None);
+        parse_workflow_runs(
+            &resp,
+            &mut latest,
+            &mut std::collections::HashSet::new(),
+            None,
+        );
         assert!(latest.contains_key("unknown"));
     }
 
@@ -955,5 +1051,153 @@ jobs:
     fn parse_job_completed_at_missing_is_none() {
         let job = serde_json::json!({});
         assert!(parse_job_completed_at(&job).is_none());
+    }
+
+    // --- T2: PR number harvesting tests ---
+
+    fn call_parse(
+        resp: &serde_json::Value,
+        branch_filter: Option<&str>,
+    ) -> (
+        std::collections::HashMap<String, (u64, BuildStatus)>,
+        std::collections::HashSet<u64>,
+    ) {
+        let mut latest = std::collections::HashMap::new();
+        let mut prs = std::collections::HashSet::new();
+        parse_workflow_runs(resp, &mut latest, &mut prs, branch_filter);
+        (latest, prs)
+    }
+
+    #[test]
+    fn parse_extracts_pr_number_from_pull_request_event() {
+        let resp = serde_json::json!({
+            "workflow_runs": [{
+                "name": "CI", "id": 100, "status": "in_progress",
+                "actor": {"login": "alice"},
+                "head_branch": "feat/x",
+                "event": "pull_request",
+                "pull_requests": [{"number": 7}],
+            }]
+        });
+        let (_, prs) = call_parse(&resp, None);
+        assert!(prs.contains(&7));
+    }
+
+    #[test]
+    fn parse_ignores_pr_numbers_on_push_event() {
+        let resp = serde_json::json!({
+            "workflow_runs": [{
+                "name": "CI", "id": 100, "status": "in_progress",
+                "actor": {"login": "alice"},
+                "head_branch": "master",
+                "event": "push",
+                "pull_requests": [{"number": 7}],
+            }]
+        });
+        let (_, prs) = call_parse(&resp, None);
+        assert!(prs.is_empty());
+    }
+
+    #[test]
+    fn parse_extracts_pr_numbers_even_for_bot_actors() {
+        // The bot filter drops the run from `latest`, but the PR number
+        // must still be harvested so we can watch the PR for merge.
+        let resp = serde_json::json!({
+            "workflow_runs": [{
+                "name": "Claude Code Review", "id": 100, "status": "in_progress",
+                "actor": {"login": "claude[bot]"},
+                "head_branch": "feat/x",
+                "event": "pull_request",
+                "pull_requests": [{"number": 9}],
+            }]
+        });
+        let (latest, prs) = call_parse(&resp, None);
+        assert!(
+            latest.is_empty(),
+            "bot-actor run should still be filtered out"
+        );
+        assert!(prs.contains(&9), "but PR number must be harvested");
+    }
+
+    #[test]
+    fn parse_extracts_pr_numbers_even_when_head_branch_mismatches() {
+        let resp = serde_json::json!({
+            "workflow_runs": [{
+                "name": "CI", "id": 100, "status": "in_progress",
+                "actor": {"login": "alice"},
+                "head_branch": "feat/x",
+                "event": "pull_request",
+                "pull_requests": [{"number": 11}],
+            }]
+        });
+        let (latest, prs) = call_parse(&resp, Some("master"));
+        assert!(
+            latest.is_empty(),
+            "branch filter should drop from visible list"
+        );
+        assert!(prs.contains(&11), "PR number must still be harvested");
+    }
+
+    #[test]
+    fn parse_dedupes_pr_numbers_across_runs() {
+        let resp = serde_json::json!({
+            "workflow_runs": [
+                {
+                    "name": "CI", "id": 100, "status": "in_progress",
+                    "actor": {"login": "alice"},
+                    "head_branch": "feat/x",
+                    "event": "pull_request",
+                    "pull_requests": [{"number": 3}],
+                },
+                {
+                    "name": "Review", "id": 101, "status": "in_progress",
+                    "actor": {"login": "bob"},
+                    "head_branch": "feat/x",
+                    "event": "pull_request",
+                    "pull_requests": [{"number": 3}],
+                }
+            ]
+        });
+        let (_, prs) = call_parse(&resp, None);
+        assert_eq!(prs.len(), 1);
+        assert!(prs.contains(&3));
+    }
+
+    #[test]
+    fn parse_accepts_pull_request_target_event() {
+        let resp = serde_json::json!({
+            "workflow_runs": [{
+                "name": "CI", "id": 100, "status": "in_progress",
+                "actor": {"login": "alice"},
+                "head_branch": "feat/x",
+                "event": "pull_request_target",
+                "pull_requests": [{"number": 13}],
+            }]
+        });
+        let (_, prs) = call_parse(&resp, None);
+        assert!(prs.contains(&13));
+    }
+
+    #[test]
+    fn parse_empty_when_pull_requests_missing_or_empty() {
+        let resp = serde_json::json!({
+            "workflow_runs": [
+                {
+                    "name": "CI", "id": 100, "status": "in_progress",
+                    "actor": {"login": "alice"},
+                    "head_branch": "master",
+                    "event": "pull_request",
+                },
+                {
+                    "name": "CI2", "id": 101, "status": "in_progress",
+                    "actor": {"login": "alice"},
+                    "head_branch": "master",
+                    "event": "pull_request",
+                    "pull_requests": [],
+                }
+            ]
+        });
+        let (_, prs) = call_parse(&resp, None);
+        assert!(prs.is_empty());
     }
 }
