@@ -239,7 +239,7 @@ pub async fn poll_actions_tick(app: &Arc<Mutex<App>>, client: &dyn ActionsClient
     // Phase 1: fetch workflow summaries (single API call)
     let RunsPage {
         summaries,
-        pr_numbers: _pr_numbers,
+        pr_numbers,
     } = match client.list_latest_runs().await {
         Ok(p) => p,
         Err(e) => {
@@ -272,6 +272,10 @@ pub async fn poll_actions_tick(app: &Arc<Mutex<App>>, client: &dyn ActionsClient
         a.rate_limited_until = None;
         a.loading_actions = false;
         a.last_poll = Some(Utc::now());
+        // Feed PR numbers harvested from pull_request[_target] runs into
+        // the watched-PR set so the scheduler can linger past Cooldown.
+        let prs: Vec<u64> = pr_numbers.into_iter().collect();
+        a.add_or_update_watched_prs(&prs, Instant::now());
     }
 
     // Phase 2: fetch jobs for each workflow in parallel
@@ -575,6 +579,24 @@ mod tests {
                 })
                 .collect(),
         }
+    }
+
+    #[tokio::test]
+    async fn poll_actions_tick_records_pr_numbers_in_app() {
+        let app = Arc::new(Mutex::new(App::new()));
+        let mut pr_numbers = std::collections::HashSet::new();
+        pr_numbers.insert(42);
+        let client = MockActionsClient {
+            runs: vec![],
+            pr_numbers,
+        };
+        poll_actions_tick(&app, &client).await;
+        let a = app.lock().unwrap();
+        assert!(
+            a.watched_prs.contains_key(&42),
+            "poll_actions_tick must feed harvested PR numbers into app.watched_prs"
+        );
+        assert_eq!(a.watched_prs[&42].state, crate::model::WatchedPrState::Open);
     }
 
     #[tokio::test]

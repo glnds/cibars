@@ -85,7 +85,6 @@ impl App {
     /// Insert fresh PRs as `Open` with `first_seen = now`. PRs already in
     /// the map are left alone — this preserves both `first_seen` (so the
     /// 1 h cap works from first sighting) and any polled state updates.
-    #[allow(dead_code)] // wired into poll_actions_tick in T5
     pub fn add_or_update_watched_prs(&mut self, numbers: &[u64], now: Instant) {
         for &n in numbers {
             self.watched_prs
