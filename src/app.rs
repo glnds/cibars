@@ -1,11 +1,11 @@
-use std::collections::HashSet;
-use std::time::Instant;
+use std::collections::{HashMap, HashSet};
+use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
 
 use crate::config::HookStatus;
 use crate::linkage::JobAssignment;
-use crate::model::{BuildStatus, PipelineGroup, WorkflowGroup};
+use crate::model::{BuildStatus, PipelineGroup, WatchedPr, WatchedPrState, WorkflowGroup};
 use crate::poll_scheduler::PollState;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -48,6 +48,10 @@ pub struct App {
     pub linkage_discovering: bool,
     /// Per-job assignment for pipeline-centric UI (set after link discovery).
     pub job_assignment: Option<JobAssignment>,
+    /// PRs harvested from pull_request[_target] workflow runs; each entry's
+    /// state is polled separately so the scheduler can linger past Cooldown
+    /// while merges are pending and auto-boost when one lands.
+    pub watched_prs: HashMap<u64, WatchedPr>,
 }
 
 impl App {
@@ -74,7 +78,38 @@ impl App {
             linkage_broken: false,
             linkage_discovering: false,
             job_assignment: None,
+            watched_prs: HashMap::new(),
         }
+    }
+
+    /// Insert fresh PRs as `Open` with `first_seen = now`. PRs already in
+    /// the map are left alone — this preserves both `first_seen` (so the
+    /// 1 h cap works from first sighting) and any polled state updates.
+    #[allow(dead_code)] // wired into poll_actions_tick in T5
+    pub fn add_or_update_watched_prs(&mut self, numbers: &[u64], now: Instant) {
+        for &n in numbers {
+            self.watched_prs
+                .entry(n)
+                .or_insert_with(|| WatchedPr::new(n, now));
+        }
+    }
+
+    /// True iff any watched PR is still `Open` and was first seen within
+    /// `cap`. Used by the orchestrator to keep Cooldown from draining to
+    /// Sleep while a merge is still pending.
+    #[allow(dead_code)] // wired into effective_any_running in T6
+    pub fn has_watched_open_prs(&self, cap: Duration, now: Instant) -> bool {
+        self.watched_prs.values().any(|pr| {
+            pr.state == WatchedPrState::Open && now.saturating_duration_since(pr.first_seen) < cap
+        })
+    }
+
+    /// Drop entries whose `first_seen` is older than `cap`. Prevents the
+    /// map growing unbounded across a long-running daemon.
+    #[allow(dead_code)] // wired into orchestrator in T9
+    pub fn prune_expired_prs(&mut self, cap: Duration, now: Instant) {
+        self.watched_prs
+            .retain(|_, pr| now.saturating_duration_since(pr.first_seen) < cap);
     }
 
     pub fn push_warning(&mut self, msg: String) {
@@ -442,4 +477,121 @@ mod tests {
         app.clear_warnings_by_prefix("AWS:");
         assert!(app.warnings.is_empty());
     }
+
+    // --- T4: watched_prs tests ---
+
+    use crate::model::{WatchedPr, WatchedPrState};
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn app_starts_with_empty_watched_prs() {
+        let app = App::new();
+        assert!(app.watched_prs.is_empty());
+    }
+
+    #[test]
+    fn add_or_update_watched_prs_inserts_new_as_open_now() {
+        let mut app = App::new();
+        let now = Instant::now();
+        app.add_or_update_watched_prs(&[7, 9], now);
+        assert_eq!(app.watched_prs.len(), 2);
+        assert_eq!(app.watched_prs[&7].state, WatchedPrState::Open);
+        assert_eq!(app.watched_prs[&9].state, WatchedPrState::Open);
+        assert_eq!(app.watched_prs[&7].first_seen, now);
+    }
+
+    #[test]
+    fn add_or_update_watched_prs_preserves_first_seen_for_existing() {
+        let mut app = App::new();
+        let t0 = Instant::now();
+        app.add_or_update_watched_prs(&[7], t0);
+        let t1 = t0 + Duration::from_secs(60);
+        app.add_or_update_watched_prs(&[7], t1);
+        assert_eq!(
+            app.watched_prs[&7].first_seen, t0,
+            "re-adding must not reset first_seen"
+        );
+    }
+
+    #[test]
+    fn add_or_update_watched_prs_preserves_state_for_existing() {
+        let mut app = App::new();
+        let t0 = Instant::now();
+        app.add_or_update_watched_prs(&[7], t0);
+        // Simulate a state transition that happened between polls.
+        app.watched_prs.get_mut(&7).unwrap().state = WatchedPrState::Merged;
+        app.add_or_update_watched_prs(&[7], t0 + Duration::from_secs(30));
+        assert_eq!(
+            app.watched_prs[&7].state,
+            WatchedPrState::Merged,
+            "re-adding must not overwrite existing state"
+        );
+    }
+
+    #[test]
+    fn has_watched_open_prs_false_when_empty() {
+        let app = App::new();
+        assert!(!app.has_watched_open_prs(Duration::from_secs(3600), Instant::now()));
+    }
+
+    #[test]
+    fn has_watched_open_prs_true_for_fresh_open_pr() {
+        let mut app = App::new();
+        let now = Instant::now();
+        app.add_or_update_watched_prs(&[7], now);
+        assert!(app.has_watched_open_prs(Duration::from_secs(3600), now));
+    }
+
+    #[test]
+    fn has_watched_open_prs_false_for_merged_pr() {
+        let mut app = App::new();
+        let now = Instant::now();
+        app.add_or_update_watched_prs(&[7], now);
+        app.watched_prs.get_mut(&7).unwrap().state = WatchedPrState::Merged;
+        assert!(!app.has_watched_open_prs(Duration::from_secs(3600), now));
+    }
+
+    #[test]
+    fn has_watched_open_prs_false_for_closed_unmerged_pr() {
+        let mut app = App::new();
+        let now = Instant::now();
+        app.add_or_update_watched_prs(&[7], now);
+        app.watched_prs.get_mut(&7).unwrap().state = WatchedPrState::ClosedUnmerged;
+        assert!(!app.has_watched_open_prs(Duration::from_secs(3600), now));
+    }
+
+    #[test]
+    fn has_watched_open_prs_false_when_all_expired() {
+        let mut app = App::new();
+        let t0 = Instant::now();
+        app.add_or_update_watched_prs(&[7], t0);
+        let cap = Duration::from_secs(3600);
+        let later = t0 + cap + Duration::from_secs(1);
+        assert!(!app.has_watched_open_prs(cap, later));
+    }
+
+    #[test]
+    fn prune_expired_prs_removes_only_expired() {
+        let mut app = App::new();
+        let t0 = Instant::now();
+        app.add_or_update_watched_prs(&[7], t0);
+        let recent = t0 + Duration::from_secs(100);
+        app.add_or_update_watched_prs(&[9], recent);
+        let cap = Duration::from_secs(3600);
+        let later = t0 + cap + Duration::from_secs(1);
+        app.prune_expired_prs(cap, later);
+        assert!(!app.watched_prs.contains_key(&7));
+        assert!(app.watched_prs.contains_key(&9));
+    }
+
+    #[test]
+    fn prune_expired_prs_empty_noop() {
+        let mut app = App::new();
+        app.prune_expired_prs(Duration::from_secs(3600), Instant::now());
+        assert!(app.watched_prs.is_empty());
+    }
+
+    // Silence unused-variant warning in test builds.
+    #[allow(dead_code)]
+    fn _watched_pr_use(_: WatchedPr) {}
 }

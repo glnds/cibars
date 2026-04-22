@@ -126,7 +126,8 @@ pub struct WorkflowGroup {
     pub linked_pipeline: Option<String>,
 }
 
-#[allow(dead_code)] // wired into App in T4
+// Merged/ClosedUnmerged/Unknown are constructed by poll_pr_states_tick in T8.
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WatchedPrState {
     Open,
@@ -135,7 +136,9 @@ pub enum WatchedPrState {
     Unknown,
 }
 
-#[allow(dead_code)] // wired into App in T4
+// Fields are exercised via #[allow(dead_code)]-marked methods on App until
+// T5 + T8 + T9 wire them into the production call graph.
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy)]
 pub struct WatchedPr {
     pub number: u64,
@@ -145,7 +148,6 @@ pub struct WatchedPr {
 }
 
 impl WatchedPr {
-    #[allow(dead_code)] // wired into App in T4
     pub fn new(number: u64, now: std::time::Instant) -> Self {
         Self {
             number,
