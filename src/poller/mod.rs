@@ -127,7 +127,6 @@ pub trait ActionsClient: Send + Sync {
     async fn fetch_workflow_files(&self) -> Result<Vec<WorkflowFile>>;
     /// Fetch the state of a single pull request. Used by the watched-PR
     /// poller to detect Open → Merged transitions and auto-boost.
-    #[allow(dead_code)] // wired into poll_pr_states_tick in T8
     async fn fetch_pr_state(&self, pr_number: u64) -> Result<crate::model::WatchedPrState>;
 }
 
@@ -318,7 +317,6 @@ pub async fn poll_actions_tick(app: &Arc<Mutex<App>>, client: &dyn ActionsClient
 ///
 /// On fetch errors, state and `last_checked` are left untouched so the
 /// next tick retries.
-#[allow(dead_code)] // wired into orchestrator in T9
 pub async fn poll_pr_states_tick(
     app: &Arc<Mutex<App>>,
     client: &dyn ActionsClient,

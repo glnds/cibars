@@ -39,7 +39,6 @@ fn build_runs_route(owner: &str, repo: &str, page: u32, branch: Option<&str>) ->
 /// Map GitHub pull request `state` + `merged` boolean to WatchedPrState.
 /// Recognized shapes: ("open", false) → Open; ("closed", true) → Merged;
 /// ("closed", false) → ClosedUnmerged. Anything else → Unknown.
-#[allow(dead_code)] // wired into fetch_pr_state impl + poll_pr_states_tick in T8
 pub fn map_pr_state(state: &str, merged: bool) -> WatchedPrState {
     match (state, merged) {
         ("open", false) => WatchedPrState::Open,

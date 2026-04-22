@@ -104,7 +104,6 @@ impl App {
 
     /// Drop entries whose `first_seen` is older than `cap`. Prevents the
     /// map growing unbounded across a long-running daemon.
-    #[allow(dead_code)] // wired into orchestrator in T9
     pub fn prune_expired_prs(&mut self, cap: Duration, now: Instant) {
         self.watched_prs
             .retain(|_, pr| now.saturating_duration_since(pr.first_seen) < cap);

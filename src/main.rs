@@ -115,23 +115,28 @@ async fn run_poll_orchestrator(
                 .expect("aws_client just initialized above");
             let cycle_start = Instant::now();
 
-            let interrupt = tokio::select! {
+            let outcome = tokio::select! {
                 biased;
-                _ = boost_notify.notified() => Some(InterruptSource::Boost),
-                _ = sigusr1.recv() => Some(InterruptSource::Sigusr1),
-                _ = async {
-                    tokio::join!(
+                _ = boost_notify.notified() => CycleOutcome::Interrupted(InterruptSource::Boost),
+                _ = sigusr1.recv() => CycleOutcome::Interrupted(InterruptSource::Sigusr1),
+                merge_detected = async {
+                    let (_, _, merge_detected) = tokio::join!(
                         poller::poll_actions_tick(&app, &gh_client),
                         poller::poll_pipelines_tick(&app, aws, &config.aws_profile, false),
+                        poller::poll_pr_states_tick(&app, &gh_client, PR_POLL_MIN_INTERVAL),
                     );
-                } => None,
+                    merge_detected
+                } => CycleOutcome::Completed { merge_detected },
             };
 
-            if let Some(source) = interrupt {
-                handle_poll_interrupt(&app, &mut scheduler, source);
-                tracing::info!(state = ?scheduler.state(), ?source, "interrupt during poll");
-                continue;
-            }
+            let merge_detected = match outcome {
+                CycleOutcome::Interrupted(source) => {
+                    handle_poll_interrupt(&app, &mut scheduler, source);
+                    tracing::info!(state = ?scheduler.state(), ?source, "interrupt during poll");
+                    continue;
+                }
+                CycleOutcome::Completed { merge_detected } => merge_detected,
+            };
 
             // Process poll results
             {
@@ -148,8 +153,14 @@ async fn run_poll_orchestrator(
                 let any_running = effective_any_running(&a, now);
                 scheduler.transition(any_running);
                 a.poll_state = scheduler.state();
+                a.prune_expired_prs(poll_scheduler::PR_WATCH_CAP, now);
                 any_running
             };
+
+            if merge_detected {
+                handle_pr_merge_detected(&app, &mut scheduler);
+                tracing::info!(state = ?scheduler.state(), "PR merge detected — boosting");
+            }
 
             let remaining = scheduler.interval().saturating_sub(cycle_start.elapsed());
             tracing::info!(
@@ -213,6 +224,15 @@ enum InterruptSource {
     Sigusr1,
 }
 
+/// PR state polling cadence. 30 s per PR keeps API load modest while still
+/// catching a manual merge within one Cooldown window.
+const PR_POLL_MIN_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
+
+enum CycleOutcome {
+    Interrupted(InterruptSource),
+    Completed { merge_detected: bool },
+}
+
 fn write_pid_file(pid_path: &std::path::Path) -> Result<()> {
     if let Some(parent) = pid_path.parent() {
         std::fs::create_dir_all(parent)
@@ -238,6 +258,17 @@ fn handle_poll_interrupt(
     if source == InterruptSource::Sigusr1 {
         a.push_signal_at = Some(Instant::now());
     }
+}
+
+/// Boost the scheduler back to Grace when `poll_pr_states_tick` observes an
+/// Open → Merged transition on a watched PR. Mirrors `handle_poll_interrupt`
+/// for the local-signal case: the merge itself happens server-side in the
+/// GitHub UI and has no hook point on this machine, so the PR poller's
+/// transition detection is the only wake path.
+fn handle_pr_merge_detected(app: &Arc<Mutex<App>>, scheduler: &mut PollScheduler) {
+    scheduler.boost();
+    let mut a = app.lock().expect("app mutex poisoned");
+    a.poll_state = scheduler.state();
 }
 
 fn bootstrap_initial_poll(app: &Arc<Mutex<App>>, scheduler: &mut PollScheduler) {
@@ -366,6 +397,32 @@ mod tests {
         app.add_or_update_watched_prs(&[7], Instant::now());
         app.watched_prs.get_mut(&7).unwrap().state = crate::model::WatchedPrState::Merged;
         assert!(!effective_any_running(&app, Instant::now()));
+    }
+
+    // --- T9: handle_pr_merge_detected tests ---
+
+    #[test]
+    fn handle_pr_merge_detected_from_cooldown_enters_grace() {
+        let app = Arc::new(Mutex::new(App::new()));
+        let mut scheduler = PollScheduler::new();
+        scheduler.boost();
+        scheduler.transition(true); // Grace -> Active
+        scheduler.transition(false); // Active -> Cooldown
+        assert_eq!(polling_phase(scheduler.state()), PollingPhase::Cooldown);
+
+        handle_pr_merge_detected(&app, &mut scheduler);
+
+        assert_eq!(polling_phase(scheduler.state()), PollingPhase::Grace);
+        assert_eq!(app.lock().unwrap().poll_state, scheduler.state());
+    }
+
+    #[test]
+    fn handle_pr_merge_detected_from_sleep_enters_grace() {
+        let app = Arc::new(Mutex::new(App::new()));
+        let mut scheduler = PollScheduler::new();
+        assert_eq!(scheduler.state(), PollState::Sleep);
+        handle_pr_merge_detected(&app, &mut scheduler);
+        assert_eq!(polling_phase(scheduler.state()), PollingPhase::Grace);
     }
 
     #[test]
