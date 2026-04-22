@@ -144,7 +144,8 @@ async fn run_poll_orchestrator(
             let any_running = {
                 let mut a = app.lock().expect("app mutex poisoned");
                 a.check_linkage_health(&link_map);
-                let any_running = a.has_any_running();
+                let now = Instant::now();
+                let any_running = effective_any_running(&a, now);
                 scheduler.transition(any_running);
                 a.poll_state = scheduler.state();
                 any_running
@@ -323,6 +324,14 @@ fn main() -> Result<()> {
     result
 }
 
+/// Combine real build activity with the watched-PR signal. Keeps the
+/// scheduler in Active/Cooldown while any harvested PR is still Open within
+/// the cap, so a slow GitHub-UI merge doesn't cause Sleep before the
+/// downstream master-push run and CodePipeline execution are visible.
+fn effective_any_running(app: &App, now: Instant) -> bool {
+    app.has_any_running() || app.has_watched_open_prs(poll_scheduler::PR_WATCH_CAP, now)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -334,6 +343,53 @@ mod tests {
             PollState::Polling { phase, .. } => phase,
             other => panic!("expected Polling, got {other:?}"),
         }
+    }
+
+    // --- T6: effective_any_running + PR_WATCH_CAP tests ---
+
+    #[test]
+    fn effective_any_running_is_false_for_fresh_app() {
+        let app = App::new();
+        assert!(!effective_any_running(&app, Instant::now()));
+    }
+
+    #[test]
+    fn effective_any_running_true_when_watched_pr_open() {
+        let mut app = App::new();
+        app.add_or_update_watched_prs(&[7], Instant::now());
+        assert!(effective_any_running(&app, Instant::now()));
+    }
+
+    #[test]
+    fn effective_any_running_false_when_watched_pr_merged() {
+        let mut app = App::new();
+        app.add_or_update_watched_prs(&[7], Instant::now());
+        app.watched_prs.get_mut(&7).unwrap().state = crate::model::WatchedPrState::Merged;
+        assert!(!effective_any_running(&app, Instant::now()));
+    }
+
+    #[test]
+    fn watched_open_pr_prevents_cooldown_to_sleep() {
+        use crate::poll_scheduler::{PollState, PollingPhase, COOLDOWN_DURATION};
+        let mut app = App::new();
+        let now = Instant::now();
+        app.add_or_update_watched_prs(&[7], now);
+
+        let mut scheduler = PollScheduler::new();
+        scheduler.boost();
+        scheduler.transition(true); // Grace -> Active
+        scheduler.transition(false); // Active -> Cooldown
+        scheduler.force_phase_since(
+            PollingPhase::Cooldown,
+            COOLDOWN_DURATION + std::time::Duration::from_secs(1),
+        );
+
+        scheduler.transition(effective_any_running(&app, now));
+        assert_ne!(
+            scheduler.state(),
+            PollState::Sleep,
+            "scheduler must not enter Sleep while a watched PR is still Open"
+        );
     }
 
     /// E2E: simulates the pre-push hook shell command sending SIGUSR1 via PID file,

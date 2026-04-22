@@ -3,6 +3,9 @@ use std::time::{Duration, Instant};
 const POLL_INTERVAL: Duration = Duration::from_secs(3);
 pub const GRACE_DURATION: Duration = Duration::from_secs(90);
 pub const COOLDOWN_DURATION: Duration = Duration::from_secs(60);
+/// Cap on how long a single watched PR keeps the scheduler out of Sleep.
+/// Prevents indefinite polling if a PR is opened but never merged or closed.
+pub const PR_WATCH_CAP: Duration = Duration::from_secs(3600);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PollingPhase {

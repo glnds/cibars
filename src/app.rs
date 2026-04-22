@@ -96,7 +96,6 @@ impl App {
     /// True iff any watched PR is still `Open` and was first seen within
     /// `cap`. Used by the orchestrator to keep Cooldown from draining to
     /// Sleep while a merge is still pending.
-    #[allow(dead_code)] // wired into effective_any_running in T6
     pub fn has_watched_open_prs(&self, cap: Duration, now: Instant) -> bool {
         self.watched_prs.values().any(|pr| {
             pr.state == WatchedPrState::Open && now.saturating_duration_since(pr.first_seen) < cap
