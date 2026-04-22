@@ -309,6 +309,68 @@ pub async fn poll_actions_tick(app: &Arc<Mutex<App>>, client: &dyn ActionsClient
     }
 }
 
+/// Poll the state of every watched PR whose last check is older than
+/// `min_interval` and whose state is not terminal (`Merged` /
+/// `ClosedUnmerged`). Updates `App.watched_prs` in place. Returns `true`
+/// iff a watched PR transitioned `Open → Merged` during this tick — the
+/// orchestrator uses that signal to auto-boost the scheduler so the
+/// downstream master-push run and CodePipeline execution get picked up.
+///
+/// On fetch errors, state and `last_checked` are left untouched so the
+/// next tick retries.
+#[allow(dead_code)] // wired into orchestrator in T9
+pub async fn poll_pr_states_tick(
+    app: &Arc<Mutex<App>>,
+    client: &dyn ActionsClient,
+    min_interval: Duration,
+) -> bool {
+    use crate::model::WatchedPrState;
+    let now = Instant::now();
+
+    let pollable: Vec<u64> = {
+        let a = app.lock().expect("app mutex poisoned");
+        a.watched_prs
+            .values()
+            .filter(|pr| {
+                matches!(pr.state, WatchedPrState::Open | WatchedPrState::Unknown)
+                    && match pr.last_checked {
+                        Some(t) => now.saturating_duration_since(t) >= min_interval,
+                        None => true,
+                    }
+            })
+            .map(|pr| pr.number)
+            .collect()
+    };
+    if pollable.is_empty() {
+        return false;
+    }
+
+    let futs: Vec<_> = pollable.iter().map(|n| client.fetch_pr_state(*n)).collect();
+    let results = futures::future::join_all(futs).await;
+
+    let mut merge_detected = false;
+    let mut a = app.lock().expect("app mutex poisoned");
+    for (pr_number, result) in pollable.iter().zip(results) {
+        let Some(entry) = a.watched_prs.get_mut(pr_number) else {
+            continue;
+        };
+        match result {
+            Ok(new_state) => {
+                let prior = entry.state;
+                entry.state = new_state;
+                entry.last_checked = Some(now);
+                if prior == WatchedPrState::Open && new_state == WatchedPrState::Merged {
+                    merge_detected = true;
+                }
+            }
+            Err(e) => {
+                tracing::warn!(pr = %pr_number, error = %e, "failed to fetch PR state");
+            }
+        }
+    }
+    merge_detected
+}
+
 /// Poll both sources in parallel. Used by tests.
 #[cfg(test)]
 pub async fn poll_once(
@@ -596,6 +658,177 @@ mod tests {
                 })
                 .collect(),
         }
+    }
+
+    // --- T8: poll_pr_states_tick tests ---
+
+    use std::collections::VecDeque;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[derive(Default)]
+    struct PrStateMock {
+        calls: AtomicUsize,
+        script: std::sync::Mutex<
+            std::collections::HashMap<u64, VecDeque<crate::model::WatchedPrState>>,
+        >,
+        error: bool,
+    }
+
+    impl PrStateMock {
+        fn with_responses(responses: &[(u64, &[crate::model::WatchedPrState])]) -> Self {
+            let mut script = std::collections::HashMap::new();
+            for (pr, resps) in responses {
+                script.insert(*pr, resps.to_vec().into());
+            }
+            Self {
+                calls: AtomicUsize::new(0),
+                script: std::sync::Mutex::new(script),
+                error: false,
+            }
+        }
+
+        fn erroring() -> Self {
+            Self {
+                error: true,
+                ..Default::default()
+            }
+        }
+
+        fn call_count(&self) -> usize {
+            self.calls.load(Ordering::SeqCst)
+        }
+    }
+
+    #[async_trait]
+    impl ActionsClient for PrStateMock {
+        async fn list_latest_runs(&self) -> Result<RunsPage> {
+            Ok(RunsPage::default())
+        }
+        async fn fetch_run_jobs(&self, _: u64) -> Result<Vec<JobInfo>> {
+            Ok(vec![])
+        }
+        async fn fetch_workflow_files(&self) -> Result<Vec<WorkflowFile>> {
+            Ok(vec![])
+        }
+        async fn fetch_pr_state(&self, pr_number: u64) -> Result<crate::model::WatchedPrState> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            if self.error {
+                anyhow::bail!("scripted error");
+            }
+            let mut script = self.script.lock().unwrap();
+            let next = script.get_mut(&pr_number).and_then(|q| q.pop_front());
+            Ok(next.unwrap_or(crate::model::WatchedPrState::Unknown))
+        }
+    }
+
+    fn set_pr(
+        app: &Arc<Mutex<App>>,
+        number: u64,
+        state: crate::model::WatchedPrState,
+        last_checked: Option<Instant>,
+    ) {
+        let mut a = app.lock().unwrap();
+        a.add_or_update_watched_prs(&[number], Instant::now());
+        let entry = a.watched_prs.get_mut(&number).unwrap();
+        entry.state = state;
+        entry.last_checked = last_checked;
+    }
+
+    #[tokio::test]
+    async fn poll_pr_states_skips_merged_prs() {
+        let app = Arc::new(Mutex::new(App::new()));
+        set_pr(&app, 7, crate::model::WatchedPrState::Merged, None);
+        let mock = PrStateMock::default();
+        let changed = poll_pr_states_tick(&app, &mock, Duration::from_secs(30)).await;
+        assert!(!changed);
+        assert_eq!(mock.call_count(), 0, "terminal state must not be polled");
+    }
+
+    #[tokio::test]
+    async fn poll_pr_states_skips_closed_unmerged_prs() {
+        let app = Arc::new(Mutex::new(App::new()));
+        set_pr(&app, 7, crate::model::WatchedPrState::ClosedUnmerged, None);
+        let mock = PrStateMock::default();
+        let changed = poll_pr_states_tick(&app, &mock, Duration::from_secs(30)).await;
+        assert!(!changed);
+        assert_eq!(mock.call_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn poll_pr_states_skips_prs_polled_within_min_interval() {
+        let app = Arc::new(Mutex::new(App::new()));
+        let recent = Instant::now() - Duration::from_secs(10);
+        set_pr(&app, 7, crate::model::WatchedPrState::Open, Some(recent));
+        let mock = PrStateMock::default();
+        poll_pr_states_tick(&app, &mock, Duration::from_secs(30)).await;
+        assert_eq!(mock.call_count(), 0, "throttle should suppress this poll");
+    }
+
+    #[tokio::test]
+    async fn poll_pr_states_polls_stale_open_pr() {
+        let app = Arc::new(Mutex::new(App::new()));
+        let stale = Instant::now() - Duration::from_secs(60);
+        set_pr(&app, 7, crate::model::WatchedPrState::Open, Some(stale));
+        let mock = PrStateMock::with_responses(&[(7, &[crate::model::WatchedPrState::Open])]);
+        let changed = poll_pr_states_tick(&app, &mock, Duration::from_secs(30)).await;
+        assert!(!changed, "Open → Open is not a merge transition");
+        assert_eq!(mock.call_count(), 1);
+        let a = app.lock().unwrap();
+        assert!(a.watched_prs[&7].last_checked.is_some());
+    }
+
+    #[tokio::test]
+    async fn poll_pr_states_keeps_prior_state_on_error() {
+        let app = Arc::new(Mutex::new(App::new()));
+        set_pr(&app, 7, crate::model::WatchedPrState::Open, None);
+        let mock = PrStateMock::erroring();
+        poll_pr_states_tick(&app, &mock, Duration::from_secs(30)).await;
+        let a = app.lock().unwrap();
+        assert_eq!(a.watched_prs[&7].state, crate::model::WatchedPrState::Open);
+        assert!(
+            a.watched_prs[&7].last_checked.is_none(),
+            "error must leave last_checked untouched so next tick retries"
+        );
+    }
+
+    #[tokio::test]
+    async fn poll_pr_states_returns_true_on_open_to_merged() {
+        let app = Arc::new(Mutex::new(App::new()));
+        set_pr(&app, 7, crate::model::WatchedPrState::Open, None);
+        let mock = PrStateMock::with_responses(&[(7, &[crate::model::WatchedPrState::Merged])]);
+        let changed = poll_pr_states_tick(&app, &mock, Duration::from_secs(30)).await;
+        assert!(changed);
+        let a = app.lock().unwrap();
+        assert_eq!(
+            a.watched_prs[&7].state,
+            crate::model::WatchedPrState::Merged
+        );
+    }
+
+    #[tokio::test]
+    async fn poll_pr_states_returns_true_exactly_once_across_two_ticks() {
+        let app = Arc::new(Mutex::new(App::new()));
+        set_pr(&app, 7, crate::model::WatchedPrState::Open, None);
+        // Script: first call returns Merged, second is never reached (state is
+        // no longer pollable after first flip).
+        let mock = PrStateMock::with_responses(&[(
+            7,
+            &[
+                crate::model::WatchedPrState::Merged,
+                crate::model::WatchedPrState::Merged,
+            ],
+        )]);
+
+        let changed1 = poll_pr_states_tick(&app, &mock, Duration::from_secs(30)).await;
+        assert!(changed1, "first tick detects merge");
+
+        let changed2 = poll_pr_states_tick(&app, &mock, Duration::from_secs(30)).await;
+        assert!(!changed2, "no re-boost on subsequent tick");
+        assert_eq!(
+            mock.call_count(),
+            1,
+            "terminal state must prevent further API calls"
+        );
     }
 
     #[tokio::test]
