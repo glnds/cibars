@@ -807,7 +807,7 @@ mod tests {
     use crate::model::{Bar, PipelineGroup, WorkflowCategory, WorkflowGroup};
     use crate::poller::{
         ActionsClient, JobInfo, PipelineClient, PipelineDefinition, PipelineState, S3Source,
-        S3Upload, WorkflowFile, WorkflowRunSummary,
+        S3Upload, WorkflowFile,
     };
     use std::collections::HashMap;
     use std::time::Duration;
@@ -847,8 +847,8 @@ mod tests {
 
     #[async_trait::async_trait]
     impl ActionsClient for LinkMockActions {
-        async fn list_latest_runs(&self) -> anyhow::Result<Vec<WorkflowRunSummary>> {
-            Ok(vec![])
+        async fn list_latest_runs(&self) -> anyhow::Result<crate::poller::RunsPage> {
+            Ok(crate::poller::RunsPage::default())
         }
         async fn fetch_run_jobs(&self, _: u64) -> anyhow::Result<Vec<JobInfo>> {
             Ok(vec![])

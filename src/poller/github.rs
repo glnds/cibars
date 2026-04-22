@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 
-use super::{ActionsClient, JobInfo, S3Upload, WorkflowFile, WorkflowRunSummary};
+use super::{ActionsClient, JobInfo, RunsPage, S3Upload, WorkflowFile, WorkflowRunSummary};
 use crate::model::BuildStatus;
 
 pub struct GitHubActionsClient {
@@ -52,10 +52,9 @@ pub fn map_run_status(status: &str, conclusion: Option<&str>) -> BuildStatus {
 
 #[async_trait]
 impl ActionsClient for GitHubActionsClient {
-    async fn list_latest_runs(&self) -> Result<Vec<WorkflowRunSummary>> {
+    async fn list_latest_runs(&self) -> Result<RunsPage> {
         let mut latest_per_workflow: std::collections::HashMap<String, (u64, BuildStatus)> =
             std::collections::HashMap::new();
-        // Harvested for T3+; T2 only accumulates them here.
         let mut pr_numbers: std::collections::HashSet<u64> = std::collections::HashSet::new();
 
         let mut page: u32 = 1;
@@ -103,14 +102,18 @@ impl ActionsClient for GitHubActionsClient {
             "deduped workflow runs"
         );
 
-        Ok(latest_per_workflow
+        let summaries = latest_per_workflow
             .into_iter()
             .map(|(workflow_name, (run_id, status))| WorkflowRunSummary {
                 workflow_name,
                 run_id,
                 status,
             })
-            .collect())
+            .collect();
+        Ok(RunsPage {
+            summaries,
+            pr_numbers,
+        })
     }
 
     async fn fetch_run_jobs(&self, run_id: u64) -> Result<Vec<JobInfo>> {

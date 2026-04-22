@@ -88,6 +88,17 @@ pub struct WorkflowRunSummary {
     pub status: BuildStatus,
 }
 
+/// Result of a single `list_latest_runs` call. `summaries` are the visible
+/// workflow runs (after bot-actor + head_branch filters); `pr_numbers` are
+/// the PR numbers harvested from pull_request[_target] runs *before* those
+/// filters, so the linger-after-PR scheduler hook can watch them even when
+/// the runs themselves are hidden from the UI.
+#[derive(Default)]
+pub struct RunsPage {
+    pub summaries: Vec<WorkflowRunSummary>,
+    pub pr_numbers: std::collections::HashSet<u64>,
+}
+
 /// Full workflow run including jobs. Used in tests.
 #[cfg(test)]
 pub struct WorkflowRunInfo {
@@ -107,8 +118,9 @@ pub trait PipelineClient: Send + Sync {
 
 #[async_trait]
 pub trait ActionsClient: Send + Sync {
-    /// Fast: single API call, returns workflow-level status only.
-    async fn list_latest_runs(&self) -> Result<Vec<WorkflowRunSummary>>;
+    /// Fast: single API call, returns workflow-level summaries + harvested
+    /// PR numbers (from pull_request[_target] events, pre-filter).
+    async fn list_latest_runs(&self) -> Result<RunsPage>;
     /// Fetch jobs for a specific run.
     async fn fetch_run_jobs(&self, run_id: u64) -> Result<Vec<JobInfo>>;
     /// Fetch workflow YAML files and extract S3 upload targets.
@@ -225,8 +237,11 @@ pub async fn poll_actions_tick(app: &Arc<Mutex<App>>, client: &dyn ActionsClient
     }
 
     // Phase 1: fetch workflow summaries (single API call)
-    let summaries = match client.list_latest_runs().await {
-        Ok(s) => s,
+    let RunsPage {
+        summaries,
+        pr_numbers: _pr_numbers,
+    } = match client.list_latest_runs().await {
+        Ok(p) => p,
         Err(e) => {
             let msg = format!("{e:#}");
             let mut a = app.lock().expect("app mutex poisoned");
@@ -495,22 +510,27 @@ mod tests {
         }
     }
 
+    #[derive(Default)]
     struct MockActionsClient {
         runs: Vec<WorkflowRunInfo>,
+        pr_numbers: std::collections::HashSet<u64>,
     }
 
     #[async_trait]
     impl ActionsClient for MockActionsClient {
-        async fn list_latest_runs(&self) -> Result<Vec<WorkflowRunSummary>> {
-            Ok(self
-                .runs
-                .iter()
-                .map(|r| WorkflowRunSummary {
-                    workflow_name: r.workflow_name.clone(),
-                    run_id: r.run_id,
-                    status: r.status,
-                })
-                .collect())
+        async fn list_latest_runs(&self) -> Result<RunsPage> {
+            Ok(RunsPage {
+                summaries: self
+                    .runs
+                    .iter()
+                    .map(|r| WorkflowRunSummary {
+                        workflow_name: r.workflow_name.clone(),
+                        run_id: r.run_id,
+                        status: r.status,
+                    })
+                    .collect(),
+                pr_numbers: self.pr_numbers.clone(),
+            })
         }
 
         async fn fetch_run_jobs(&self, run_id: u64) -> Result<Vec<JobInfo>> {
@@ -558,6 +578,19 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn actions_client_runs_page_exposes_pr_numbers() {
+        let mut pr_numbers = std::collections::HashSet::new();
+        pr_numbers.insert(42);
+        let client = MockActionsClient {
+            runs: vec![],
+            pr_numbers,
+        };
+        let page = client.list_latest_runs().await.unwrap();
+        assert!(page.pr_numbers.contains(&42));
+        assert!(page.summaries.is_empty());
+    }
+
+    #[tokio::test]
     async fn poll_creates_pipeline_groups() {
         let app = Arc::new(Mutex::new(App::new()));
         let pipes = MockPipelineClient {
@@ -581,6 +614,7 @@ mod tests {
                     completed_at: None,
                 }],
             }],
+            ..Default::default()
         };
 
         poll_once(&app, &pipes, &actions).await;
@@ -608,7 +642,10 @@ mod tests {
         let pipes = MockPipelineClient {
             pipelines: vec![mock_pipeline("deploy", BuildStatus::Running, vec![])],
         };
-        let actions = MockActionsClient { runs: vec![] };
+        let actions = MockActionsClient {
+            runs: vec![],
+            ..Default::default()
+        };
         poll_once(&app, &pipes, &actions).await;
 
         let pipes = MockPipelineClient { pipelines: vec![] };
@@ -629,7 +666,10 @@ mod tests {
                 vec![mock_stage("Build", vec![("compile", BuildStatus::Running)])],
             )],
         };
-        let actions = MockActionsClient { runs: vec![] };
+        let actions = MockActionsClient {
+            runs: vec![],
+            ..Default::default()
+        };
         poll_once(&app, &pipes, &actions).await;
         poll_once(&app, &pipes, &actions).await;
 
@@ -660,7 +700,10 @@ mod tests {
     async fn poll_error_adds_warning() {
         let app = Arc::new(Mutex::new(App::new()));
         let pipes = FailingPipelineClient;
-        let actions = MockActionsClient { runs: vec![] };
+        let actions = MockActionsClient {
+            runs: vec![],
+            ..Default::default()
+        };
         poll_once(&app, &pipes, &actions).await;
 
         let app = app.lock().unwrap();
@@ -688,7 +731,10 @@ mod tests {
                 ],
             )],
         };
-        let actions = MockActionsClient { runs: vec![] };
+        let actions = MockActionsClient {
+            runs: vec![],
+            ..Default::default()
+        };
         poll_once(&app, &pipes, &actions).await;
 
         let app = app.lock().unwrap();
@@ -723,6 +769,7 @@ mod tests {
                     },
                 ],
             }],
+            ..Default::default()
         };
         poll_once(&app, &pipes, &actions).await;
 
@@ -751,10 +798,14 @@ mod tests {
                 status: BuildStatus::Succeeded,
                 jobs: vec![],
             }],
+            ..Default::default()
         };
         poll_once(&app, &pipes, &actions).await;
 
-        let actions = MockActionsClient { runs: vec![] };
+        let actions = MockActionsClient {
+            runs: vec![],
+            ..Default::default()
+        };
         poll_once(&app, &pipes, &actions).await;
 
         let app = app.lock().unwrap();
@@ -769,7 +820,10 @@ mod tests {
         assert!(app.lock().unwrap().loading_actions);
 
         let pipes = FailingPipelineClient;
-        let actions = MockActionsClient { runs: vec![] };
+        let actions = MockActionsClient {
+            runs: vec![],
+            ..Default::default()
+        };
         poll_once(&app, &pipes, &actions).await;
 
         let app = app.lock().unwrap();
@@ -810,7 +864,7 @@ mod tests {
 
     #[async_trait]
     impl ActionsClient for RateLimitActionsClient {
-        async fn list_latest_runs(&self) -> Result<Vec<WorkflowRunSummary>> {
+        async fn list_latest_runs(&self) -> Result<RunsPage> {
             anyhow::bail!("{}", self.error_msg)
         }
         async fn fetch_run_jobs(&self, _run_id: u64) -> Result<Vec<JobInfo>> {
@@ -891,7 +945,10 @@ mod tests {
                 ],
             )],
         };
-        let actions = MockActionsClient { runs: vec![] };
+        let actions = MockActionsClient {
+            runs: vec![],
+            ..Default::default()
+        };
         poll_once(&app, &pipes, &actions).await;
 
         {
@@ -951,6 +1008,7 @@ mod tests {
                     },
                 ],
             }],
+            ..Default::default()
         };
         poll_once(&app, &pipes, &actions).await;
 
@@ -966,6 +1024,7 @@ mod tests {
                     completed_at: None,
                 }],
             }],
+            ..Default::default()
         };
         poll_once(&app, &pipes, &actions).await;
 
@@ -982,7 +1041,10 @@ mod tests {
     async fn rate_limit_skip_path_adds_warning() {
         let app = Arc::new(Mutex::new(App::new()));
         app.lock().unwrap().rate_limited_until = Some(Instant::now() + Duration::from_secs(300));
-        let client = MockActionsClient { runs: vec![] };
+        let client = MockActionsClient {
+            runs: vec![],
+            ..Default::default()
+        };
         poll_actions_tick(&app, &client).await;
 
         let a = app.lock().unwrap();
@@ -998,19 +1060,22 @@ mod tests {
 
     #[async_trait]
     impl ActionsClient for PartialFailActionsClient {
-        async fn list_latest_runs(&self) -> Result<Vec<WorkflowRunSummary>> {
-            Ok(vec![
-                WorkflowRunSummary {
-                    workflow_name: "CI".into(),
-                    run_id: 1,
-                    status: BuildStatus::Running,
-                },
-                WorkflowRunSummary {
-                    workflow_name: "Deploy".into(),
-                    run_id: 2,
-                    status: BuildStatus::Running,
-                },
-            ])
+        async fn list_latest_runs(&self) -> Result<RunsPage> {
+            Ok(RunsPage {
+                summaries: vec![
+                    WorkflowRunSummary {
+                        workflow_name: "CI".into(),
+                        run_id: 1,
+                        status: BuildStatus::Running,
+                    },
+                    WorkflowRunSummary {
+                        workflow_name: "Deploy".into(),
+                        run_id: 2,
+                        status: BuildStatus::Running,
+                    },
+                ],
+                pr_numbers: std::collections::HashSet::new(),
+            })
         }
         async fn fetch_run_jobs(&self, run_id: u64) -> Result<Vec<JobInfo>> {
             if run_id == 1 {
@@ -1380,6 +1445,7 @@ mod tests {
                     completed_at: Some(ts),
                 }],
             }],
+            ..Default::default()
         };
         poll_once(&app, &pipes, &actions).await;
 
@@ -1408,6 +1474,7 @@ mod tests {
                     completed_at: Some(ts),
                 }],
             }],
+            ..Default::default()
         };
         poll_once(&app, &pipes, &actions).await;
 
@@ -1422,6 +1489,7 @@ mod tests {
                     completed_at: None,
                 }],
             }],
+            ..Default::default()
         };
         poll_once(&app, &pipes, &actions).await;
 
@@ -1499,6 +1567,7 @@ mod tests {
                     completed_at: None,
                 }],
             }],
+            ..Default::default()
         };
         poll_once(&app, &pipes, &actions).await;
 
@@ -1702,7 +1771,10 @@ mod tests {
     #[tokio::test]
     async fn e2e_pipeline_lifecycle_idle_running_succeeded() {
         let app = Arc::new(Mutex::new(App::new()));
-        let actions = MockActionsClient { runs: vec![] };
+        let actions = MockActionsClient {
+            runs: vec![],
+            ..Default::default()
+        };
 
         // Poll 1: pipeline arrives Idle
         let pipes = MockPipelineClient {
@@ -1759,7 +1831,10 @@ mod tests {
     #[tokio::test]
     async fn e2e_pipeline_lifecycle_running_to_failed() {
         let app = Arc::new(Mutex::new(App::new()));
-        let actions = MockActionsClient { runs: vec![] };
+        let actions = MockActionsClient {
+            runs: vec![],
+            ..Default::default()
+        };
 
         let pipes = MockPipelineClient {
             pipelines: vec![mock_pipeline(
@@ -1798,12 +1873,16 @@ mod tests {
                 status: BuildStatus::Succeeded,
                 jobs: vec![],
             }],
+            ..Default::default()
         };
         poll_once(&app, &pipes, &actions).await;
         assert_eq!(app.lock().unwrap().workflow_groups.len(), 1);
         assert!(!app.lock().unwrap().workflow_groups[0].gone);
 
-        let actions = MockActionsClient { runs: vec![] };
+        let actions = MockActionsClient {
+            runs: vec![],
+            ..Default::default()
+        };
         poll_once(&app, &pipes, &actions).await;
         {
             let a = app.lock().unwrap();
@@ -1824,10 +1903,14 @@ mod tests {
                 status: BuildStatus::Succeeded,
                 jobs: vec![],
             }],
+            ..Default::default()
         };
         poll_once(&app, &pipes, &actions).await;
 
-        let actions = MockActionsClient { runs: vec![] };
+        let actions = MockActionsClient {
+            runs: vec![],
+            ..Default::default()
+        };
         poll_once(&app, &pipes, &actions).await;
         assert!(app.lock().unwrap().workflow_groups[0].gone);
 
@@ -1838,6 +1921,7 @@ mod tests {
                 status: BuildStatus::Running,
                 jobs: vec![],
             }],
+            ..Default::default()
         };
         poll_once(&app, &pipes, &actions).await;
         {
@@ -1898,6 +1982,7 @@ mod tests {
                 status: BuildStatus::Succeeded,
                 jobs: vec![],
             }],
+            ..Default::default()
         };
         poll_actions_tick(&app, &client).await;
         {
@@ -1926,7 +2011,10 @@ mod tests {
     #[tokio::test]
     async fn e2e_multi_pipeline_independent_lifecycle() {
         let app = Arc::new(Mutex::new(App::new()));
-        let actions = MockActionsClient { runs: vec![] };
+        let actions = MockActionsClient {
+            runs: vec![],
+            ..Default::default()
+        };
 
         let pipes = MockPipelineClient {
             pipelines: vec![
@@ -2013,6 +2101,7 @@ mod tests {
                 status: BuildStatus::Running,
                 jobs: vec![],
             }],
+            ..Default::default()
         };
         poll_once(&app, &pipes, &actions).await;
         {
@@ -2036,6 +2125,7 @@ mod tests {
                     jobs: vec![],
                 },
             ],
+            ..Default::default()
         };
         poll_once(&app, &pipes, &actions).await;
         {
@@ -2070,6 +2160,7 @@ mod tests {
                     completed_at: None,
                 }],
             }],
+            ..Default::default()
         };
         poll_once(&app, &pipes, &actions).await;
 
@@ -2110,6 +2201,7 @@ mod tests {
                     completed_at: None,
                 }],
             }],
+            ..Default::default()
         };
         poll_once(&app, &pipes, &actions).await;
 
@@ -2131,6 +2223,7 @@ mod tests {
                     completed_at: None,
                 }],
             }],
+            ..Default::default()
         };
         poll_once(&app, &pipes, &actions).await;
 
