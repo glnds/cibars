@@ -126,6 +126,36 @@ pub struct WorkflowGroup {
     pub linked_pipeline: Option<String>,
 }
 
+#[allow(dead_code)] // wired into App in T4
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WatchedPrState {
+    Open,
+    Merged,
+    ClosedUnmerged,
+    Unknown,
+}
+
+#[allow(dead_code)] // wired into App in T4
+#[derive(Debug, Clone, Copy)]
+pub struct WatchedPr {
+    pub number: u64,
+    pub first_seen: std::time::Instant,
+    pub last_checked: Option<std::time::Instant>,
+    pub state: WatchedPrState,
+}
+
+impl WatchedPr {
+    #[allow(dead_code)] // wired into App in T4
+    pub fn new(number: u64, now: std::time::Instant) -> Self {
+        Self {
+            number,
+            first_seen: now,
+            last_checked: None,
+            state: WatchedPrState::Open,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct PipelineGroup {
     pub name: String,
@@ -555,6 +585,28 @@ mod tests {
         let offset = FixedOffset::east_opt(0).unwrap(); // UTC
         let result = format_finished_time(&utc_time, &offset);
         assert_eq!(result, "01:05");
+    }
+
+    // --- WatchedPr / WatchedPrState tests ---
+
+    #[test]
+    fn watched_pr_state_variants_are_distinct() {
+        assert_ne!(WatchedPrState::Open, WatchedPrState::Merged);
+        assert_ne!(WatchedPrState::Open, WatchedPrState::ClosedUnmerged);
+        assert_ne!(WatchedPrState::Open, WatchedPrState::Unknown);
+        assert_ne!(WatchedPrState::Merged, WatchedPrState::ClosedUnmerged);
+        assert_ne!(WatchedPrState::Merged, WatchedPrState::Unknown);
+        assert_ne!(WatchedPrState::ClosedUnmerged, WatchedPrState::Unknown);
+    }
+
+    #[test]
+    fn watched_pr_new_is_open_with_first_seen_now_and_no_last_checked() {
+        let before = std::time::Instant::now();
+        let pr = WatchedPr::new(42, before);
+        assert_eq!(pr.number, 42);
+        assert_eq!(pr.state, WatchedPrState::Open);
+        assert!(pr.last_checked.is_none());
+        assert_eq!(pr.first_seen, before);
     }
 
     #[test]
