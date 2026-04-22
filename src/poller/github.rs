@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use async_trait::async_trait;
 
 use super::{ActionsClient, JobInfo, RunsPage, S3Upload, WorkflowFile, WorkflowRunSummary};
-use crate::model::BuildStatus;
+use crate::model::{BuildStatus, WatchedPrState};
 
 pub struct GitHubActionsClient {
     octocrab: octocrab::Octocrab,
@@ -34,6 +34,19 @@ fn build_runs_route(owner: &str, repo: &str, page: u32, branch: Option<&str>) ->
         route.push_str(b);
     }
     route
+}
+
+/// Map GitHub pull request `state` + `merged` boolean to WatchedPrState.
+/// Recognized shapes: ("open", false) → Open; ("closed", true) → Merged;
+/// ("closed", false) → ClosedUnmerged. Anything else → Unknown.
+#[allow(dead_code)] // wired into fetch_pr_state impl + poll_pr_states_tick in T8
+pub fn map_pr_state(state: &str, merged: bool) -> WatchedPrState {
+    match (state, merged) {
+        ("open", false) => WatchedPrState::Open,
+        ("closed", true) => WatchedPrState::Merged,
+        ("closed", false) => WatchedPrState::ClosedUnmerged,
+        _ => WatchedPrState::Unknown,
+    }
 }
 
 /// Map GitHub run status + conclusion to BuildStatus.
@@ -141,6 +154,18 @@ impl ActionsClient for GitHubActionsClient {
             }
         }
         Ok(jobs)
+    }
+
+    async fn fetch_pr_state(&self, pr_number: u64) -> Result<WatchedPrState> {
+        let route = format!("/repos/{}/{}/pulls/{pr_number}", self.owner, self.repo,);
+        let resp: serde_json::Value = self
+            .octocrab
+            .get(&route, None::<&()>)
+            .await
+            .context("failed to fetch pull request state")?;
+        let state = resp["state"].as_str().unwrap_or("");
+        let merged = resp["merged"].as_bool().unwrap_or(false);
+        Ok(map_pr_state(state, merged))
     }
 
     async fn fetch_workflow_files(&self) -> Result<Vec<WorkflowFile>> {
@@ -1054,6 +1079,37 @@ jobs:
     fn parse_job_completed_at_missing_is_none() {
         let job = serde_json::json!({});
         assert!(parse_job_completed_at(&job).is_none());
+    }
+
+    // --- T7: map_pr_state tests ---
+
+    #[test]
+    fn map_pr_state_open_false_is_open() {
+        assert_eq!(map_pr_state("open", false), WatchedPrState::Open);
+    }
+
+    #[test]
+    fn map_pr_state_closed_true_is_merged() {
+        assert_eq!(map_pr_state("closed", true), WatchedPrState::Merged);
+    }
+
+    #[test]
+    fn map_pr_state_closed_false_is_closed_unmerged() {
+        assert_eq!(
+            map_pr_state("closed", false),
+            WatchedPrState::ClosedUnmerged
+        );
+    }
+
+    #[test]
+    fn map_pr_state_unknown_bucket_when_open_and_merged_true() {
+        // Defensive: API shouldn't emit this shape, but we must not panic.
+        assert_eq!(map_pr_state("open", true), WatchedPrState::Unknown);
+    }
+
+    #[test]
+    fn map_pr_state_unknown_bucket_for_unrecognized_state() {
+        assert_eq!(map_pr_state("weird", false), WatchedPrState::Unknown);
     }
 
     // --- T2: PR number harvesting tests ---

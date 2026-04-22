@@ -125,6 +125,10 @@ pub trait ActionsClient: Send + Sync {
     async fn fetch_run_jobs(&self, run_id: u64) -> Result<Vec<JobInfo>>;
     /// Fetch workflow YAML files and extract S3 upload targets.
     async fn fetch_workflow_files(&self) -> Result<Vec<WorkflowFile>>;
+    /// Fetch the state of a single pull request. Used by the watched-PR
+    /// poller to detect Open → Merged transitions and auto-boost.
+    #[allow(dead_code)] // wired into poll_pr_states_tick in T8
+    async fn fetch_pr_state(&self, pr_number: u64) -> Result<crate::model::WatchedPrState>;
 }
 
 #[async_trait]
@@ -518,6 +522,11 @@ mod tests {
     struct MockActionsClient {
         runs: Vec<WorkflowRunInfo>,
         pr_numbers: std::collections::HashSet<u64>,
+        /// Scripted per-PR state responses. Missing PRs default to Unknown.
+        /// Read through the `fetch_pr_state` impl only — silence dead-code
+        /// until T8 tests drive it directly.
+        #[allow(dead_code)]
+        pr_states: std::collections::HashMap<u64, crate::model::WatchedPrState>,
     }
 
     #[async_trait]
@@ -535,6 +544,14 @@ mod tests {
                     .collect(),
                 pr_numbers: self.pr_numbers.clone(),
             })
+        }
+
+        async fn fetch_pr_state(&self, pr_number: u64) -> Result<crate::model::WatchedPrState> {
+            Ok(self
+                .pr_states
+                .get(&pr_number)
+                .copied()
+                .unwrap_or(crate::model::WatchedPrState::Unknown))
         }
 
         async fn fetch_run_jobs(&self, run_id: u64) -> Result<Vec<JobInfo>> {
@@ -589,6 +606,7 @@ mod tests {
         let client = MockActionsClient {
             runs: vec![],
             pr_numbers,
+            ..Default::default()
         };
         poll_actions_tick(&app, &client).await;
         let a = app.lock().unwrap();
@@ -606,6 +624,7 @@ mod tests {
         let client = MockActionsClient {
             runs: vec![],
             pr_numbers,
+            ..Default::default()
         };
         let page = client.list_latest_runs().await.unwrap();
         assert!(page.pr_numbers.contains(&42));
@@ -895,6 +914,9 @@ mod tests {
         async fn fetch_workflow_files(&self) -> Result<Vec<WorkflowFile>> {
             Ok(Vec::new())
         }
+        async fn fetch_pr_state(&self, _pr_number: u64) -> Result<crate::model::WatchedPrState> {
+            Ok(crate::model::WatchedPrState::Unknown)
+        }
     }
 
     #[tokio::test]
@@ -1112,6 +1134,9 @@ mod tests {
         }
         async fn fetch_workflow_files(&self) -> Result<Vec<WorkflowFile>> {
             Ok(vec![])
+        }
+        async fn fetch_pr_state(&self, _pr_number: u64) -> Result<crate::model::WatchedPrState> {
+            Ok(crate::model::WatchedPrState::Unknown)
         }
     }
 

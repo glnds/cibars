@@ -862,6 +862,12 @@ mod tests {
                 .filter(|wf| !wf.s3_uploads.is_empty())
                 .collect())
         }
+        async fn fetch_pr_state(
+            &self,
+            _pr_number: u64,
+        ) -> anyhow::Result<crate::model::WatchedPrState> {
+            Ok(crate::model::WatchedPrState::Unknown)
+        }
     }
 
     // --- load/save link cache tests ---
