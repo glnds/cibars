@@ -16,9 +16,16 @@ local pre_commit_steps = new Mapping<String, Step> {
 // pre-push: whole-crate cargo tools (can't be file-scoped, and all three
 // contend on the same target/ dir), plus a full-history secret scan.
 // -D warnings matches the clippy invocation in mise.toml/ci.yml — keep in sync.
+// Cargo.toml/Cargo.lock-only changes (a dep bump) must still trigger fmt/
+// clippy/test, not just cargo-deny — widen past the builtins' **/*.rs glob.
+local cargo_glob = List("**/*.rs", "**/Cargo.toml", "**/Cargo.lock")
+
 local pre_push_steps = new Mapping<String, Step> {
-    ["cargo-fmt"] = (Builtins.cargo_fmt) {}
+    ["cargo-fmt"] = (Builtins.cargo_fmt) {
+        glob = cargo_glob
+    }
     ["cargo-clippy"] = (Builtins.cargo_clippy) {
+        glob = cargo_glob
         depends = List("cargo-fmt")
         check {
             command = "cargo clippy --manifest-path {{workspace_indicator}} --all-targets --quiet -- -D warnings"
@@ -28,7 +35,7 @@ local pre_push_steps = new Mapping<String, Step> {
         }
     }
     ["cargo-test"] = new {
-        glob = "**/*.rs"
+        glob = cargo_glob
         depends = List("cargo-clippy")
         check = "cargo test --locked --quiet"
     }
