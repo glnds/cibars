@@ -10,15 +10,34 @@
 - **Key deps:** ratatui, tokio, clap (derive), aws-sdk-codepipeline, octocrab, anyhow, tracing
 - **Architecture:** async polling (tokio) + TUI event loop (ratatui) on main thread
 
+## Tooling
+
+**mise pins every tool version** (rust, cmake, hk, rumdl, typos, trufflehog,
+zizmor, cargo-deny, svu) in `mise.toml`/`mise.lock` — never install these ad
+hoc. `mise run setup` installs them and registers the `hk` git hooks
+(pre-commit: whitespace/EOF, typos, rumdl, trufflehog; pre-push: `cargo fmt
+--check`, clippy `-D warnings`, `cargo test`, `cargo-deny`). CI
+(`.github/workflows/ci.yml`) runs the identical toolchain via
+`jdx/mise-action` and `mise run check`.
+
 ## Commands
 
 ```bash
-cargo build          # compile
-cargo test           # run all tests
-cargo clippy         # lint (must pass with no warnings)
-cargo fmt            # format (must be clean before commit)
-cargo run -- --aws-profile <p> --region <r> --github-repo owner/repo
+mise run setup        # one-time: install pinned tools + git hooks
+mise run build         # release build (macOS: ad-hoc codesign)
+mise run test           # cargo test --locked
+mise run lint            # cargo clippy --locked --all-targets -- -D warnings
+mise run fmt              # cargo fmt
+mise run check             # fmt --check + clippy + test (CI parity)
+mise run audit               # cargo-deny: advisories, licenses, bans, sources
+mise run install               # build + `cargo install --path .`
+mise run run                     # cargo run against the dev pipeline
+mise run version                   # preview next release tag (svu)
 ```
+
+Equivalent raw cargo commands (`cargo build`, `cargo test`, `cargo clippy
+--all-targets -- -D warnings`, `cargo fmt`) still work once `mise run setup`
+has installed the pinned rust toolchain.
 
 ## !!! TDD IS MANDATORY — NO EXCEPTIONS !!!
 
@@ -30,7 +49,7 @@ Do NOT skip this. Do NOT "just quickly fix" something. Test FIRST. Always.
 
 - **Trunk-based dev:** commit directly to `master`, no long-lived branches
 - **TDD mandatory:** failing test first, minimal implementation, refactor, full suite green
-- Run `cargo clippy` and `cargo fmt` before considering any work complete
+- Run `mise run check` (fmt --check + clippy + test) before considering any work complete
 
 ## Code Rules
 

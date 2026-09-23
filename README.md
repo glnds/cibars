@@ -69,7 +69,8 @@ single screen -- no browser required.
 
 ## Requirements
 
-- Rust 1.78+ (stable toolchain)
+- [mise](https://mise.jdx.dev) — installs the pinned Rust toolchain and build
+  deps (see `mise.toml`)
 - An AWS profile configured via `~/.aws/credentials`,
   `~/.aws/config`, or `AWS_PROFILE` (SSO profiles supported)
 - A GitHub token: either `GITHUB_TOKEN` env var or `gh auth token`
@@ -80,7 +81,8 @@ single screen -- no browser required.
 ```bash
 git clone https://github.com/glnds/cibars
 cd cibars
-cargo install --path .
+mise run setup      # installs the pinned toolchain + git hooks
+mise run install    # builds and installs to ~/.cargo/bin
 ```
 
 ## Usage
