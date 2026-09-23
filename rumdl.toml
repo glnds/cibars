@@ -1,0 +1,10 @@
+[MD013]
+line-length = 100
+# Line length applies to prose only. Code blocks (CLI output, commands) and
+# table rows can't be reflowed without corrupting them — exempt both.
+code_blocks = false
+tables = false
+
+[MD026]
+# CLAUDE.md uses "!!! ... !!!" headings deliberately, for emphasis.
+punctuation = ""
