@@ -1,0 +1,46 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "customManagers": [
+    {
+      "customType": "regex",
+      "datasourceTemplate": "{{{datasource}}}",
+      "description": "Pinned SEMGREP_VERSION in security-scans.yml",
+      "managerFilePatterns": [
+        "/^\\.github/workflows/security-scans\\.yml$/"
+      ],
+      "matchStrings": [
+        "# renovate: datasource=(?<datasource>[a-z-]+?) depName=(?<depName>[^\\s]+?)\\s+[A-Z_]+: \\\"(?<currentValue>[^\\\"]+)\\\""
+      ]
+    }
+  ],
+  "extends": [
+    "config:recommended",
+    "helpers:pinGitHubActionDigests",
+    ":maintainLockFilesWeekly"
+  ],
+  "lockFileMaintenance": {
+    "automerge": true
+  },
+  "packageRules": [
+    {
+      "automerge": true,
+      "internalChecksFilter": "strict",
+      "matchUpdateTypes": ["minor", "patch", "digest"],
+      "minimumReleaseAge": "3 days"
+    },
+    {
+      "groupName": "mise tools",
+      "matchManagers": ["mise"]
+    },
+    {
+      "groupName": "cargo dependencies",
+      "matchManagers": ["cargo"]
+    },
+    {
+      "groupName": "github-actions",
+      "matchManagers": ["github-actions"]
+    }
+  ],
+  "schedule": ["* 0-5 * * 1"],
+  "timezone": "Europe/Brussels"
+}
