@@ -1,0 +1,68 @@
+amends "package://github.com/jdx/hk/releases/download/v2.0.1/hk@2.0.1#/Config.pkl"
+import "package://github.com/jdx/hk/releases/download/v2.0.1/hk@2.0.1#/Builtins.pkl"
+
+// pre-commit: fast, per-file format/lint/secrets. hk runs these in parallel and
+// auto-fixes; builtins use --diff/--list-different to avoid write locks.
+local pre_commit_steps = new Mapping<String, Step> {
+    ["trailing-whitespace"] = (Builtins.trailing_whitespace) {}
+    ["end-of-file-fixer"] = (Builtins.newlines) {}
+    ["typos"] = (Builtins.typos) {}
+    ["rumdl"] = (Builtins.rumdl) {}
+    ["trufflehog"] = new {
+        check = "trufflehog filesystem {{files}} --no-update --fail"
+    }
+}
+
+// pre-push: whole-crate cargo tools (can't be file-scoped, and all three
+// contend on the same target/ dir), plus a full-history secret scan.
+// -D warnings matches the clippy invocation in mise.toml/ci.yml — keep in sync.
+local pre_push_steps = new Mapping<String, Step> {
+    ["cargo-fmt"] = (Builtins.cargo_fmt) {}
+    ["cargo-clippy"] = (Builtins.cargo_clippy) {
+        depends = List("cargo-fmt")
+        check {
+            command = "cargo clippy --manifest-path {{workspace_indicator}} --all-targets --quiet -- -D warnings"
+        }
+        fix {
+            command = "cargo clippy --manifest-path {{workspace_indicator}} --all-targets --fix --allow-dirty --allow-staged --quiet -- -D warnings"
+        }
+    }
+    ["cargo-test"] = new {
+        glob = "**/*.rs"
+        depends = List("cargo-clippy")
+        check = "cargo test --locked --quiet"
+    }
+    ["cargo-deny"] = (Builtins.cargo_deny) {
+        depends = List("cargo-test")
+    }
+    ["trufflehog"] = new {
+        check = "trufflehog git file://. --since-commit origin/master --no-update --fail"
+    }
+}
+
+hooks {
+    ["pre-commit"] = new {
+        fix = true
+        stash = "patch-file"
+        steps {
+            ...pre_commit_steps
+        }
+    }
+    ["pre-push"] = new {
+        steps {
+            ...pre_push_steps
+        }
+    }
+    ["check"] = new {
+        steps {
+            ...pre_commit_steps
+            ...pre_push_steps
+        }
+    }
+    ["fix"] = new {
+        fix = true
+        steps {
+            ...pre_commit_steps
+        }
+    }
+}
