@@ -1,0 +1,72 @@
+[tools]
+rust = "1.98.1"
+cmake = "latest"          # required to build aws-lc-sys (rustls backend)
+hk = "latest"
+pkl = "latest"            # hk.pkl config format
+rumdl = "latest"
+typos = "latest"
+trufflehog = "latest"
+zizmor = "latest"
+uv = "latest"             # runs semgrep via uvx in CI
+"aqua:EmbarkStudios/cargo-deny" = "latest"
+"aqua:caarlos0/svu" = "latest"   # semver from Conventional Commits (release job in ci.yml)
+
+[settings]
+# Pin exact versions + per-platform checksums in mise.lock for reproducible,
+# integrity-checked installs across dev + CI. Generated multi-platform via
+# `mise lock --platform macos-arm64,linux-x64`; commit mise.lock.
+lockfile = true
+
+[tasks.setup]
+description = "Install pinned tools and register hk git hooks"
+run = [
+    "mise install",
+    "hk install",
+]
+
+[tasks.build]
+description = "Build release binary (macOS: ad-hoc codesign)"
+run = '''
+cargo build --release
+if [ "$(uname -s)" = "Darwin" ]; then codesign -s - --force target/release/cibars; fi
+'''
+
+[tasks.run]
+description = "Run cibars against the dev pipeline"
+run = "cargo run -- --aws-profile pixxis-dev --region eu-west-1 --github-repo glnds/attracr"
+
+[tasks.test]
+description = "Run test suite"
+run = "cargo test --locked"
+
+[tasks.lint]
+description = "Lint with clippy (deny warnings)"
+run = "cargo clippy --locked --all-targets --quiet -- -D warnings"
+
+[tasks.fmt]
+description = "Format code"
+run = "cargo fmt"
+
+[tasks.check]
+description = "fmt check + clippy + tests (CI parity)"
+run = [
+    "cargo fmt --check",
+    "cargo clippy --locked --all-targets --quiet -- -D warnings",
+    "cargo test --locked",
+]
+
+[tasks.audit]
+description = "Advisory, license and dependency-source checks (cargo-deny)"
+run = "cargo-deny --locked --workspace check"
+
+[tasks.install]
+description = "Build release binary and install it to CARGO_HOME/bin"
+depends = ["build"]
+run = '''
+cargo install --path . --locked --force
+if [ "$(uname -s)" = "Darwin" ]; then codesign -s - --force "$(command -v cibars)"; fi
+'''
+
+[tasks.version]
+description = "Preview the next release version from Conventional Commits (svu)"
+run = "svu next"
