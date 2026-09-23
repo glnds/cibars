@@ -4,33 +4,98 @@ on:
   push:
     branches: [master]
   pull_request:
+    branches: [master]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
   check:
-    name: ${{ matrix.name }}
+    name: Check
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - name: Build
-            command: cargo build --locked
-          - name: Test
-            command: cargo test --locked
-          - name: Clippy
-            command: cargo clippy --locked -- -D warnings
-          - name: Format
-            command: cargo fmt --check
+    timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
-          components: clippy, rustfmt
-      - uses: Swatinem/rust-cache@v2
-      - name: Install system deps
-        if: matrix.name != 'Format'
-        run: sudo apt-get update && sudo apt-get install -y cmake
-      - run: ${{ matrix.command }}
+          persist-credentials: false
+
+      # Installs the exact rust/cmake versions pinned in mise.toml/mise.lock,
+      # so this job runs the same toolchain as `mise run check` locally.
+      - name: Install tools (mise)
+        uses: jdx/mise-action@eb2f5cb41b0a8175dad2f797e3daca6fe7795a19 # v2.4.2
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2 trufflehog:ignore
+
+      # fmt --check + clippy -D warnings + test — identical to the hk
+      # pre-push hook and `mise run check` locally.
+      - run: mise run check
+
+  # Push to master only: cut a semver tag + GitHub Release from Conventional
+  # Commits. Does not touch Cargo.toml's version field — the two can diverge.
+  release:
+    name: Release
+    needs: [check]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write # push tag + create release; nothing else
+    concurrency:
+      group: release-${{ github.ref }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
+          fetch-depth: 0 # full history for the Conventional Commit scan
+          fetch-tags: true # svu needs existing tags to compute the bump
+
+      - name: Install svu (mise)
+        uses: jdx/mise-action@eb2f5cb41b0a8175dad2f797e3daca6fe7795a19 # v2.4.2
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          cache: false
+          install_args: aqua:caarlos0/svu
+
+      - name: Compute next version
+        id: svu
+        run: |
+          CURRENT="$(svu current)"
+          NEXT="$(svu next)"
+          echo "current=$CURRENT" >> "$GITHUB_OUTPUT"
+          echo "next=$NEXT"       >> "$GITHUB_OUTPUT"
+          if [ "$NEXT" = "$CURRENT" ]; then
+            echo "release=false" >> "$GITHUB_OUTPUT"
+            echo "No releasable commits since $CURRENT — skipping." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "release=true" >> "$GITHUB_OUTPUT"
+            echo "Releasing $CURRENT -> $NEXT" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Create and push annotated tag
+        if: steps.svu.outputs.release == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NEXT: ${{ steps.svu.outputs.next }}
+          REPO: ${{ github.repository }}
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "$NEXT" -m "Release $NEXT"
+          git push "https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git" "refs/tags/${NEXT}"
+
+      - name: Create GitHub Release
+        if: steps.svu.outputs.release == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NEXT: ${{ steps.svu.outputs.next }}
+        run: gh release create "$NEXT" --verify-tag --generate-notes --title "$NEXT"

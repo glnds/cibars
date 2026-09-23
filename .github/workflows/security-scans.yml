@@ -1,0 +1,97 @@
+name: Security Scans
+
+on:
+  pull_request:
+    branches: [master]
+  push:
+    branches: [master]
+  workflow_dispatch:
+  schedule:
+    - cron: '0 6 * * 1' # Monday 06:00 UTC — catch newly disclosed CVEs
+
+permissions:
+  contents: read
+
+# Scanner version pinned so a semgrep release can't change the gate under us;
+# the customManagers entry in renovate.json bumps it from pypi. Tools that
+# mise manages (cargo-deny, trufflehog) are pinned by mise.lock instead.
+env:
+  # renovate: datasource=pypi depName=semgrep
+  SEMGREP_VERSION: "1.177.0"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  scan:
+    name: Security scans
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
+          # Full history: TruffleHog below scans every commit, not just the
+          # tip, so a secret pushed with `--no-verify` (bypassing the hk
+          # hooks, which are otherwise the only secret scan) is still caught.
+          fetch-depth: 0
+
+      - name: Install tools (mise)
+        uses: jdx/mise-action@eb2f5cb41b0a8175dad2f797e3daca6fe7795a19 # v2.4.2
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2 trufflehog:ignore
+
+      - name: Run Semgrep
+        env:
+          SEMGREP_SEND_METRICS: "off"
+        run: |
+          set +e
+          uvx "semgrep==${SEMGREP_VERSION}" scan \
+            --config p/rust \
+            --config p/security-audit \
+            --config p/secrets \
+            --exclude '**/Cargo.lock' \
+            --severity ERROR \
+            --sarif --output semgrep.sarif \
+            --error
+          echo "semgrep_exit=$?" >> "$GITHUB_ENV"
+        continue-on-error: true
+
+      - name: Gate on Semgrep exit code
+        if: always()
+        run: |
+          set -euo pipefail
+          val="${semgrep_exit:-MISSING}"
+          echo "semgrep_exit=$val"
+          if [ "$val" = "MISSING" ]; then
+            echo "::error::semgrep_exit was not recorded (scan step itself errored)"
+            exit 1
+          elif [ "$val" -ne 0 ]; then
+            echo "::error::semgrep_exit=$val — SAST findings present"
+            exit 1
+          fi
+
+      - name: Upload Semgrep SARIF artefact
+        if: always()
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        with:
+          name: sast-results
+          path: semgrep.sarif
+          retention-days: 90
+
+      # Advisories (RustSec), license policy and duplicate/banned deps —
+      # see deny.toml for the allow-list and the one documented ignore.
+      - name: Run cargo-deny
+        run: cargo-deny --locked --workspace check
+
+      - name: Run TruffleHog (full git history)
+        # Same binary + flags as the hk pre-push hook (mise-pinned), so a
+        # finding here reproduces locally with:
+        #   trufflehog git file://. --no-update --fail
+        # --fail exits non-zero on any result, verified or not; suppress a
+        # known false positive with an inline `# trufflehog:ignore` comment.
+        run: trufflehog git file://. --no-update --fail

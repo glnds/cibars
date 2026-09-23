@@ -1,0 +1,44 @@
+name: zizmor
+
+on:
+  push:
+    branches: [master]
+    paths: ['.github/**']
+  pull_request:
+    paths: ['.github/**']
+
+permissions: {}
+
+jobs:
+  zizmor:
+    name: Audit GitHub Actions workflows
+    runs-on: ubuntu-latest
+    permissions:
+      security-events: write
+      contents: read
+      actions: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
+
+      - name: Install tools (mise)
+        uses: jdx/mise-action@eb2f5cb41b0a8175dad2f797e3daca6fe7795a19 # v2.4.2
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Run zizmor
+        run: zizmor --format=sarif --min-severity=medium . > results.sarif
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload SARIF to GitHub code scanning
+        # Best-effort: GitHub Code Scanning is gated by plan/repo settings.
+        # zizmor's exit code already fails the job on findings; SARIF upload
+        # is purely for Security-tab visibility, not the gate.
+        continue-on-error: true
+        uses: github/codeql-action/upload-sarif@9e0d7b8d25671d64c341c19c0152d693099fb5ba # v4.35.5
+        with:
+          sarif_file: results.sarif
+          category: zizmor
