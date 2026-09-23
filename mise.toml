@@ -1,5 +1,5 @@
 [tools]
-rust = "1.98.1"
+rust = { version = "1.98.1", profile = "minimal", components = "rustfmt,clippy" }   # explicit: CI runners default rustup to minimal
 cmake = "latest"          # required to build aws-lc-sys (rustls backend)
 hk = "latest"
 pkl = "latest"            # hk.pkl config format
