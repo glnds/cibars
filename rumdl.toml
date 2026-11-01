@@ -6,5 +6,5 @@ code_blocks = false
 tables = false
 
 [MD026]
-# CLAUDE.md uses "!!! ... !!!" headings deliberately, for emphasis.
+# AGENTS.md uses "!!! ... !!!" headings deliberately, for emphasis.
 punctuation = ""
