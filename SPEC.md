@@ -11,21 +11,23 @@ or tmux pane.
 
 ## 2. Startup Parameters
 
-The application accepts three required arguments at startup:
+`--sources` (or `sources` in `config.toml`) selects what to monitor: `github`, `aws`, or both
+(default when absent). Each enabled source requires its parameters:
 
-| Parameter | Flag | Format | Example |
-| --- | --- | --- | --- |
-| AWS Profile | `--aws-profile` | Named profile string | `staging` |
-| AWS Region | `--region` | AWS region identifier | `eu-west-1` |
-| GitHub Repository | `--github-repo` | `owner/repo` | `acme/backend` |
+| Parameter | Flag | Format | Example | Required by |
+| --- | --- | --- | --- | --- |
+| Sources | `--sources` | comma-separated `github`, `aws` | `github,aws` | (optional) |
+| AWS Profile | `--aws-profile` | Named profile string | `staging` | `aws` |
+| AWS Region | `--region` | AWS region identifier | `eu-west-1` | `aws` |
+| GitHub Repository | `--github-repo` | `owner/repo` | `acme/backend` | `github` |
 
-On startup, the application validates all three parameters before
-rendering the UI. If any is missing or invalid, the application
-exits with a clear error message and a non-zero exit code.
+On startup, the application validates the parameters of every enabled source before rendering the
+UI. If any is missing or invalid, or `sources` is empty or names an unknown source, the
+application exits with a clear error message and a non-zero exit code.
 
-The GitHub personal access token is read from the `GITHUB_TOKEN`
-environment variable. If absent, the application exits with an
-error on startup.
+With `github` enabled, the GitHub token is read from the `GITHUB_TOKEN` environment variable,
+falling back to `gh auth token`. If neither yields a token, the application exits with an error on
+startup. With `github` disabled, no token is needed.
 
 ---
 
