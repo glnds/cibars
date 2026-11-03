@@ -243,8 +243,40 @@ fn write_pid_file(pid_path: &std::path::Path) -> Result<()> {
     Ok(())
 }
 
+/// Liveness probe via `kill -0` (no libc dep). True if the process exists.
+fn pid_alive(pid: u32) -> bool {
+    std::process::Command::new("kill")
+        .args(["-0", &pid.to_string()])
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success())
+}
+
+/// Write our PID file unless another live cibars already owns it.
+/// The pre-push hook signals the single PID in this file, so a second
+/// instance would silently steal (and on exit delete) the first one's hook.
+fn acquire_pid_file(pid_path: &std::path::Path) -> Result<()> {
+    let own = std::process::id();
+    if let Some(pid) = std::fs::read_to_string(pid_path)
+        .ok()
+        .and_then(|s| s.trim().parse::<u32>().ok())
+    {
+        if pid != own && pid_alive(pid) {
+            anyhow::bail!(
+                "cibars already running for this repo (pid {pid}); PID file {}",
+                pid_path.display()
+            );
+        }
+    }
+    write_pid_file(pid_path)
+}
+
+/// Remove the PID file only if it still holds our PID.
 fn cleanup_pid_file(pid_path: &std::path::Path) {
-    let _ = std::fs::remove_file(pid_path);
+    let own = std::process::id().to_string();
+    if std::fs::read_to_string(pid_path).is_ok_and(|s| s.trim() == own) {
+        let _ = std::fs::remove_file(pid_path);
+    }
 }
 
 fn handle_poll_interrupt(
@@ -287,7 +319,7 @@ fn main() -> Result<()> {
     let cwd = std::env::current_dir().context("cannot read cwd")?;
     let (config, token) = Config::load(&cwd)?;
     let pid_path = config::pid_file_for(&cwd)?;
-    write_pid_file(&pid_path)?;
+    acquire_pid_file(&pid_path)?;
     tracing::info!(pid = std::process::id(), "starting cibars");
     let mut app_state = App::new();
     config::ensure_delegation(&cwd);
@@ -449,6 +481,73 @@ mod tests {
         );
     }
 
+    #[test]
+    fn acquire_pid_file_refuses_second_live_instance() {
+        let dir = tempfile::tempdir().unwrap();
+        let pid_path = dir.path().join("cibars.pid");
+        let mut other = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .unwrap();
+        std::fs::write(&pid_path, other.id().to_string()).unwrap();
+        let err = acquire_pid_file(&pid_path).unwrap_err().to_string();
+        other.kill().unwrap();
+        other.wait().unwrap();
+        assert!(err.contains("already running"), "got: {err}");
+        assert_eq!(
+            std::fs::read_to_string(&pid_path).unwrap(),
+            other.id().to_string(),
+            "must not clobber the live instance's PID file"
+        );
+    }
+
+    #[test]
+    fn acquire_pid_file_replaces_stale_pid() {
+        let dir = tempfile::tempdir().unwrap();
+        let pid_path = dir.path().join("cibars.pid");
+        let mut dead = std::process::Command::new("true").spawn().unwrap();
+        dead.wait().unwrap();
+        std::fs::write(&pid_path, dead.id().to_string()).unwrap();
+        acquire_pid_file(&pid_path).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&pid_path).unwrap(),
+            std::process::id().to_string()
+        );
+    }
+
+    #[test]
+    fn acquire_pid_file_replaces_garbage() {
+        let dir = tempfile::tempdir().unwrap();
+        let pid_path = dir.path().join("cibars.pid");
+        std::fs::write(&pid_path, "not-a-pid").unwrap();
+        acquire_pid_file(&pid_path).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&pid_path).unwrap(),
+            std::process::id().to_string()
+        );
+    }
+
+    #[test]
+    fn cleanup_pid_file_leaves_foreign_pid() {
+        let dir = tempfile::tempdir().unwrap();
+        let pid_path = dir.path().join("cibars.pid");
+        std::fs::write(&pid_path, "1").unwrap();
+        cleanup_pid_file(&pid_path);
+        assert!(
+            pid_path.exists(),
+            "must not delete another instance's PID file"
+        );
+    }
+
+    #[test]
+    fn cleanup_pid_file_removes_own_pid() {
+        let dir = tempfile::tempdir().unwrap();
+        let pid_path = dir.path().join("cibars.pid");
+        acquire_pid_file(&pid_path).unwrap();
+        cleanup_pid_file(&pid_path);
+        assert!(!pid_path.exists());
+    }
+
     /// E2E: simulates the pre-push hook shell command sending SIGUSR1 via PID file,
     /// then verifies the full chain: signal received → scheduler boosts → Polling{Grace}
     /// state + push_signal_at set.
@@ -547,7 +646,7 @@ mod tests {
     fn cleanup_pid_file_removes_file() {
         let dir = tempfile::tempdir().unwrap();
         let pid_path = dir.path().join("cibars.pid");
-        std::fs::write(&pid_path, "12345").unwrap();
+        std::fs::write(&pid_path, std::process::id().to_string()).unwrap();
         assert!(pid_path.exists());
         cleanup_pid_file(&pid_path);
         assert!(!pid_path.exists());
