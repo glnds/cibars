@@ -25,7 +25,7 @@
     {
       "automerge": true,
       "internalChecksFilter": "strict",
-      "matchUpdateTypes": ["minor", "patch", "digest"],
+      "matchUpdateTypes": ["major", "minor", "patch", "digest"],
       "minimumReleaseAge": "3 days"
     },
     {
