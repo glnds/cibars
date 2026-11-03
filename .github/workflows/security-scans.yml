@@ -17,7 +17,7 @@ permissions:
 # mise manages (cargo-deny, trufflehog) are pinned by mise.lock instead.
 env:
   # renovate: datasource=pypi depName=semgrep
-  SEMGREP_VERSION: "1.177.0"
+  SEMGREP_VERSION: "1.183.0"
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
@@ -30,7 +30,7 @@ jobs:
     timeout-minutes: 15
     steps:
       - name: Checkout
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
           # Full history: TruffleHog below scans every commit, not just the
@@ -39,11 +39,11 @@ jobs:
           fetch-depth: 0
 
       - name: Install tools (mise)
-        uses: jdx/mise-action@eb2f5cb41b0a8175dad2f797e3daca6fe7795a19 # v2.4.2
+        uses: jdx/mise-action@f5be966e4a917d54244728e6a5fdcd1d93a35e6c # v5.2.6
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
 
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2 trufflehog:ignore
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3 trufflehog:ignore
 
       - name: Run Semgrep
         env:
@@ -77,7 +77,7 @@ jobs:
 
       - name: Upload Semgrep SARIF artefact
         if: always()
-        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: sast-results
           path: semgrep.sarif

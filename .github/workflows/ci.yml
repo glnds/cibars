@@ -22,18 +22,18 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
       # Installs the exact rust/cmake versions pinned in mise.toml/mise.lock,
       # so this job runs the same toolchain as `mise run check` locally.
       - name: Install tools (mise)
-        uses: jdx/mise-action@eb2f5cb41b0a8175dad2f797e3daca6fe7795a19 # v2.4.2
+        uses: jdx/mise-action@f5be966e4a917d54244728e6a5fdcd1d93a35e6c # v5.2.6
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
 
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2 trufflehog:ignore
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3 trufflehog:ignore
 
       # fmt --check + clippy -D warnings + test — identical to the hk
       # pre-push hook and `mise run check` locally.
@@ -53,14 +53,14 @@ jobs:
       group: release-${{ github.ref }}
       cancel-in-progress: false
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
           fetch-depth: 0 # full history for the Conventional Commit scan
           fetch-tags: true # svu needs existing tags to compute the bump
 
       - name: Install svu (mise)
-        uses: jdx/mise-action@eb2f5cb41b0a8175dad2f797e3daca6fe7795a19 # v2.4.2
+        uses: jdx/mise-action@f5be966e4a917d54244728e6a5fdcd1d93a35e6c # v5.2.6
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           cache: false
