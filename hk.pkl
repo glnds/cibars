@@ -34,13 +34,15 @@ local pre_push_steps = new Mapping<String, Step> {
             command = "cargo clippy --manifest-path {{workspace_indicator}} --all-targets --fix --allow-dirty --allow-staged --quiet -- -D warnings"
         }
     }
-    ["cargo-test"] = new {
+    // Runs the test suite under cargo-llvm-cov and enforces the line-coverage
+    // floor — same command as `mise run coverage` and the CI coverage step.
+    ["cargo-coverage"] = new {
         glob = cargo_glob
         depends = List("cargo-clippy")
-        check = "cargo test --locked --quiet"
+        check = "mise run coverage"
     }
     ["cargo-deny"] = (Builtins.cargo_deny) {
-        depends = List("cargo-test")
+        depends = List("cargo-coverage")
     }
     ["trufflehog"] = new {
         check = "trufflehog git file://. --since-commit origin/master --no-update --fail"

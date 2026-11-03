@@ -1,5 +1,5 @@
 [tools]
-rust = { version = "1.99.1", profile = "minimal", components = "rustfmt,clippy" }   # explicit: CI runners default rustup to minimal
+rust = { version = "1.99.1", profile = "minimal", components = "rustfmt,clippy,llvm-tools" }   # explicit: CI runners default rustup to minimal
 cmake = "latest"          # required to build aws-lc-sys (rustls backend)
 hk = "latest"
 pkl = "latest"            # hk.pkl config format
@@ -9,6 +9,7 @@ trufflehog = "latest"
 zizmor = "latest"
 uv = "latest"             # runs semgrep via uvx in CI
 "aqua:EmbarkStudios/cargo-deny" = "latest"
+"aqua:taiki-e/cargo-llvm-cov" = "latest"   # coverage floor (mise run coverage)
 "aqua:caarlos0/svu" = "latest"   # semver from Conventional Commits (release job in ci.yml)
 
 [settings]
@@ -38,6 +39,12 @@ run = "cargo run -- --aws-profile pixxis-dev --region eu-west-1 --github-repo gl
 [tasks.test]
 description = "Run test suite"
 run = "cargo test --locked"
+
+[tasks.coverage]
+description = "Tests under coverage; fail below line-coverage floor"
+# Floor sits ~2 pts under measured (90.3% lines, 2026-11-03). Raise it as
+# coverage grows; never lower it to get a change through.
+run = "cargo llvm-cov --locked --summary-only --fail-under-lines 88"
 
 [tasks.lint]
 description = "Lint with clippy (deny warnings)"

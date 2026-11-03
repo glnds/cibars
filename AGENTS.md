@@ -13,10 +13,10 @@
 ## Tooling
 
 **mise pins every tool version** (rust, cmake, hk, rumdl, typos, trufflehog,
-zizmor, cargo-deny, svu) in `mise.toml`/`mise.lock` — never install these ad
+zizmor, cargo-deny, cargo-llvm-cov, svu) in `mise.toml`/`mise.lock` — never install these ad
 hoc. `mise run setup` installs them and registers the `hk` git hooks
 (pre-commit: whitespace/EOF, typos, rumdl, trufflehog; pre-push: `cargo fmt
---check`, clippy `-D warnings`, `cargo test`, `cargo-deny`). CI
+--check`, clippy `-D warnings`, `mise run coverage`, `cargo-deny`). CI
 (`.github/workflows/ci.yml`) runs the identical toolchain via
 `jdx/mise-action` and `mise run check`.
 
@@ -29,6 +29,7 @@ mise run test           # cargo test --locked
 mise run lint            # cargo clippy --locked --all-targets -- -D warnings
 mise run fmt              # cargo fmt
 mise run check             # fmt --check + clippy + test (CI parity)
+mise run coverage          # tests under cargo-llvm-cov, line floor 88%
 mise run audit               # cargo-deny: advisories, licenses, bans, sources
 mise run install               # build + `cargo install --path .`
 mise run run                     # cargo run against the dev pipeline

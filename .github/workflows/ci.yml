@@ -39,6 +39,9 @@ jobs:
       # pre-push hook and `mise run check` locally.
       - run: mise run check
 
+      # Line-coverage floor (cargo-llvm-cov) — same task as hk pre-push.
+      - run: mise run coverage
+
   # Push to master only: cut a semver tag + GitHub Release from Conventional
   # Commits. Does not touch Cargo.toml's version field — the two can diverge.
   release:
