@@ -69,13 +69,7 @@ feature-depth = 1
 #db-urls = ["https://github.com/rustsec/advisory-db"]
 # A list of advisory IDs to ignore. Note that ignored advisories will still
 # output a note when they are encountered.
-ignore = [
-    # unsafe-libyaml (via serde_yaml, deprecated). Unmaintained, not a known
-    # vulnerability. cibars only parses workflow YAML from the user's own
-    # GitHub repo. Proper fix: swap serde_yaml for a maintained safe-Rust
-    # parser (e.g. serde-saphyr) — new dependency, pending approval.
-    { id = "RUSTSEC-2024-0449", reason = "unmaintained only; parses trusted workflow YAML; swap pending" },
-]
+ignore = []
 # If this is true, then cargo deny will use the git executable to fetch advisory database.
 # If this is false, then it uses a built-in git library.
 # Setting this to true can be helpful if you have special authentication requirements that cargo-deny does not support.

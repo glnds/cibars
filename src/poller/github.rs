@@ -278,7 +278,10 @@ pub fn extract_s3_paths(yaml_content: &str) -> Vec<S3Upload> {
 
 /// Parse a GH workflow YAML and extract its name + S3 upload targets.
 pub fn parse_workflow_yaml(filename: &str, content: &str) -> Option<WorkflowFile> {
-    let yaml: serde_yaml::Value = serde_yaml::from_str(content).ok()?;
+    // serde-saphyr: maintained safe-Rust YAML parser (replaces deprecated
+    // serde_yaml). Parsed into serde_json::Value (preserve_order keeps jobs
+    // in file order).
+    let yaml: serde_json::Value = serde_saphyr::from_str(content).ok()?;
     let name = yaml
         .get("name")
         .and_then(|n| n.as_str())
@@ -296,18 +299,15 @@ pub fn parse_workflow_yaml(filename: &str, content: &str) -> Option<WorkflowFile
 
 /// Extract per-job S3 upload info from a parsed YAML workflow.
 /// Traverses `yaml["jobs"]` to extract each job's S3 uploads and `needs:` deps.
-pub fn extract_jobs_s3_info(yaml: &serde_yaml::Value) -> Vec<super::JobS3Info> {
-    let jobs_map = match yaml.get("jobs").and_then(|j| j.as_mapping()) {
+pub fn extract_jobs_s3_info(yaml: &serde_json::Value) -> Vec<super::JobS3Info> {
+    let jobs_map = match yaml.get("jobs").and_then(|j| j.as_object()) {
         Some(m) => m,
         None => return Vec::new(),
     };
 
     let mut result = Vec::new();
     for (key, value) in jobs_map {
-        let job_id = match key.as_str() {
-            Some(s) => s.to_string(),
-            None => continue,
-        };
+        let job_id = key.clone();
 
         let job_name = value
             .get("name")
@@ -317,8 +317,8 @@ pub fn extract_jobs_s3_info(yaml: &serde_yaml::Value) -> Vec<super::JobS3Info> {
 
         // Extract `needs:` — can be a string or a sequence
         let needs = match value.get("needs") {
-            Some(serde_yaml::Value::String(s)) => vec![s.clone()],
-            Some(serde_yaml::Value::Sequence(seq)) => seq
+            Some(serde_json::Value::String(s)) => vec![s.clone()],
+            Some(serde_json::Value::Array(seq)) => seq
                 .iter()
                 .filter_map(|v| v.as_str().map(String::from))
                 .collect(),
@@ -327,7 +327,7 @@ pub fn extract_jobs_s3_info(yaml: &serde_yaml::Value) -> Vec<super::JobS3Info> {
 
         // Extract S3 paths from all `run:` steps in this job
         let mut s3_uploads = Vec::new();
-        if let Some(steps) = value.get("steps").and_then(|s| s.as_sequence()) {
+        if let Some(steps) = value.get("steps").and_then(|s| s.as_array()) {
             for step in steps {
                 if let Some(run_cmd) = step.get("run").and_then(|r| r.as_str()) {
                     for upload in extract_s3_paths(run_cmd) {
@@ -693,6 +693,26 @@ jobs:
     }
 
     #[test]
+    fn parse_yaml_tolerates_non_string_keys() {
+        let yaml = r#"
+name: Matrix
+on: push
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      1: one
+      true: yes
+      3.11: py
+    steps:
+      - run: aws s3 cp a.zip s3://bucket/a.zip
+"#;
+        let wf = parse_workflow_yaml("m.yml", yaml).unwrap();
+        assert_eq!(wf.name, "Matrix");
+        assert_eq!(wf.jobs.len(), 1);
+    }
+
+    #[test]
     fn parse_invalid_yaml_returns_none() {
         let result = parse_workflow_yaml("bad.yml", "\t\t---\n\t bad:\n\t\t\t[[[unterminated");
         assert!(result.is_none());
@@ -947,7 +967,7 @@ jobs:
     steps:
       - run: aws s3 cp frontend.zip s3://bucket/frontend/artifacts.zip
 "#;
-        let parsed: serde_yaml::Value = serde_yaml::from_str(yaml).unwrap();
+        let parsed: serde_json::Value = serde_saphyr::from_str(yaml).unwrap();
         let jobs = extract_jobs_s3_info(&parsed);
 
         assert_eq!(jobs.len(), 4);
@@ -993,11 +1013,55 @@ jobs:
     steps:
       - run: echo deploying
 "#;
-        let parsed: serde_yaml::Value = serde_yaml::from_str(yaml).unwrap();
+        let parsed: serde_json::Value = serde_saphyr::from_str(yaml).unwrap();
         let jobs = extract_jobs_s3_info(&parsed);
 
         let deploy = jobs.iter().find(|j| j.job_id == "deploy").unwrap();
         assert_eq!(deploy.needs, vec!["build"]);
+    }
+
+    #[test]
+    fn extract_jobs_s3_info_preserves_file_order() {
+        let yaml = r#"
+name: CI
+on: push
+jobs:
+  zeta:
+    runs-on: ubuntu-latest
+  alpha:
+    runs-on: ubuntu-latest
+  mid:
+    runs-on: ubuntu-latest
+"#;
+        let parsed: serde_json::Value = serde_saphyr::from_str(yaml).unwrap();
+        let ids: Vec<_> = extract_jobs_s3_info(&parsed)
+            .into_iter()
+            .map(|j| j.job_id)
+            .collect();
+        assert_eq!(ids, vec!["zeta", "alpha", "mid"]);
+    }
+
+    #[test]
+    fn parse_yaml_resolves_anchors_and_on_mapping() {
+        let yaml = r#"
+name: Deploy
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:
+x-upload: &upload
+  run: aws s3 cp app.zip s3://bucket/app/app.zip
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - *upload
+"#;
+        let wf = parse_workflow_yaml("deploy.yml", yaml).unwrap();
+        assert_eq!(wf.name, "Deploy");
+        let build = wf.jobs.iter().find(|j| j.job_id == "build").unwrap();
+        assert_eq!(build.s3_uploads.len(), 1);
+        assert_eq!(build.s3_uploads[0].key, "app/app.zip");
     }
 
     #[test]
@@ -1006,7 +1070,7 @@ jobs:
 name: Empty
 on: push
 "#;
-        let parsed: serde_yaml::Value = serde_yaml::from_str(yaml).unwrap();
+        let parsed: serde_json::Value = serde_saphyr::from_str(yaml).unwrap();
         let jobs = extract_jobs_s3_info(&parsed);
         assert!(jobs.is_empty());
     }
@@ -1022,7 +1086,7 @@ jobs:
     steps:
       - run: cargo clippy
 "#;
-        let parsed: serde_yaml::Value = serde_yaml::from_str(yaml).unwrap();
+        let parsed: serde_json::Value = serde_saphyr::from_str(yaml).unwrap();
         let jobs = extract_jobs_s3_info(&parsed);
 
         let lint = jobs.iter().find(|j| j.job_id == "lint").unwrap();
@@ -1041,7 +1105,7 @@ jobs:
     steps:
       - run: aws s3 cp out.zip s3://bucket-${{ vars.ACCOUNT }}/app/out.zip
 "#;
-        let parsed: serde_yaml::Value = serde_yaml::from_str(yaml).unwrap();
+        let parsed: serde_json::Value = serde_saphyr::from_str(yaml).unwrap();
         let jobs = extract_jobs_s3_info(&parsed);
 
         let build = jobs.iter().find(|j| j.job_id == "build").unwrap();
