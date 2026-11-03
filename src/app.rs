@@ -34,6 +34,8 @@ pub struct App {
     pub actions_enabled: bool,
     /// AWS CodePipeline source configured.
     pub pipelines_enabled: bool,
+    /// When the startup equalizer intro began (after first load).
+    pub intro_started: Option<Instant>,
     /// Current poll state machine state, for UI display.
     pub poll_state: PollState,
     /// Git pre-push hook status for boost integration.
@@ -73,6 +75,13 @@ impl App {
         }
     }
 
+    /// Start the startup intro once, as soon as initial loading is done.
+    pub fn maybe_start_intro(&mut self, now: Instant) {
+        if self.intro_started.is_none() && !self.loading_actions && !self.loading_pipelines {
+            self.intro_started = Some(now);
+        }
+    }
+
     /// Linkage (GH Actions → CodePipeline) needs both sources.
     pub fn linkage_enabled(&self) -> bool {
         self.actions_enabled && self.pipelines_enabled
@@ -92,6 +101,7 @@ impl App {
             loading_actions: true,
             actions_enabled: true,
             pipelines_enabled: true,
+            intro_started: None,
             poll_state: PollState::Sleep,
             hook_status: HookStatus::NoGitDir,
             has_global_hooks_path: false,
@@ -218,6 +228,28 @@ mod tests {
         assert!(!app.loading_actions);
         assert!(app.loading_pipelines);
         assert!(!app.linkage_enabled());
+    }
+
+    #[test]
+    fn intro_waits_for_loading() {
+        let mut app = App::new();
+        let now = Instant::now();
+        app.maybe_start_intro(now);
+        assert!(app.intro_started.is_none(), "still loading");
+        app.loading_actions = false;
+        app.loading_pipelines = false;
+        app.maybe_start_intro(now);
+        assert_eq!(app.intro_started, Some(now));
+    }
+
+    #[test]
+    fn intro_starts_only_once() {
+        let mut app = App::with_sources(true, false);
+        app.loading_actions = false;
+        let t0 = Instant::now();
+        app.maybe_start_intro(t0);
+        app.maybe_start_intro(t0 + std::time::Duration::from_secs(60));
+        assert_eq!(app.intro_started, Some(t0));
     }
 
     #[test]

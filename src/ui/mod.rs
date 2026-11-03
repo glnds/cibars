@@ -1,5 +1,6 @@
 pub mod bar;
 pub mod header;
+pub mod intro;
 pub mod statusbar;
 pub mod theme;
 
@@ -158,6 +159,15 @@ fn section_height(has_content: bool, expanded: bool, content_rows: usize) -> u16
         3
     } else {
         (2 + content_rows) as u16
+    }
+}
+
+/// Key-poll timeout = frame interval: fast while the intro plays.
+fn event_poll_timeout(intro_playing: bool) -> Duration {
+    if intro_playing {
+        intro::INTRO_FRAME
+    } else {
+        Duration::from_millis(EVENT_POLL_INTERVAL_MS)
     }
 }
 
@@ -389,6 +399,7 @@ fn render_pipeline_centric(
     dim: bool,
 ) {
     let size = frame.area();
+    let intro_elapsed = app.intro_started.map(|t| t.elapsed());
 
     // Compute section heights
     let mut constraints: Vec<Constraint> = vec![Constraint::Length(3)]; // header
@@ -457,7 +468,9 @@ fn render_pipeline_centric(
                             bar.status.color()
                         };
                         frame.render_widget(
-                            BarWidget::new(bar, job_name_width, bar_dim).with_dot(dot_color),
+                            BarWidget::new(bar, job_name_width, bar_dim)
+                                .with_intro(intro::level_for(intro_elapsed, &bar.name))
+                                .with_dot(dot_color),
                             row_areas[ri],
                         );
                     }
@@ -495,7 +508,8 @@ fn render_pipeline_centric(
                                 1,
                             );
                             frame.render_widget(
-                                BarWidget::new(stage, stage_name_width, bar_dim),
+                                BarWidget::new(stage, stage_name_width, bar_dim)
+                                    .with_intro(intro::level_for(intro_elapsed, &stage.name)),
                                 stage_area,
                             );
                         }
@@ -549,7 +563,9 @@ pub fn run_ui(
                 a.terminal_width = size.width;
             }
 
-            let app = app.lock().expect("app mutex poisoned");
+            let mut app = app.lock().expect("app mutex poisoned");
+            app.maybe_start_intro(Instant::now());
+            let intro_elapsed = app.intro_started.map(|t| t.elapsed());
             let dim = !matches!(
                 app.poll_state,
                 PollState::Polling {
@@ -711,7 +727,9 @@ pub fn run_ui(
                             bar.status.color()
                         };
                         frame.render_widget(
-                            BarWidget::new(bar, job_name_width, bar_dim).with_dot(dot_color),
+                            BarWidget::new(bar, job_name_width, bar_dim)
+                                .with_intro(intro::level_for(intro_elapsed, &bar.name))
+                                .with_dot(dot_color),
                             inner_areas[row],
                         );
                         row += 1;
@@ -754,7 +772,8 @@ pub fn run_ui(
                                     1,
                                 );
                                 frame.render_widget(
-                                    BarWidget::new(stage, stage_name_width, bar_dim),
+                                    BarWidget::new(stage, stage_name_width, bar_dim)
+                                        .with_intro(intro::level_for(intro_elapsed, &stage.name)),
                                     stage_area,
                                 );
                                 row += 1;
@@ -791,7 +810,9 @@ pub fn run_ui(
                                 break;
                             }
                             frame.render_widget(
-                                BarWidget::new(bar, job_name_width, true).with_dot(theme::FG_DIM),
+                                BarWidget::new(bar, job_name_width, true)
+                                    .with_intro(intro::level_for(intro_elapsed, &bar.name))
+                                    .with_dot(theme::FG_DIM),
                                 inner_areas[row],
                             );
                             row += 1;
@@ -869,7 +890,8 @@ pub fn run_ui(
                         }
                         let bar_dim = dim || group.gone || group.pending_link;
                         frame.render_widget(
-                            BarWidget::new(bar, stage_name_width, bar_dim),
+                            BarWidget::new(bar, stage_name_width, bar_dim)
+                                .with_intro(intro::level_for(intro_elapsed, &bar.name)),
                             inner_areas[row],
                         );
                         row += 1;
@@ -929,7 +951,11 @@ pub fn run_ui(
             }
         }
 
-        if event::poll(Duration::from_millis(EVENT_POLL_INTERVAL_MS))? {
+        let intro_playing = app
+            .lock()
+            .map(|a| intro::is_active(a.intro_started.map(|t| t.elapsed())))
+            .unwrap_or(false);
+        if event::poll(event_poll_timeout(intro_playing))? {
             if let Event::Key(key) = event::read()? {
                 if key.kind != KeyEventKind::Press {
                     continue;
@@ -1521,6 +1547,15 @@ mod tests {
         let sorted = sorted_workflow_groups(&groups);
         assert_eq!(sorted[0].name, "aaa-running");
         assert_eq!(sorted[1].name, "zzz-idle");
+    }
+
+    #[test]
+    fn event_poll_fast_during_intro() {
+        assert_eq!(event_poll_timeout(true), intro::INTRO_FRAME);
+        assert_eq!(
+            event_poll_timeout(false),
+            Duration::from_millis(EVENT_POLL_INTERVAL_MS)
+        );
     }
 
     #[test]

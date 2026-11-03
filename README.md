@@ -50,6 +50,8 @@ single screen -- no browser required.
 ### UI
 
 - btop-inspired terminal UI with rounded borders and muted color palette
+- Startup intro: once the first poll lands, every bar plays a 3s
+  equalizer (green to yellow to orange VU gradient) before showing real state
 - Color-coded bars: yellow-to-orange gradient (running), green
   (succeeded), red (failed), grey (idle)
 - Braille-character bar fill with gradient animation
