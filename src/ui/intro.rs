@@ -1,6 +1,6 @@
 //! Startup "equalizer" intro: once the first poll lands, the bars play a
 //! spectrum analyzer for a few seconds. Each bar is a frequency band (top =
-//! bass, bottom = treble) driven by a 128 BPM four-on-the-floor beat: kick on
+//! bass, bottom = treble) driven by a 90 BPM four-on-the-floor beat: kick on
 //! every beat, snare on 2 and 4, hi-hat on the off-beats. Fast attack, decay,
 //! and a peak block that holds then falls. Render-only: never touches Bar state.
 
@@ -17,8 +17,8 @@ pub const INTRO_FRAME: Duration = Duration::from_millis(50);
 /// VU low end: btop `cpu_start` green.
 pub const INTRO_LOW: Color = Color::Rgb(80, 240, 149);
 
-/// Seconds per beat at 128 BPM.
-pub const BEAT: f32 = 60.0 / 128.0;
+/// Seconds per beat at 90 BPM (relaxed groove).
+pub const BEAT: f32 = 60.0 / 90.0;
 /// How long a peak block sticks at its max before falling (s).
 pub const PEAK_HOLD: f32 = 0.5;
 /// Peak fall speed after the hold (full height per second).
@@ -287,6 +287,11 @@ mod tests {
     #[test]
     fn vu_color_single_cell() {
         assert_eq!(vu_color(0, 1), INTRO_LOW);
+    }
+
+    #[test]
+    fn tempo_is_90_bpm() {
+        assert!((60.0 / BEAT - 90.0).abs() < 1e-3, "bpm = {}", 60.0 / BEAT);
     }
 
     #[test]
