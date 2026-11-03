@@ -70,11 +70,11 @@ feature-depth = 1
 # A list of advisory IDs to ignore. Note that ignored advisories will still
 # output a note when they are encountered.
 ignore = [
-    # rsa (via octocrab -> jsonwebtoken, GitHub App JWT auth). No patch exists
-    # upstream (RustCrypto/RSA#626/#680/#702 still open). cibars only ever
-    # authenticates via a plain GITHUB_TOKEN / `gh auth token`, never the
-    # GitHub App/JWT flow, so this signing path is not exercised.
-    { id = "RUSTSEC-2023-0071", reason = "no upstream fix; JWT/App-auth path unused by cibars" },
+    # unsafe-libyaml (via serde_yaml, deprecated). Unmaintained, not a known
+    # vulnerability. cibars only parses workflow YAML from the user's own
+    # GitHub repo. Proper fix: swap serde_yaml for a maintained safe-Rust
+    # parser (e.g. serde-saphyr) — new dependency, pending approval.
+    { id = "RUSTSEC-2024-0449", reason = "unmaintained only; parses trusted workflow YAML; swap pending" },
 ]
 # If this is true, then cargo deny will use the git executable to fetch advisory database.
 # If this is false, then it uses a built-in git library.

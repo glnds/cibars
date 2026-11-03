@@ -1,2 +1,2 @@
 [advisories]
-ignore = ["RUSTSEC-2023-0071"]  # rsa timing sidechannel — no patch, transitive via octocrab
+ignore = ["RUSTSEC-2024-0449"]  # unsafe-libyaml unmaintained, via serde_yaml — see deny.toml
