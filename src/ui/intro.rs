@@ -1,16 +1,12 @@
-//! Startup "equalizer" intro: plays for a few seconds the moment cibars
-//! opens, while the first poll loads in the background. Each bar is a frequency band (top =
+//! Startup "equalizer" intro: each bar plays a spectrum analyzer for a few
+//! seconds the moment it first appears (no waiting for all sources). Each bar is a frequency band (top =
 //! bass, bottom = treble) driven by a 90 BPM four-on-the-floor beat: kick on
 //! every beat, snare on 2 and 4, hi-hat on the off-beats. Fast attack, decay,
-//! and a peak block that holds then falls. Render-only: never touches App state.
+//! and a peak block that holds then falls. Render-only: never touches Bar state.
 
 use std::time::Duration;
 
-use ratatui::buffer::Buffer;
-use ratatui::layout::Rect;
-use ratatui::style::{Color, Style};
-use ratatui::text::Span;
-use ratatui::widgets::{Block, BorderType, Widget};
+use ratatui::style::Color;
 
 use super::theme;
 
@@ -88,70 +84,27 @@ pub fn peak_hold(t: f32, level: impl Fn(f32) -> f32) -> f32 {
         .clamp(0.0, 1.0)
 }
 
-/// Intro frame at `elapsed` for a band, or None once the intro is over.
-pub fn intro_frame(elapsed: Duration, band: f32, seed: u64) -> Option<IntroFrame> {
-    if elapsed >= INTRO_DURATION {
+/// Frame for one bar: the beat runs on the shared `global` clock (all bars
+/// in sync); the bar's own window `own` (time since it appeared) decides
+/// when it fades out and hands over to the real bar.
+pub fn bar_frame(global: Duration, own: Duration, band: f32, seed: u64) -> Option<IntroFrame> {
+    if own >= INTRO_DURATION {
         return None;
     }
-    let t = elapsed.as_secs_f32();
-    let left = INTRO_DURATION.as_secs_f32() - t;
+    let left = (INTRO_DURATION - own).as_secs_f32();
     let fade = (left / FADE_OUT).min(1.0);
-    let level = band_level(t, band, seed);
-    let peak = peak_hold(t, |s| band_level(s, band, seed));
+    let t = global.as_secs_f32();
     Some(IntroFrame {
-        level: level * fade,
-        peak: peak * fade,
+        level: band_level(t, band, seed) * fade,
+        peak: peak_hold(t, |s| band_level(s, band, seed)) * fade,
     })
 }
 
-/// Full-body spectrum analyzer: one band per row, bass on top.
-pub struct IntroWidget {
-    /// Time since the intro started.
-    pub elapsed: Duration,
-}
-
-impl Widget for IntroWidget {
-    fn render(self, area: Rect, buf: &mut Buffer) {
-        let block = Block::bordered()
-            .border_type(BorderType::Rounded)
-            .border_style(Style::default().fg(theme::BORDER_HEADER))
-            .title(Span::styled(
-                " loading\u{2026} ",
-                Style::default().fg(theme::BORDER_HEADER),
-            ));
-        let inner = block.inner(area);
-        block.render(area, buf);
-        let (w, rows) = (inner.width as usize, inner.height as usize);
-        if w == 0 || rows == 0 {
-            return;
-        }
-        let span = rows.saturating_sub(1).max(1) as f32;
-        let to_cells = |v: f32| ((v * w as f32).round() as usize).min(w);
-        for r in 0..rows {
-            let Some(f) = intro_frame(self.elapsed, r as f32 / span, r as u64) else {
-                continue;
-            };
-            let lit = to_cells(f.level);
-            let peak = to_cells(f.peak).checked_sub(1);
-            for i in 0..w {
-                let color = if Some(i) == peak {
-                    theme::LAP_MARKER
-                } else if i < lit {
-                    vu_color(i, w)
-                } else {
-                    theme::BAR_EMPTY
-                };
-                if let Some(cell) = buf.cell_mut((inner.x + i as u16, inner.y + r as u16)) {
-                    cell.set_char(theme::BAR_FILLED).set_fg(color);
-                }
-            }
-        }
-    }
-}
-
-/// True while the intro is playing.
-pub fn is_active(elapsed: Option<Duration>) -> bool {
-    elapsed.is_some_and(|e| e < INTRO_DURATION)
+/// Stable seed from a bar name (FNV-1a).
+pub fn name_seed(name: &str) -> u64 {
+    name.bytes().fold(0xcbf2_9ce4_8422_2325, |h, b| {
+        (h ^ b as u64).wrapping_mul(0x0100_0000_01b3)
+    })
 }
 
 /// VU-meter color by cell position: green → yellow → orange. Never red.
@@ -182,6 +135,11 @@ mod tests {
     const BASS: f32 = 0.0;
     const MID: f32 = 0.5;
     const TREBLE: f32 = 1.0;
+
+    /// A bar present from the start: own window = global clock.
+    fn intro_frame(elapsed: Duration, band: f32, seed: u64) -> Option<IntroFrame> {
+        bar_frame(elapsed, elapsed, band, seed)
+    }
 
     fn at(ms: u64) -> Duration {
         Duration::from_millis(ms)
@@ -282,75 +240,30 @@ mod tests {
         assert!(f.level < 0.35, "level decayed: {f:?}");
     }
 
-    fn render_widget(elapsed: Duration, w: u16, h: u16) -> ratatui::buffer::Buffer {
-        let area = ratatui::layout::Rect::new(0, 0, w, h);
-        let mut buf = ratatui::buffer::Buffer::empty(area);
-        ratatui::widgets::Widget::render(IntroWidget { elapsed }, area, &mut buf);
-        buf
-    }
-
-    /// Colors of the bar cells in one inner row (inside the border).
-    fn row_colors(buf: &ratatui::buffer::Buffer, row: u16) -> Vec<Color> {
-        let w = buf.area().width;
-        (1..w - 1).map(|x| buf.cell((x, row)).unwrap().fg).collect()
-    }
-
-    fn lit(colors: &[Color]) -> usize {
-        colors.iter().filter(|&&c| c != theme::BAR_EMPTY).count()
+    #[test]
+    fn bar_frame_ends_after_its_own_window() {
+        assert!(bar_frame(at(5000), INTRO_DURATION, BASS, 1).is_none());
+        assert!(bar_frame(at(5000), at(100), BASS, 1).is_some());
     }
 
     #[test]
-    fn widget_one_band_per_row_bass_on_top() {
-        // right on the first kick: top (bass) row long, bottom (treble) short
-        let buf = render_widget(at(10), 42, 10);
-        let top = lit(&row_colors(&buf, 1));
-        let bottom = lit(&row_colors(&buf, 8));
-        assert!(top > bottom + 10, "top={top} bottom={bottom}");
+    fn bar_frame_follows_global_beat() {
+        // bar that joined late still hits on the shared kick
+        let global = at((BEAT * 1000.0 * 3.0) as u64 + 10);
+        let f = bar_frame(global, at(500), BASS, 1).unwrap();
+        assert_eq!(f.level, band_level(global.as_secs_f32(), BASS, 1));
     }
 
     #[test]
-    fn widget_draws_white_peak_blocks() {
-        let buf = render_widget(at(400), 42, 10);
-        let peaks = (1..9)
-            .filter(|&r| row_colors(&buf, r).contains(&theme::LAP_MARKER))
-            .count();
-        assert!(peaks >= 4, "peaks on {peaks} rows");
+    fn bar_frame_fades_at_end_of_own_window() {
+        let f = bar_frame(at(1000), INTRO_DURATION - at(10), BASS, 1).unwrap();
+        assert!(f.level < 0.05 && f.peak < 0.05, "{f:?}");
     }
 
     #[test]
-    fn widget_bars_use_vu_gradient() {
-        let buf = render_widget(at(10), 42, 10);
-        assert_eq!(row_colors(&buf, 1)[0], INTRO_LOW);
-    }
-
-    #[test]
-    fn widget_has_titled_border() {
-        let buf = render_widget(at(10), 42, 10);
-        let top: String = (0..42)
-            .map(|x| buf.cell((x, 0)).unwrap().symbol().to_string())
-            .collect();
-        assert!(top.contains("loading"), "got: {top}");
-    }
-
-    #[test]
-    fn widget_blank_after_intro() {
-        let buf = render_widget(INTRO_DURATION, 42, 10);
-        let glyph = theme::BAR_FILLED.to_string();
-        let drawn = buf.content().iter().filter(|c| c.symbol() == glyph).count();
-        assert_eq!(drawn, 0, "no bars once the intro is over");
-    }
-
-    #[test]
-    fn widget_tiny_area_does_not_panic() {
-        render_widget(at(10), 2, 2);
-        render_widget(at(10), 42, 3);
-    }
-
-    #[test]
-    fn is_active_only_while_playing() {
-        assert!(!is_active(None));
-        assert!(is_active(Some(at(10))));
-        assert!(!is_active(Some(INTRO_DURATION)));
+    fn seed_from_name_is_stable_and_spread() {
+        assert_eq!(name_seed("build"), name_seed("build"));
+        assert_ne!(name_seed("build"), name_seed("deploy"));
     }
 
     #[test]

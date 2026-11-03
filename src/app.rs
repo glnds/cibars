@@ -34,8 +34,11 @@ pub struct App {
     pub actions_enabled: bool,
     /// AWS CodePipeline source configured.
     pub pipelines_enabled: bool,
-    /// When the startup equalizer intro began (UI start).
+    /// UI start: shared beat clock for the startup equalizer intro.
     pub intro_started: Option<Instant>,
+    /// When each bar first appeared during the startup window; each bar
+    /// plays its own intro from that moment.
+    pub intro_seen: HashMap<String, Instant>,
     /// Current poll state machine state, for UI display.
     pub poll_state: PollState,
     /// Git pre-push hook status for boost integration.
@@ -60,6 +63,9 @@ pub struct App {
     pub watched_prs: HashMap<u64, WatchedPr>,
 }
 
+/// Bars appearing this long after UI start don't get the intro.
+pub const INTRO_WINDOW: Duration = Duration::from_secs(15);
+
 impl App {
     pub const MAX_WARNINGS: usize = 10;
 
@@ -73,6 +79,47 @@ impl App {
             loading_pipelines: aws,
             ..Self::new()
         }
+    }
+
+    /// Bar names in display order: jobs, then pipeline stages.
+    fn bar_names(&self) -> impl Iterator<Item = &str> {
+        self.workflow_groups
+            .iter()
+            .flat_map(|g| g.jobs.iter())
+            .chain(self.pipeline_groups.iter().flat_map(|g| g.stages.iter()))
+            .map(|b| b.name.as_str())
+    }
+
+    /// Record the first-seen time of bars that appear in the startup window.
+    pub fn note_intro_bars(&mut self, now: Instant) {
+        let Some(start) = self.intro_started else {
+            return;
+        };
+        if now.saturating_duration_since(start) >= INTRO_WINDOW {
+            return;
+        }
+        let names: Vec<String> = self.bar_names().map(String::from).collect();
+        for name in names {
+            self.intro_seen.entry(name).or_insert(now);
+        }
+    }
+
+    /// Spectrum band per bar: top row = bass (0), bottom row = treble (1).
+    pub fn intro_bands(&self) -> HashMap<String, f32> {
+        let names: Vec<&str> = self.bar_names().collect();
+        let span = names.len().saturating_sub(1).max(1) as f32;
+        names
+            .into_iter()
+            .enumerate()
+            .map(|(i, n)| (n.to_string(), i as f32 / span))
+            .collect()
+    }
+
+    /// True while any bar is still inside its intro window.
+    pub fn intro_playing(&self, now: Instant) -> bool {
+        self.intro_seen
+            .values()
+            .any(|t| now.saturating_duration_since(*t) < crate::ui::intro::INTRO_DURATION)
     }
 
     /// Linkage (GH Actions → CodePipeline) needs both sources.
@@ -95,6 +142,7 @@ impl App {
             actions_enabled: true,
             pipelines_enabled: true,
             intro_started: None,
+            intro_seen: HashMap::new(),
             poll_state: PollState::Sleep,
             hook_status: HookStatus::NoGitDir,
             has_global_hooks_path: false,
@@ -221,6 +269,84 @@ mod tests {
         assert!(!app.loading_actions);
         assert!(app.loading_pipelines);
         assert!(!app.linkage_enabled());
+    }
+
+    fn app_with_bars(jobs: &[&str], stages: &[&str]) -> App {
+        use crate::model::{Bar, PipelineGroup, WorkflowCategory, WorkflowGroup};
+        let mut app = App::new();
+        app.workflow_groups = vec![WorkflowGroup {
+            name: "CI".into(),
+            jobs: jobs.iter().map(|n| Bar::new(n.to_string())).collect(),
+            gone: false,
+            summary_status: BuildStatus::Succeeded,
+            run_id: None,
+            category: WorkflowCategory::CI,
+            linked_pipeline: None,
+        }];
+        app.pipeline_groups = vec![PipelineGroup {
+            name: "pipe".into(),
+            stages: stages.iter().map(|n| Bar::new(n.to_string())).collect(),
+            gone: false,
+            summary_status: BuildStatus::Succeeded,
+            pending_link: false,
+        }];
+        app
+    }
+
+    #[test]
+    fn intro_bars_start_when_they_appear() {
+        let t0 = Instant::now();
+        let mut app = app_with_bars(&[], &["Source"]);
+        app.intro_started = Some(t0);
+        app.note_intro_bars(t0 + Duration::from_secs(1));
+        // GitHub jobs arrive later and get their own start time
+        app.workflow_groups[0]
+            .jobs
+            .push(crate::model::Bar::new("Tests".into()));
+        app.note_intro_bars(t0 + Duration::from_secs(5));
+        assert_eq!(
+            app.intro_seen.get("Source"),
+            Some(&(t0 + Duration::from_secs(1)))
+        );
+        assert_eq!(
+            app.intro_seen.get("Tests"),
+            Some(&(t0 + Duration::from_secs(5)))
+        );
+    }
+
+    #[test]
+    fn intro_ignores_bars_after_startup_window() {
+        let t0 = Instant::now();
+        let mut app = app_with_bars(&["Late"], &[]);
+        app.intro_started = Some(t0);
+        app.note_intro_bars(t0 + INTRO_WINDOW + Duration::from_secs(1));
+        assert!(app.intro_seen.is_empty());
+    }
+
+    #[test]
+    fn intro_noop_before_ui_start() {
+        let mut app = app_with_bars(&["a"], &[]);
+        app.note_intro_bars(Instant::now());
+        assert!(app.intro_seen.is_empty());
+    }
+
+    #[test]
+    fn intro_bands_follow_display_order() {
+        let app = app_with_bars(&["a", "b"], &["c"]);
+        let bands = app.intro_bands();
+        assert_eq!(bands.get("a"), Some(&0.0));
+        assert_eq!(bands.get("b"), Some(&0.5));
+        assert_eq!(bands.get("c"), Some(&1.0));
+    }
+
+    #[test]
+    fn intro_playing_while_any_bar_in_window() {
+        let t0 = Instant::now();
+        let mut app = app_with_bars(&["a"], &[]);
+        app.intro_started = Some(t0);
+        app.note_intro_bars(t0);
+        assert!(app.intro_playing(t0 + Duration::from_secs(1)));
+        assert!(!app.intro_playing(t0 + Duration::from_secs(10)));
     }
 
     #[test]

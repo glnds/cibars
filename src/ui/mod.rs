@@ -162,28 +162,21 @@ fn section_height(has_content: bool, expanded: bool, content_rows: usize) -> u16
     }
 }
 
-/// Body area between the header and status bar (3 rows each).
-fn intro_body_area(size: Rect) -> Rect {
-    Rect {
-        y: size.y + 3,
-        height: size.height.saturating_sub(6),
-        ..size
-    }
-}
-
-/// While the intro plays, draw the equalizer over the body; header and
-/// status bar (poll spinner) stay live underneath.
-fn render_intro_overlay(frame: &mut ratatui::Frame, intro_elapsed: Option<Duration>) {
-    if intro::is_active(intro_elapsed) {
-        let body = intro_body_area(frame.area());
-        frame.render_widget(ratatui::widgets::Clear, body);
-        frame.render_widget(
-            intro::IntroWidget {
-                elapsed: intro_elapsed.unwrap_or_default(),
-            },
-            body,
-        );
-    }
+/// Intro frame for a bar, if it is still in its startup window.
+fn intro_for(
+    app: &App,
+    bands: &std::collections::HashMap<String, f32>,
+    now: Instant,
+    name: &str,
+) -> Option<intro::IntroFrame> {
+    let start = app.intro_started?;
+    let seen = app.intro_seen.get(name)?;
+    intro::bar_frame(
+        now.saturating_duration_since(start),
+        now.saturating_duration_since(*seen),
+        bands.get(name).copied().unwrap_or(0.5),
+        intro::name_seed(name),
+    )
 }
 
 /// Key-poll timeout = frame interval: fast while the intro plays.
@@ -423,6 +416,8 @@ fn render_pipeline_centric(
     dim: bool,
 ) {
     let size = frame.area();
+    let intro_now = Instant::now();
+    let intro_bands = app.intro_bands();
 
     // Compute section heights
     let mut constraints: Vec<Constraint> = vec![Constraint::Length(3)]; // header
@@ -491,7 +486,9 @@ fn render_pipeline_centric(
                             bar.status.color()
                         };
                         frame.render_widget(
-                            BarWidget::new(bar, job_name_width, bar_dim).with_dot(dot_color),
+                            BarWidget::new(bar, job_name_width, bar_dim)
+                                .with_intro(intro_for(app, &intro_bands, intro_now, &bar.name))
+                                .with_dot(dot_color),
                             row_areas[ri],
                         );
                     }
@@ -529,7 +526,9 @@ fn render_pipeline_centric(
                                 1,
                             );
                             frame.render_widget(
-                                BarWidget::new(stage, stage_name_width, bar_dim),
+                                BarWidget::new(stage, stage_name_width, bar_dim).with_intro(
+                                    intro_for(app, &intro_bands, intro_now, &stage.name),
+                                ),
                                 stage_area,
                             );
                         }
@@ -569,7 +568,7 @@ pub fn run_ui(
     term_flag: &AtomicBool,
 ) -> Result<()> {
     let mut last_animation = Instant::now();
-    // Intro plays immediately; polling loads in the background meanwhile.
+    // Start the intro beat clock; bars dance as soon as they appear.
     if let Ok(mut a) = app.lock() {
         a.intro_started = Some(Instant::now());
     }
@@ -587,8 +586,10 @@ pub fn run_ui(
                 a.terminal_width = size.width;
             }
 
-            let app = app.lock().expect("app mutex poisoned");
-            let intro_elapsed = app.intro_started.map(|t| t.elapsed());
+            let mut app = app.lock().expect("app mutex poisoned");
+            let intro_now = Instant::now();
+            app.note_intro_bars(intro_now);
+            let intro_bands = app.intro_bands();
             let dim = !matches!(
                 app.poll_state,
                 PollState::Polling {
@@ -602,7 +603,6 @@ pub fn run_ui(
                 let sections = build_pipeline_centric_sections(assignment, &app);
                 render_pipeline_centric(frame, &app, &sections, profile, region, repo, dim);
                 drop(app);
-                render_intro_overlay(frame, intro_elapsed);
                 return;
             }
 
@@ -751,7 +751,9 @@ pub fn run_ui(
                             bar.status.color()
                         };
                         frame.render_widget(
-                            BarWidget::new(bar, job_name_width, bar_dim).with_dot(dot_color),
+                            BarWidget::new(bar, job_name_width, bar_dim)
+                                .with_intro(intro_for(&app, &intro_bands, intro_now, &bar.name))
+                                .with_dot(dot_color),
                             inner_areas[row],
                         );
                         row += 1;
@@ -794,7 +796,9 @@ pub fn run_ui(
                                     1,
                                 );
                                 frame.render_widget(
-                                    BarWidget::new(stage, stage_name_width, bar_dim),
+                                    BarWidget::new(stage, stage_name_width, bar_dim).with_intro(
+                                        intro_for(&app, &intro_bands, intro_now, &stage.name),
+                                    ),
                                     stage_area,
                                 );
                                 row += 1;
@@ -831,7 +835,9 @@ pub fn run_ui(
                                 break;
                             }
                             frame.render_widget(
-                                BarWidget::new(bar, job_name_width, true).with_dot(theme::FG_DIM),
+                                BarWidget::new(bar, job_name_width, true)
+                                    .with_intro(intro_for(&app, &intro_bands, intro_now, &bar.name))
+                                    .with_dot(theme::FG_DIM),
                                 inner_areas[row],
                             );
                             row += 1;
@@ -909,7 +915,12 @@ pub fn run_ui(
                         }
                         let bar_dim = dim || group.gone || group.pending_link;
                         frame.render_widget(
-                            BarWidget::new(bar, stage_name_width, bar_dim),
+                            BarWidget::new(bar, stage_name_width, bar_dim).with_intro(intro_for(
+                                &app,
+                                &intro_bands,
+                                intro_now,
+                                &bar.name,
+                            )),
                             inner_areas[row],
                         );
                         row += 1;
@@ -941,7 +952,6 @@ pub fn run_ui(
             );
 
             drop(app);
-            render_intro_overlay(frame, intro_elapsed);
         })?;
 
         // Advance animation for Running bars every ~1s
@@ -972,7 +982,7 @@ pub fn run_ui(
 
         let intro_playing = app
             .lock()
-            .map(|a| intro::is_active(a.intro_started.map(|t| t.elapsed())))
+            .map(|a| a.intro_playing(Instant::now()))
             .unwrap_or(false);
         if event::poll(event_poll_timeout(intro_playing))? {
             if let Event::Key(key) = event::read()? {
@@ -1566,13 +1576,6 @@ mod tests {
         let sorted = sorted_workflow_groups(&groups);
         assert_eq!(sorted[0].name, "aaa-running");
         assert_eq!(sorted[1].name, "zzz-idle");
-    }
-
-    #[test]
-    fn intro_body_sits_between_header_and_status() {
-        let body = intro_body_area(Rect::new(0, 0, 80, 30));
-        assert_eq!((body.y, body.height, body.width), (3, 24, 80));
-        assert_eq!(intro_body_area(Rect::new(0, 0, 80, 4)).height, 0);
     }
 
     #[test]

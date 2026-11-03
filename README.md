@@ -50,9 +50,9 @@ single screen -- no browser required.
 ### UI
 
 - btop-inspired terminal UI with rounded borders and muted color palette
-- Startup intro: a 3s spectrum analyzer plays the moment cibars opens (rows =
-  bass to treble, 90 BPM kick/snare/hi-hat beat, white peak-hold blocks, green
-  to orange VU gradient) while the first poll loads in the background
+- Startup intro: each bar plays a 3s spectrum analyzer the moment it first
+  appears (rows = bass to treble, 90 BPM kick/snare/hi-hat beat in sync across
+  bars, white peak-hold blocks, green to orange VU gradient), then shows real state
 - Color-coded bars: yellow-to-orange gradient (running), green
   (succeeded), red (failed), grey (idle)
 - Braille-character bar fill with gradient animation
