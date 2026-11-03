@@ -51,7 +51,7 @@ single screen -- no browser required.
 
 - btop-inspired terminal UI with rounded borders and muted color palette
 - Startup intro: each bar plays a 3s spectrum analyzer the moment it first
-  appears (rows = bass to treble, 90 BPM kick/snare/hi-hat beat in sync across
+  appears (rows = bass to treble, 70 BPM kick/snare/hi-hat beat in sync across
   bars, white peak-hold blocks, green to orange VU gradient), then shows real state
 - Color-coded bars: yellow-to-orange gradient (running), green
   (succeeded), red (failed), grey (idle)

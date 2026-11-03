@@ -1,6 +1,6 @@
 //! Startup "equalizer" intro: each bar plays a spectrum analyzer for a few
 //! seconds the moment it first appears (no waiting for all sources). Each bar is a frequency band (top =
-//! bass, bottom = treble) driven by a 90 BPM four-on-the-floor beat: kick on
+//! bass, bottom = treble) driven by a 70 BPM four-on-the-floor beat: kick on
 //! every beat, snare on 2 and 4, hi-hat on the off-beats. Fast attack, decay,
 //! and a peak block that holds then falls. Render-only: never touches Bar state.
 
@@ -17,20 +17,20 @@ pub const INTRO_FRAME: Duration = Duration::from_millis(50);
 /// VU low end: btop `cpu_start` green.
 pub const INTRO_LOW: Color = Color::Rgb(80, 240, 149);
 
-/// Seconds per beat at 90 BPM (relaxed groove).
-pub const BEAT: f32 = 60.0 / 90.0;
+/// Seconds per beat at 70 BPM (slow, relaxed groove).
+pub const BEAT: f32 = 60.0 / 70.0;
 /// How long a peak block sticks at its max before falling (s).
-pub const PEAK_HOLD: f32 = 0.5;
+pub const PEAK_HOLD: f32 = 0.7;
 /// Peak fall speed after the hold (full height per second).
-const PEAK_FALL: f32 = 2.0;
+const PEAK_FALL: f32 = 1.0;
 /// Peak-hold sampling grid (s).
 const PEAK_STEP: f32 = 0.025;
 /// Fade-out at the end of the intro (s), so real bars take over smoothly.
 const FADE_OUT: f32 = 0.4;
 
-const KICK_DECAY: f32 = 0.12;
-const SNARE_DECAY: f32 = 0.15;
-const HAT_DECAY: f32 = 0.05;
+const KICK_DECAY: f32 = 0.25;
+const SNARE_DECAY: f32 = 0.3;
+const HAT_DECAY: f32 = 0.15;
 
 /// One rendered intro frame for a bar: current level and held peak, in [0, 1].
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -63,12 +63,21 @@ pub fn band_level(t: f32, band: f32, seed: u64) -> f32 {
         0.0
     };
 
-    // per-16th jitter so bands never look perfectly clean
-    let step = (t / (BEAT / 4.0)).floor() as u64;
-    let h = (seed ^ step.wrapping_mul(0x9E37_79B9_7F4A_7C15)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-    let noise = 0.05 + 0.15 * ((h >> 40) as f32 / (1u64 << 24) as f32);
+    // per-8th jitter, interpolated so it drifts instead of jumping
+    let pos = t / (BEAT / 2.0);
+    let step = pos.floor();
+    let noise = 0.05
+        + 0.15
+            * (jitter(seed, step as u64)
+                + (jitter(seed, step as u64 + 1) - jitter(seed, step as u64)) * (pos - step));
 
     (kick + snare + hat + noise).clamp(0.0, 1.0)
+}
+
+/// Deterministic pseudo-random value in [0, 1) per (seed, step).
+fn jitter(seed: u64, step: u64) -> f32 {
+    let h = (seed ^ step.wrapping_mul(0x9E37_79B9_7F4A_7C15)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    (h >> 40) as f32 / (1u64 << 24) as f32
 }
 
 /// Peak-hold meter over `level`: max recently reached, held for
@@ -186,7 +195,10 @@ mod tests {
         for beat in 0..4 {
             let hit = beat as f32 * BEAT;
             assert!(band_level(hit + 0.01, BASS, 3) > 0.7, "beat {beat}");
-            assert!(band_level(hit + 0.40, BASS, 3) < 0.35, "beat {beat} decays");
+            assert!(
+                band_level(hit + 0.75 * BEAT, BASS, 3) < 0.35,
+                "beat {beat} decays"
+            );
         }
     }
 
@@ -229,13 +241,17 @@ mod tests {
         let impulse = |t: f32| if t < 0.05 { 1.0 } else { 0.0 };
         assert!(peak_hold(0.3, impulse) > 0.95, "held");
         let falling = peak_hold(0.05 + PEAK_HOLD + 0.2, impulse);
-        assert!((0.5..0.65).contains(&falling), "falling: {falling}");
+        let expected = 1.0 - PEAK_FALL * 0.2;
+        assert!(
+            (falling - expected).abs() < 0.06,
+            "falling: {falling} vs {expected}"
+        );
         assert!(peak_hold(2.0, impulse) < 0.01, "dropped");
     }
 
     #[test]
     fn peak_sticks_above_decayed_bass() {
-        let f = intro_frame(at(400), BASS, 3).unwrap();
+        let f = intro_frame(at(600), BASS, 3).unwrap();
         assert!(f.peak > 0.85, "peak held from kick: {f:?}");
         assert!(f.level < 0.35, "level decayed: {f:?}");
     }
@@ -284,8 +300,23 @@ mod tests {
     }
 
     #[test]
-    fn tempo_is_90_bpm() {
-        assert!((60.0 / BEAT - 90.0).abs() < 1e-3, "bpm = {}", 60.0 / BEAT);
+    fn tempo_is_70_bpm() {
+        assert!((60.0 / BEAT - 70.0).abs() < 1e-3, "bpm = {}", 60.0 / BEAT);
+    }
+
+    #[test]
+    fn bars_glide_down_not_snap() {
+        // between two 50 ms frames no band may fall by more than a quarter
+        let frame = INTRO_FRAME.as_secs_f32();
+        for b in 0..=10 {
+            let band = b as f32 / 10.0;
+            let mut t = 0.0;
+            while t < 2.5 {
+                let (now, next) = (band_level(t, band, 3), band_level(t + frame, band, 3));
+                assert!(now - next <= 0.25, "band {band} t={t}: {now} -> {next}");
+                t += frame;
+            }
+        }
     }
 
     #[test]
