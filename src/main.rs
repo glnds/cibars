@@ -20,12 +20,8 @@ use config::Config;
 use linkage::LinkMap;
 use poll_scheduler::PollScheduler;
 
-fn setup_tracing() -> Result<()> {
+fn setup_tracing(log_file: std::fs::File) -> Result<()> {
     use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
-
-    let log_dir = dirs::home_dir().context("no home dir")?.join(".cibars");
-    std::fs::create_dir_all(&log_dir)?;
-    let log_file = std::fs::File::create(log_dir.join("cibars.log"))?;
 
     tracing_subscriber::registry()
         .with(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")))
@@ -282,6 +278,20 @@ fn acquire_pid_file(pid_path: &std::path::Path) -> Result<()> {
     write_pid_file(pid_path)
 }
 
+/// Claim the PID file, then open (truncate) the log. Order matters: a refused
+/// second instance must not wipe the running instance's log.
+fn acquire_pid_then_open_log(
+    pid_path: &std::path::Path,
+    log_dir: &std::path::Path,
+) -> Result<std::fs::File> {
+    acquire_pid_file(pid_path)?;
+    std::fs::create_dir_all(log_dir)
+        .with_context(|| format!("cannot create {}", log_dir.display()))?;
+    let log_path = log_dir.join("cibars.log");
+    std::fs::File::create(&log_path)
+        .with_context(|| format!("cannot open log {}", log_path.display()))
+}
+
 /// Remove the PID file only if it still holds our PID.
 fn cleanup_pid_file(pid_path: &std::path::Path) {
     let own = std::process::id().to_string();
@@ -325,12 +335,17 @@ fn main() -> Result<()> {
         .install_default()
         .expect("failed to install rustls crypto provider");
 
-    setup_tracing()?;
-
     let cwd = std::env::current_dir().context("cannot read cwd")?;
-    let (config, token) = Config::load(&cwd)?;
     let pid_path = config::pid_file_for(&cwd)?;
-    acquire_pid_file(&pid_path)?;
+    let log_dir = dirs::home_dir().context("no home dir")?.join(".cibars");
+    let log_file = acquire_pid_then_open_log(&pid_path, &log_dir)?;
+    let (config, token) = match setup_tracing(log_file).and_then(|_| Config::load(&cwd)) {
+        Ok(v) => v,
+        Err(e) => {
+            cleanup_pid_file(&pid_path);
+            return Err(e);
+        }
+    };
     tracing::info!(pid = std::process::id(), "starting cibars");
     let mut app_state = App::with_sources(config.github.is_some(), config.aws.is_some());
     config::ensure_delegation(&cwd);
@@ -511,6 +526,47 @@ mod tests {
             std::fs::read_to_string(&pid_path).unwrap(),
             other.id().to_string(),
             "must not clobber the live instance's PID file"
+        );
+    }
+
+    #[test]
+    fn refused_second_instance_keeps_running_instances_log() {
+        let dir = tempfile::tempdir().unwrap();
+        let pid_path = dir.path().join("cibars.pid");
+        let log_dir = dir.path().join("logs");
+        std::fs::create_dir_all(&log_dir).unwrap();
+        std::fs::write(log_dir.join("cibars.log"), "first instance log\n").unwrap();
+        let mut other = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .unwrap();
+        std::fs::write(&pid_path, other.id().to_string()).unwrap();
+        let result = acquire_pid_then_open_log(&pid_path, &log_dir);
+        other.kill().unwrap();
+        other.wait().unwrap();
+        assert!(result.is_err());
+        assert_eq!(
+            std::fs::read_to_string(log_dir.join("cibars.log")).unwrap(),
+            "first instance log\n",
+            "refused launch must not truncate the running instance's log"
+        );
+    }
+
+    #[test]
+    fn acquire_pid_then_open_log_truncates_when_free() {
+        let dir = tempfile::tempdir().unwrap();
+        let pid_path = dir.path().join("cibars.pid");
+        let log_dir = dir.path().join("logs");
+        std::fs::create_dir_all(&log_dir).unwrap();
+        std::fs::write(log_dir.join("cibars.log"), "old run\n").unwrap();
+        acquire_pid_then_open_log(&pid_path, &log_dir).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(log_dir.join("cibars.log")).unwrap(),
+            ""
+        );
+        assert_eq!(
+            std::fs::read_to_string(&pid_path).unwrap(),
+            std::process::id().to_string()
         );
     }
 
