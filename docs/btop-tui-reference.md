@@ -6,15 +6,19 @@ Reference for replicating btop's graph rendering technique and default color sch
 
 ## Graph characters
 
-btop uses **Unicode Braille Patterns** (`U+2800–U+28FF`) to render bar graphs at sub-character resolution.
+btop uses **Unicode Braille Patterns** (`U+2800–U+28FF`) to render bar graphs at sub-character
+resolution.
 
 ### How it works
 
-A Braille character is a 2×4 dot grid, giving 4 vertical dot positions per character cell. btop uses one column of dots per data value, so each character cell can encode **up to 4 vertical levels**. Two adjacent values share a single character (left column + right column), which doubles horizontal density compared to block characters.
+A Braille character is a 2×4 dot grid, giving 4 vertical dot positions per character cell. btop uses
+one column of dots per data value, so each character cell can encode **up to 4 vertical levels**.
+Two adjacent values share a single character (left column + right column), which doubles horizontal
+density compared to block characters.
 
 Dot positions are numbered in the Braille standard as follows:
 
-```
+```text
 left  right
  1     4    ← top
  2     5
@@ -46,15 +50,19 @@ btop offers three graph symbol sets, configurable per box:
 
 ### Font requirements
 
-The braille mode requires a font that includes Unicode Block `U+2800–U+28FF`. If characters render as all-dots-filled or misaligned, it is a font fallback issue, not a rendering bug. Fonts known to work: **DejaVu Sans**, **Terminess Powerline**, **Nerd Fonts**.
+The braille mode requires a font that includes Unicode Block `U+2800–U+28FF`. If characters render
+as all-dots-filled or misaligned, it is a font fallback issue, not a rendering bug. Fonts known to
+work: **DejaVu Sans**, **Terminess Powerline**, **Nerd Fonts**.
 
 ---
 
 ## Default color scheme
 
-Source: hardcoded in `src/btop_theme.cpp`. The Default and TTY themes are built into the binary and not shipped as `.theme` files.
+Source: hardcoded in `src/btop_theme.cpp`. The Default and TTY themes are built into the binary and
+not shipped as `.theme` files.
 
-Colors are `#RRGGBB` hex. Graph gradients use `_start` / `_mid` / `_end` — omit `_mid` for a two-stop gradient, mapping low intensity to start and high intensity to end.
+Colors are `#RRGGBB` hex. Graph gradients use `_start` / `_mid` / `_end` — omit `_mid` for a
+two-stop gradient, mapping low intensity to start and high intensity to end.
 
 ### UI chrome
 
@@ -74,7 +82,8 @@ Colors are `#RRGGBB` hex. Graph gradients use `_start` / `_mid` / `_end` — omi
 
 ### Box outlines
 
-Each box has its own distinct muted border color for visual separation without relying solely on line weight.
+Each box has its own distinct muted border color for visual separation without relying solely on
+line weight.
 
 | Key        | Hex       | Box            |
 |------------|-----------|----------------|
@@ -181,6 +190,7 @@ theme[cpu_mid]="#f0c050"
 theme[cpu_end]="#f05050"
 ```
 
-Accepted color formats: `#RRGGBB`, `#BW` (greyscale shorthand), or `R G B` as space-separated decimals (0–255).
+Accepted color formats: `#RRGGBB`, `#BW` (greyscale shorthand), or `R G B` as space-separated
+decimals (0–255).
 
 Browsable theme archive: <https://fossies.org/linux/btop/themes/>

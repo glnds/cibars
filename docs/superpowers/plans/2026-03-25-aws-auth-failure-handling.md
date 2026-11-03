@@ -444,7 +444,6 @@ git commit -m "add verification tests for skip + force bypass behavior"
 
 - Modify: `src/ui/header.rs:1-39` (add aws_health field, render)
 - Modify: `src/ui/mod.rs:209-216` (pass aws_health to Header)
-
 - [ ] **Step 1: Write failing test — header shows SSO expired**
 
 In `src/ui/header.rs` test module, add:

@@ -35,6 +35,7 @@ workflow in the Actions block; the CodePipelines block only shows unlinked pipel
 ### Task 1: Add `linked_pipeline` field to `WorkflowGroup`
 
 **Files:**
+
 - Modify: `src/model.rs:115-125` (struct definition)
 - Modify: ~50 construction sites across `src/model.rs`, `src/app.rs`, `src/linkage.rs`,
   `src/poller/mod.rs`, `src/ui/bar.rs`, `src/ui/mod.rs`
@@ -100,9 +101,9 @@ git add -A && git commit -m "model: add linked_pipeline to WorkflowGroup"
 ### Task 2: Cache structs and LinkMap serialization methods
 
 **Files:**
+
 - Modify: `src/linkage.rs` (add structs + methods after existing `LinkMap` impl)
 - Test: `src/linkage.rs` (inline `#[cfg(test)]` module)
-
 - [ ] **Step 1: Write failing tests for `to_cache` and `load_from_cache`**
 
 Add to the `#[cfg(test)] mod tests` in `src/linkage.rs`:
@@ -306,9 +307,9 @@ git add src/linkage.rs && git commit -m "linkage: add cache structs and LinkMap 
 ### Task 3: Cache file load/save functions
 
 **Files:**
+
 - Modify: `src/linkage.rs` (add standalone functions)
 - Test: `src/linkage.rs` (inline tests)
-
 - [ ] **Step 1: Write failing tests for `load_link_cache` and `save_link_cache`**
 
 Add to `#[cfg(test)] mod tests` in `src/linkage.rs`. The `tempfile` crate is already
@@ -441,9 +442,9 @@ git add src/linkage.rs && git commit -m "linkage: add load/save link cache funct
 ### Task 4: App fields and health check
 
 **Files:**
+
 - Modify: `src/app.rs:16-67` (struct + `new()`)
 - Test: `src/app.rs` (inline tests)
-
 - [ ] **Step 1: Write failing tests for `check_linkage_health`**
 
 Add to `#[cfg(test)] mod tests` in `src/app.rs`:
@@ -622,10 +623,10 @@ git add src/app.rs && git commit -m "app: add linkage_broken/discovering fields 
 ### Task 5: StatusBar linkage indicator
 
 **Files:**
+
 - Modify: `src/ui/statusbar.rs:17-24` (struct fields), `src/ui/statusbar.rs:41-112`
   (render method)
 - Test: `src/ui/statusbar.rs` (inline tests)
-
 - [ ] **Step 1: Write failing tests**
 
 Add to `#[cfg(test)] mod tests` in `src/ui/statusbar.rs`:
@@ -694,6 +695,7 @@ In `src/ui/statusbar.rs`, add after `boost_pressed_at`:
 There are construction sites in:
 
 1. `src/ui/mod.rs` line ~496 (production render) — add:
+
    ```rust
    linkage_broken: app.linkage_broken,
    linkage_discovering: app.linkage_discovering,
@@ -703,6 +705,7 @@ There are construction sites in:
    `render_bar_with_hook` (line ~125) and `render_bar_with_warnings` (line ~340)
    and `render_buf` (line ~495) and the `boost_flash_*` tests and
    `statusbar_renders_in_rounded_block` and `statusbar_block_border_color` — add:
+
    ```rust
    linkage_broken: false,
    linkage_discovering: false,
@@ -752,6 +755,7 @@ git add src/ui/statusbar.rs src/ui/mod.rs && git commit -m "statusbar: add l=rel
 ### Task 6: `link_notify` plumbing — UI key handler and orchestrator signal
 
 **Files:**
+
 - Modify: `src/main.rs` (create Notify, pass to both fns, add to orchestrator
   `select!`)
 - Modify: `src/ui/mod.rs:218-226` (`run_ui` signature + key handler)
@@ -872,6 +876,7 @@ git add src/main.rs src/ui/mod.rs && git commit -m "wire link_notify between UI 
 ### Task 7: Cache-first startup and re-discovery in orchestrator
 
 **Files:**
+
 - Modify: `src/main.rs` (startup logic + `run_discovery` helper + re-discovery in
   `select!` + health check + `sync_linked_pipelines`)
 
@@ -1062,6 +1067,7 @@ git add src/main.rs && git commit -m "orchestrator: cache-first startup and l-ke
 ### Task 8: Tree rendering — linked pipelines under workflows in Actions block
 
 **Files:**
+
 - Modify: `src/ui/mod.rs` (`sorted_pipeline_groups`, row counting, render loop)
 - Test: `src/ui/mod.rs` (inline tests)
 

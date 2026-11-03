@@ -32,9 +32,9 @@ push-signal-active → hook-installed → hook-missing. Manual `b` boost is unaf
 ### Task 1: Add `push_signal_at` to App state
 
 **Files:**
+
 - Modify: `src/app.rs:17-50` (App struct)
 - Modify: `src/app.rs:55-77` (App::new)
-
 - [ ] **Step 1: Write failing test**
 
 Add to `src/app.rs` (at the bottom, in a `#[cfg(test)]` module if one exists, or
@@ -90,6 +90,7 @@ git commit -m "app: add push_signal_at field for SIGUSR1 feedback"
 ### Task 2: Set `push_signal_at` in SIGUSR1 handler
 
 **Files:**
+
 - Modify: `src/main.rs:206-211` (SIGUSR1 branch in tokio::select!)
 
 - [ ] **Step 1: Write the change**
@@ -131,10 +132,10 @@ git commit -m "main: set push_signal_at on SIGUSR1 receive"
 ### Task 3: Add `push_signal_at` to StatusBar and render hook indicator
 
 **Files:**
+
 - Modify: `src/ui/statusbar.rs:13` (add const)
 - Modify: `src/ui/statusbar.rs:17-26` (StatusBar struct)
 - Modify: `src/ui/statusbar.rs:93-102` (hook render logic)
-
 - [ ] **Step 1: Write failing test — hook installed shows ✓hook**
 
 Add to `src/ui/statusbar.rs` tests (after the existing `no_hook_hint_when_installed`
@@ -252,6 +253,7 @@ git commit -m "statusbar: render ✓hook indicator and ⬆ pushed! flash"
 ### Task 4: Write tests for push signal flash and color
 
 **Files:**
+
 - Modify: `src/ui/statusbar.rs` (test module)
 
 - [ ] **Step 1: Write test — push signal shows ⬆ pushed!**
@@ -428,9 +430,9 @@ git commit -m "statusbar: add tests for hook indicator and push signal"
 ### Task 5: Wire `push_signal_at` through UI
 
 **Files:**
+
 - Modify: `src/ui/mod.rs:494-503` (first StatusBar construction)
 - Modify: `src/ui/mod.rs:859-868` (second StatusBar construction)
-
 - [ ] **Step 1: Add `push_signal_at` to both StatusBar constructions**
 
 In `src/ui/mod.rs`, find the first `StatusBar {` block (around line 494). Add after

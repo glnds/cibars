@@ -1,6 +1,7 @@
 # cibars: Build Plan
 
-This document describes the intended architecture, module breakdown, and phased delivery plan. It is the primary reference for AI-assisted development (e.g. Claude Code).
+This document describes the intended architecture, module breakdown, and phased delivery plan. It is
+the primary reference for AI-assisted development (e.g. Claude Code).
 
 ---
 
@@ -20,7 +21,7 @@ This document describes the intended architecture, module breakdown, and phased 
 
 ## 2. Module Structure
 
-```
+```text
 cibars/
 ├── Cargo.toml
 ├── README.md
@@ -46,7 +47,7 @@ cibars/
 
 ## 3. Data Flow
 
-```
+```text
 main()
   └── parse Config from CLI + env
   └── validate Config (fail fast if invalid)
@@ -76,7 +77,8 @@ pub struct App {
 }
 ```
 
-The UI loop holds the lock only for the duration of a single frame render. The poller holds the lock only during state replacement after a completed poll cycle.
+The UI loop holds the lock only for the duration of a single frame render. The poller holds the lock
+only during state replacement after a completed poll cycle.
 
 ---
 
@@ -114,8 +116,10 @@ pub struct App {
 
 On each poll cycle the poller updates each `Bar` as follows:
 
-- If the build is **still running**: increment `write_pos`; if `write_pos >= tick_area_width` reset to 0 and reset `fill` to 0; increment `fill`; set `status = Running`
-- If the build **just completed**: set `status = Succeeded | Failed`; do not change `fill` or `write_pos`
+- If the build is **still running**: increment `write_pos`; if `write_pos >= tick_area_width` reset
+  to 0 and reset `fill` to 0; increment `fill`; set `status = Running`
+- If the build **just completed**: set `status = Succeeded | Failed`; do not change `fill` or
+  `write_pos`
 - If **no build is active**: leave the bar unchanged
 
 ---
@@ -127,15 +131,19 @@ On each poll cycle the poller updates each `Bar` as follows:
 - Set up `Cargo.toml` with all dependencies
 - Implement `config.rs`: parse and validate CLI args + `GITHUB_TOKEN`
 - Implement `main.rs`: validate config, print parsed config to stdout, exit
-- Goal: `cargo run -- --aws-profile foo --region eu-west-1 --github-repo acme/backend` works without panicking
+- Goal: `cargo run -- --aws-profile foo --region eu-west-1 --github-repo acme/backend` works without
+  panicking
 
 ### Phase 2: Data Model and Polling
 
 - Implement `model.rs`: `Bar`, `BuildStatus`, `BarSource`, `App`
 - Implement `Bar::update(status, tick_area_width)` with wrap logic
-- Implement `poller/aws.rs`: call `ListPipelines` + `GetPipelineState`, map to `BuildStatus` per pipeline
-- Implement `poller/github.rs`: call GitHub Actions runs endpoint, map latest run per workflow to `BuildStatus`
-- Implement `poller/mod.rs`: orchestrate concurrent polling, call `bar.update()` on all bars, create new bars for newly discovered pipelines/workflows
+- Implement `poller/aws.rs`: call `ListPipelines` + `GetPipelineState`, map to `BuildStatus` per
+  pipeline
+- Implement `poller/github.rs`: call GitHub Actions runs endpoint, map latest run per workflow to
+  `BuildStatus`
+- Implement `poller/mod.rs`: orchestrate concurrent polling, call `bar.update()` on all bars, create
+  new bars for newly discovered pipelines/workflows
 - Goal: polling works end-to-end and prints bar state as text to stdout for verification
 
 ### Phase 3: TUI Skeleton
@@ -147,7 +155,8 @@ On each poll cycle the poller updates each `Bar` as follows:
 
 ### Phase 4: Populated UI
 
-- Implement `ui/bar.rs`: render a single `Bar` row; draw each `Tick` with lap-aware brightness (current lap = bright, previous lap = dim)
+- Implement `ui/bar.rs`: render a single `Bar` row; draw each `Tick` with lap-aware brightness
+  (current lap = bright, previous lap = dim)
 - Implement `ui/header.rs` and `ui/statusbar.rs`
 - Apply bar ordering: running bars first, then idle, both sorted by name within each group
 - Goal: full live tick-bar UI with real data
@@ -179,5 +188,7 @@ On each poll cycle the poller updates each `Bar` as follows:
 - Always run `cargo clippy` and `cargo fmt` before considering a phase complete
 - Never use `unwrap()` in production paths; use `?` with `anyhow::Context`
 - The UI event loop runs on the main thread; all async work happens in spawned tasks
-- The `ratatui` terminal must be restored (alternate screen exited) on any panic or exit path — use a drop guard pattern
-- Keep each module focused: `poller/` modules must not contain any UI code; `ui/` modules must not call any external APIs
+- The `ratatui` terminal must be restored (alternate screen exited) on any panic or exit path — use
+  a drop guard pattern
+- Keep each module focused: `poller/` modules must not contain any UI code; `ui/` modules must not
+  call any external APIs

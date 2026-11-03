@@ -18,9 +18,10 @@ OkAuthClient, ExpiredAuthClient, NetworkErrorAuthClient)
 
 ---
 
-### Task 1: app.rs — clear_warnings_by_prefix unit tests
+## Task 1: app.rs — clear_warnings_by_prefix unit tests
 
 **Files:**
+
 - Modify: `src/app.rs` (append to `mod tests` block ending at line 472)
 
 - [ ] **Step 1: Write 4 failing tests**
@@ -81,6 +82,7 @@ git commit -m "test: clear_warnings_by_prefix unit tests"
 ### Task 2: poller/mod.rs — stage_status_and_timestamp + update_workflow_jobs unit tests
 
 **Files:**
+
 - Modify: `src/poller/mod.rs` (append to `mod tests` block ending at line 1621)
 
 - [ ] **Step 1: Write 4 failing tests**
@@ -177,6 +179,7 @@ git commit -m "test: stage_status_and_timestamp edge cases + update_workflow_job
 ### Task 3: linkage.rs — topo_sort and assign_jobs edge case tests
 
 **Files:**
+
 - Modify: `src/linkage.rs` (append to `mod tests` block ending at line 2246)
 
 - [ ] **Step 1: Write 5 tests**
@@ -341,6 +344,7 @@ git commit -m "test: linkage topo_sort edge cases + multi-workflow assignment"
 ### Task 4: ui/mod.rs — build_pipeline_centric_sections unit tests
 
 **Files:**
+
 - Modify: `src/ui/mod.rs` (append to `mod tests` block ending at line 1825)
 
 - [ ] **Step 1: Write 5 tests**
@@ -469,6 +473,7 @@ git commit -m "test: build_pipeline_centric_sections unit tests"
 ### Task 5: poller/mod.rs — multi-poll e2e scenarios
 
 **Files:**
+
 - Modify: `src/poller/mod.rs` (append to `mod tests` block ending at line 1621)
 
 **Depends on:** Task 2 (appends to same file, coordinate ordering)
@@ -924,6 +929,7 @@ git commit -m "test: multi-poll e2e scenarios for pipeline lifecycle, auth, link
 ### Task 6: main.rs — signal/lifecycle e2e tests
 
 **Files:**
+
 - Modify: `src/main.rs` (append to `mod tests` block ending at line 497)
 
 - [ ] **Step 1: Write 5 e2e tests**

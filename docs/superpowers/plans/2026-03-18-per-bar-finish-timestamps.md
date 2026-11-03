@@ -261,7 +261,6 @@ git commit -m "add timestamp fields to ActionState and JobInfo"
 - Modify: `src/poller/mod.rs:236-260` (reconcile_bars)
 - Modify: `src/poller/mod.rs:280-284` (update_pipeline_groups)
 - Modify: `src/poller/mod.rs:348-359` (update_workflow_jobs)
-
 - [ ] **Step 1: Write failing test for reconcile_bars with timestamps**
 
 In `src/poller/mod.rs` tests:

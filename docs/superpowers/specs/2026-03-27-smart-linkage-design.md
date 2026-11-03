@@ -410,7 +410,7 @@ The CI job count must include rows for linked pipeline headers + stages.
 Within the CI workflow render loop, after rendering each workflow group's jobs,
 if the group has a `linked_pipeline`, render it indented:
 
-```
+```text
 ● build-and-test     ████████████████  2m ago
 ● test               ████████████████  ok
 └─ ● prod-pipeline  Running
