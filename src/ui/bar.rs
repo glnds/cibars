@@ -17,8 +17,6 @@ pub struct BarWidget<'a> {
     name_width: usize,
     dim: bool,
     status_dot: Option<Color>,
-    /// Startup intro frame; overrides real fill while Some.
-    intro: Option<super::intro::IntroFrame>,
 }
 
 impl<'a> BarWidget<'a> {
@@ -28,17 +26,11 @@ impl<'a> BarWidget<'a> {
             name_width: name_width.min(MAX_NAME_WIDTH),
             dim,
             status_dot: None,
-            intro: None,
         }
     }
 
     pub fn with_dot(mut self, color: Color) -> Self {
         self.status_dot = Some(color);
-        self
-    }
-
-    pub fn with_intro(mut self, frame: Option<super::intro::IntroFrame>) -> Self {
-        self.intro = frame;
         self
     }
 
@@ -87,24 +79,7 @@ impl Widget for BarWidget<'_> {
         }
         spans.push(Span::raw(format!("{name_display}  ")));
         let mut cells: Vec<(char, Color)> = Vec::with_capacity(fill_width);
-        if let Some(frame) = self.intro {
-            let to_cells = |v: f32| ((v * fill_width as f32).round() as usize).min(fill_width);
-            let lit = to_cells(frame.level);
-            for i in 0..fill_width {
-                cells.push(if i < lit {
-                    (theme::BAR_FILLED, super::intro::vu_color(i, fill_width))
-                } else {
-                    (theme::BAR_UNFILLED, theme::BAR_EMPTY)
-                });
-            }
-            // peak-hold block (btop main_fg), like a hardware analyzer
-            if let Some(cell) = to_cells(frame.peak)
-                .checked_sub(1)
-                .and_then(|i| cells.get_mut(i))
-            {
-                *cell = (theme::BAR_FILLED, theme::LAP_MARKER);
-            }
-        } else if !self.dim && self.bar.status == BuildStatus::Running {
+        if !self.dim && self.bar.status == BuildStatus::Running {
             for i in 0..filled {
                 let t = if filled == 1 {
                     1.0
@@ -117,13 +92,11 @@ impl Widget for BarWidget<'_> {
         } else {
             cells.extend(std::iter::repeat_n((theme::BAR_FILLED, color), filled));
         }
-        if self.intro.is_none() {
-            cells.extend(std::iter::repeat_n(
-                (theme::BAR_UNFILLED, theme::BAR_EMPTY),
-                empty,
-            ));
-        }
-        if !self.dim && self.intro.is_none() {
+        cells.extend(std::iter::repeat_n(
+            (theme::BAR_UNFILLED, theme::BAR_EMPTY),
+            empty,
+        ));
+        if !self.dim {
             // One marker per completed wrap, so laps stay visible after reset.
             for cell in cells.iter_mut().take(self.bar.laps) {
                 *cell = (theme::BAR_FILLED, theme::LAP_MARKER);
@@ -1138,55 +1111,6 @@ mod tests {
         let mut buf = Buffer::empty(area);
         widget.render(area, &mut buf);
         assert!(!bar_cells(&buf).contains(&theme::LAP_MARKER));
-    }
-
-    #[test]
-    fn intro_overrides_fill_with_vu_gradient() {
-        // real state: failed, 1 cell — intro must hide it while playing
-        let mut bar = make_bar("build", BuildStatus::Failed, 1);
-        bar.laps = 3;
-        let frame = crate::ui::intro::IntroFrame {
-            level: 0.5,
-            peak: 0.8,
-        };
-        let widget = BarWidget::new(&bar, 10, true).with_intro(Some(frame));
-        let area = Rect::new(0, 0, 40, 1);
-        let mut buf = Buffer::empty(area);
-        widget.render(area, &mut buf);
-        let cells = bar_cells(&buf);
-        // 40 - name(10+2) - ts(7) = 21 cells; level 0.5 → 11 lit (rounded)
-        assert_eq!(cells[0], crate::ui::intro::INTRO_LOW);
-        assert_ne!(cells[10], theme::BAR_EMPTY);
-        assert_eq!(cells[11], theme::BAR_EMPTY);
-        // peak 0.8 → round(16.8) = 17th cell holds the white peak block
-        assert_eq!(cells[16], theme::LAP_MARKER);
-        assert_eq!(cells[15], theme::BAR_EMPTY);
-        assert_eq!(cells[17], theme::BAR_EMPTY);
-        assert!(!cells.contains(&theme::STATUS_FAILED));
-    }
-
-    #[test]
-    fn intro_zero_peak_draws_no_peak_block() {
-        let bar = make_bar("build", BuildStatus::Idle, 0);
-        let frame = crate::ui::intro::IntroFrame {
-            level: 0.0,
-            peak: 0.0,
-        };
-        let widget = BarWidget::new(&bar, 10, false).with_intro(Some(frame));
-        let area = Rect::new(0, 0, 40, 1);
-        let mut buf = Buffer::empty(area);
-        widget.render(area, &mut buf);
-        assert!(bar_cells(&buf).iter().all(|&c| c == theme::BAR_EMPTY));
-    }
-
-    #[test]
-    fn intro_none_renders_real_state() {
-        let bar = make_bar("build", BuildStatus::Succeeded, 3);
-        let widget = BarWidget::new(&bar, 10, false).with_intro(None);
-        let area = Rect::new(0, 0, 40, 1);
-        let mut buf = Buffer::empty(area);
-        widget.render(area, &mut buf);
-        assert_eq!(bar_cells(&buf)[0], theme::STATUS_SUCCESS);
     }
 
     #[test]

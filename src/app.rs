@@ -34,10 +34,8 @@ pub struct App {
     pub actions_enabled: bool,
     /// AWS CodePipeline source configured.
     pub pipelines_enabled: bool,
-    /// When the startup equalizer intro began (after first load).
+    /// When the startup equalizer intro began (UI start).
     pub intro_started: Option<Instant>,
-    /// Intro spectrum band per bar name (0 = bass/top row, 1 = treble/bottom).
-    pub intro_bands: HashMap<String, f32>,
     /// Current poll state machine state, for UI display.
     pub poll_state: PollState,
     /// Git pre-push hook status for boost integration.
@@ -66,7 +64,7 @@ impl App {
     pub const MAX_WARNINGS: usize = 10;
 
     /// App for the configured sources. A disabled source is never loading,
-    /// so it cannot block loading-gated logic (linkage health, intro).
+    /// so it cannot block loading-gated logic (linkage health).
     pub fn with_sources(github: bool, aws: bool) -> Self {
         Self {
             actions_enabled: github,
@@ -74,27 +72,6 @@ impl App {
             loading_actions: github,
             loading_pipelines: aws,
             ..Self::new()
-        }
-    }
-
-    /// Start the startup intro once, as soon as initial loading is done.
-    pub fn maybe_start_intro(&mut self, now: Instant) {
-        if self.intro_started.is_none() && !self.loading_actions && !self.loading_pipelines {
-            self.intro_started = Some(now);
-            // rows top→bottom = bass→treble, like a spectrum analyzer
-            let names: Vec<String> = self
-                .workflow_groups
-                .iter()
-                .flat_map(|g| g.jobs.iter())
-                .chain(self.pipeline_groups.iter().flat_map(|g| g.stages.iter()))
-                .map(|b| b.name.clone())
-                .collect();
-            let span = names.len().saturating_sub(1).max(1) as f32;
-            self.intro_bands = names
-                .into_iter()
-                .enumerate()
-                .map(|(i, n)| (n, i as f32 / span))
-                .collect();
         }
     }
 
@@ -118,7 +95,6 @@ impl App {
             actions_enabled: true,
             pipelines_enabled: true,
             intro_started: None,
-            intro_bands: HashMap::new(),
             poll_state: PollState::Sleep,
             hook_status: HookStatus::NoGitDir,
             has_global_hooks_path: false,
@@ -245,56 +221,6 @@ mod tests {
         assert!(!app.loading_actions);
         assert!(app.loading_pipelines);
         assert!(!app.linkage_enabled());
-    }
-
-    #[test]
-    fn intro_waits_for_loading() {
-        let mut app = App::new();
-        let now = Instant::now();
-        app.maybe_start_intro(now);
-        assert!(app.intro_started.is_none(), "still loading");
-        app.loading_actions = false;
-        app.loading_pipelines = false;
-        app.maybe_start_intro(now);
-        assert_eq!(app.intro_started, Some(now));
-    }
-
-    #[test]
-    fn intro_assigns_bands_top_bass_to_bottom_treble() {
-        use crate::model::{Bar, PipelineGroup, WorkflowCategory, WorkflowGroup};
-        let mut app = App::new();
-        app.workflow_groups = vec![WorkflowGroup {
-            name: "CI".into(),
-            jobs: vec![Bar::new("a".into()), Bar::new("b".into())],
-            gone: false,
-            summary_status: BuildStatus::Succeeded,
-            run_id: None,
-            category: WorkflowCategory::CI,
-            linked_pipeline: None,
-        }];
-        app.pipeline_groups = vec![PipelineGroup {
-            name: "pipe".into(),
-            stages: vec![Bar::new("c".into())],
-            gone: false,
-            summary_status: BuildStatus::Succeeded,
-            pending_link: false,
-        }];
-        app.loading_actions = false;
-        app.loading_pipelines = false;
-        app.maybe_start_intro(Instant::now());
-        assert_eq!(app.intro_bands.get("a"), Some(&0.0));
-        assert_eq!(app.intro_bands.get("b"), Some(&0.5));
-        assert_eq!(app.intro_bands.get("c"), Some(&1.0));
-    }
-
-    #[test]
-    fn intro_starts_only_once() {
-        let mut app = App::with_sources(true, false);
-        app.loading_actions = false;
-        let t0 = Instant::now();
-        app.maybe_start_intro(t0);
-        app.maybe_start_intro(t0 + std::time::Duration::from_secs(60));
-        assert_eq!(app.intro_started, Some(t0));
     }
 
     #[test]
