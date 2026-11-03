@@ -18,6 +18,7 @@
     "helpers:pinGitHubActionDigests",
     ":maintainLockFilesWeekly"
   ],
+  "automergeType": "branch",
   "lockFileMaintenance": {
     "automerge": true
   },

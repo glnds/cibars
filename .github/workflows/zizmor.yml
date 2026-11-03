@@ -2,7 +2,9 @@ name: zizmor
 
 on:
   push:
-    branches: [master]
+    # renovate/**: Renovate branch-automerge (no PRs) needs green checks
+    # on its branch before it fast-forwards master.
+    branches: [master, 'renovate/**']
     paths: ['.github/**']
   pull_request:
     paths: ['.github/**']

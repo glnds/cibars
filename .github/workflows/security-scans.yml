@@ -4,7 +4,9 @@ on:
   pull_request:
     branches: [master]
   push:
-    branches: [master]
+    # renovate/**: Renovate branch-automerge (no PRs) needs green checks
+    # on its branch before it fast-forwards master.
+    branches: [master, 'renovate/**']
   workflow_dispatch:
   schedule:
     - cron: '0 6 * * 1' # Monday 06:00 UTC — catch newly disclosed CVEs
