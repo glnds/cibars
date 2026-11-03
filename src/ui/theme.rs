@@ -17,7 +17,11 @@ pub const BAR_EMPTY: Color = Color::Rgb(48, 48, 48);
 // Status colors
 pub const STATUS_SUCCESS: Color = Color::Rgb(0, 255, 127);
 pub const STATUS_RUNNING: Color = Color::Rgb(240, 192, 80);
-pub const STATUS_RUNNING_TIP: Color = Color::Rgb(255, 158, 100);
+// Orange, never red: red is reserved for failures.
+pub const STATUS_RUNNING_TIP: Color = Color::Rgb(255, 140, 0);
+
+// Lap marker (btop main_fg): one cell per completed wrap of a bar
+pub const LAP_MARKER: Color = Color::Rgb(255, 255, 255);
 pub const STATUS_FAILED: Color = Color::Rgb(255, 64, 64);
 pub const STATUS_IDLE: Color = Color::Rgb(85, 85, 85);
 
@@ -76,9 +80,25 @@ mod tests {
     fn status_colors_are_correct_rgb() {
         assert_eq!(STATUS_SUCCESS, Color::Rgb(0, 255, 127));
         assert_eq!(STATUS_RUNNING, Color::Rgb(240, 192, 80));
-        assert_eq!(STATUS_RUNNING_TIP, Color::Rgb(255, 158, 100));
+        assert_eq!(STATUS_RUNNING_TIP, Color::Rgb(255, 140, 0));
         assert_eq!(STATUS_FAILED, Color::Rgb(255, 64, 64));
         assert_eq!(STATUS_IDLE, Color::Rgb(85, 85, 85));
+    }
+
+    #[test]
+    fn running_tip_is_orange_not_red() {
+        // Red signals failure; the running gradient must stop at orange.
+        let Color::Rgb(r, g, b) = STATUS_RUNNING_TIP else {
+            panic!("tip must be RGB");
+        };
+        assert_eq!(r, 255);
+        assert!((120..=180).contains(&g), "green {g} too low → reads red");
+        assert_eq!(b, 0, "blue component pushes orange toward salmon/red");
+    }
+
+    #[test]
+    fn lap_marker_is_btop_main_fg() {
+        assert_eq!(LAP_MARKER, Color::Rgb(255, 255, 255));
     }
 
     #[test]

@@ -35,7 +35,8 @@ single screen -- no browser required.
 - Auto-install pre-push hook via `p` (local) or `g` (global) key
 - `core.hooksPath` awareness: detects global hooks dir, auto-delegates
   to local hooks
-- Per-project PID files for multi-instance signal targeting
+- Per-project PID files for multi-instance signal targeting (one
+  instance per repo; a second one refuses to start)
 - `pushed!` flash feedback when SIGUSR1 received from hook
 
 ### AWS SSO Support
@@ -50,6 +51,8 @@ single screen -- no browser required.
 - Color-coded bars: yellow-to-orange gradient (running), green
   (succeeded), red (failed), grey (idle)
 - Braille-character bar fill with gradient animation
+- Lap markers: each time a running bar wraps, one leading cell turns
+  white, so long builds show how many full bars they took
 - Expand/collapse all sections (`e` key)
 - Boost key (`b`) with visual flash feedback
 - Status bar with poll state indicator (☾ Sleep moon, spinner during
@@ -167,7 +170,8 @@ pipelines indent under their GitHub Action with a `└` connector.
 
 | Color | Hex | Meaning |
 | --- | --- | --- |
-| Yellow to Orange gradient | `#F0C050` to `#FF9E64` | Build is running |
+| Yellow to Orange gradient | `#F0C050` to `#FF8C00` | Build is running |
+| White (leading cells) | `#FFFFFF` | Lap markers: one per full wrap of the bar |
 | Green | `#00FF7F` | Build finished: succeeded |
 | Red | `#FF4040` | Build finished: failed |
 | Grey | `#555555` | No active or recent build |

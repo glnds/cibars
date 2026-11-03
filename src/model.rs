@@ -35,6 +35,8 @@ pub struct Bar {
     pub fill: usize,
     /// Current insertion index (resets on wrap)
     pub write_pos: usize,
+    /// Completed wraps of the fill track in the current execution
+    pub laps: usize,
     /// Pipeline/workflow disappeared from API
     pub gone: bool,
     /// When the last execution finished (Succeeded or Failed)
@@ -48,6 +50,7 @@ impl Bar {
             status: BuildStatus::Idle,
             fill: 0,
             write_pos: 0,
+            laps: 0,
             gone: false,
             last_finished: None,
         }
@@ -63,6 +66,7 @@ impl Bar {
                     tracing::debug!(bar = %self.name, from = ?self.status, "→ Running");
                     self.fill = 0;
                     self.write_pos = 0;
+                    self.laps = 0;
                 }
                 self.status = BuildStatus::Running;
             }
@@ -98,6 +102,7 @@ impl Bar {
         if self.fill >= tick_area_width {
             self.fill = 0;
             self.write_pos = 0;
+            self.laps += 1;
             return;
         }
         self.fill += 1;
@@ -228,6 +233,36 @@ mod tests {
         bar.set_status(BuildStatus::Failed);
         assert_eq!(bar.status, BuildStatus::Failed);
         assert_eq!(bar.fill, 1);
+    }
+
+    #[test]
+    fn tick_wrap_counts_lap() {
+        let mut bar = make_bar();
+        bar.set_status(BuildStatus::Running);
+        for _ in 0..3 {
+            bar.tick(3);
+        }
+        assert_eq!(bar.laps, 0, "full but not wrapped yet");
+        bar.tick(3);
+        assert_eq!(bar.laps, 1);
+        assert_eq!(bar.fill, 0);
+        for _ in 0..4 {
+            bar.tick(3);
+        }
+        assert_eq!(bar.laps, 2);
+    }
+
+    #[test]
+    fn laps_reset_on_new_run_and_kept_on_finish() {
+        let mut bar = make_bar();
+        bar.set_status(BuildStatus::Running);
+        for _ in 0..4 {
+            bar.tick(3);
+        }
+        bar.set_status(BuildStatus::Succeeded);
+        assert_eq!(bar.laps, 1, "finished bar keeps lap count");
+        bar.set_status(BuildStatus::Running);
+        assert_eq!(bar.laps, 0, "new execution starts fresh");
     }
 
     #[test]

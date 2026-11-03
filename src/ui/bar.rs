@@ -78,8 +78,8 @@ impl Widget for BarWidget<'_> {
             spans.push(Span::styled("\u{25CF} ", Style::default().fg(dot_color)));
         }
         spans.push(Span::raw(format!("{name_display}  ")));
-        if !self.dim && self.bar.status == BuildStatus::Running && filled > 0 {
-            let ch = theme::BAR_FILLED.to_string();
+        let mut cells: Vec<(char, Color)> = Vec::with_capacity(fill_width);
+        if !self.dim && self.bar.status == BuildStatus::Running {
             for i in 0..filled {
                 let t = if filled == 1 {
                     1.0
@@ -87,20 +87,26 @@ impl Widget for BarWidget<'_> {
                     i as f32 / (filled - 1) as f32
                 };
                 let c = theme::lerp_color(theme::STATUS_RUNNING, theme::STATUS_RUNNING_TIP, t);
-                spans.push(Span::styled(ch.clone(), Style::default().fg(c)));
+                cells.push((theme::BAR_FILLED, c));
             }
-        } else if filled > 0 {
-            spans.push(Span::styled(
-                theme::BAR_FILLED.to_string().repeat(filled),
-                Style::default().fg(color),
-            ));
+        } else {
+            cells.extend(std::iter::repeat_n((theme::BAR_FILLED, color), filled));
         }
-        if empty > 0 {
-            spans.push(Span::styled(
-                theme::BAR_UNFILLED.to_string().repeat(empty),
-                Style::default().fg(theme::BAR_EMPTY),
-            ));
+        cells.extend(std::iter::repeat_n(
+            (theme::BAR_UNFILLED, theme::BAR_EMPTY),
+            empty,
+        ));
+        if !self.dim {
+            // One marker per completed wrap, so laps stay visible after reset.
+            for cell in cells.iter_mut().take(self.bar.laps) {
+                *cell = (theme::BAR_FILLED, theme::LAP_MARKER);
+            }
         }
+        spans.extend(
+            cells
+                .into_iter()
+                .map(|(ch, c)| Span::styled(ch.to_string(), Style::default().fg(c))),
+        );
         match ts_str {
             Some(ts) => spans.push(Span::styled(
                 format!(" {ts} "),
@@ -232,6 +238,7 @@ mod tests {
             status,
             fill,
             write_pos: fill,
+            laps: 0,
             gone: false,
             last_finished: None,
         }
@@ -1043,6 +1050,67 @@ mod tests {
             let mid = &filled_cells[len / 2];
             assert_ne!(mid.fg, filled_cells[0].fg, "mid should differ from start");
         }
+    }
+
+    fn bar_cells(buf: &Buffer) -> Vec<Color> {
+        let bar_str = theme::BAR_FILLED.to_string();
+        buf.content()
+            .iter()
+            .filter(|c| c.symbol() == bar_str)
+            .map(|c| c.fg)
+            .collect()
+    }
+
+    #[test]
+    fn lap_markers_color_first_cells() {
+        let mut bar = make_bar("build", BuildStatus::Running, 5);
+        bar.laps = 2;
+        let widget = BarWidget::new(&bar, 10, false);
+        let area = Rect::new(0, 0, 40, 1);
+        let mut buf = Buffer::empty(area);
+        widget.render(area, &mut buf);
+        let cells = bar_cells(&buf);
+        assert_eq!(cells[0], theme::LAP_MARKER);
+        assert_eq!(cells[1], theme::LAP_MARKER);
+        assert_ne!(cells[2], theme::LAP_MARKER);
+    }
+
+    #[test]
+    fn lap_markers_visible_right_after_wrap() {
+        // fill=0 after wrap: marker must still show over the empty track
+        let mut bar = make_bar("build", BuildStatus::Running, 0);
+        bar.laps = 1;
+        let widget = BarWidget::new(&bar, 10, false);
+        let area = Rect::new(0, 0, 40, 1);
+        let mut buf = Buffer::empty(area);
+        widget.render(area, &mut buf);
+        let cells = bar_cells(&buf);
+        assert_eq!(cells[0], theme::LAP_MARKER);
+        assert_eq!(cells[1], theme::BAR_EMPTY);
+    }
+
+    #[test]
+    fn lap_markers_kept_on_succeeded_bar() {
+        let mut bar = make_bar("build", BuildStatus::Succeeded, 4);
+        bar.laps = 1;
+        let widget = BarWidget::new(&bar, 10, false);
+        let area = Rect::new(0, 0, 40, 1);
+        let mut buf = Buffer::empty(area);
+        widget.render(area, &mut buf);
+        let cells = bar_cells(&buf);
+        assert_eq!(cells[0], theme::LAP_MARKER);
+        assert_eq!(cells[1], theme::STATUS_SUCCESS);
+    }
+
+    #[test]
+    fn no_lap_markers_when_dim() {
+        let mut bar = make_bar("build", BuildStatus::Running, 4);
+        bar.laps = 1;
+        let widget = BarWidget::new(&bar, 10, true);
+        let area = Rect::new(0, 0, 40, 1);
+        let mut buf = Buffer::empty(area);
+        widget.render(area, &mut buf);
+        assert!(!bar_cells(&buf).contains(&theme::LAP_MARKER));
     }
 
     #[test]

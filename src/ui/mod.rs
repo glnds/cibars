@@ -963,6 +963,7 @@ mod tests {
             status,
             fill: 0,
             write_pos: 0,
+            laps: 0,
             gone: false,
             last_finished: None,
         }
