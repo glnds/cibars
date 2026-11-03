@@ -469,7 +469,11 @@ fn render_pipeline_centric(
                         };
                         frame.render_widget(
                             BarWidget::new(bar, job_name_width, bar_dim)
-                                .with_intro(intro::level_for(intro_elapsed, &bar.name))
+                                .with_intro(intro::frame_for(
+                                    intro_elapsed,
+                                    app.intro_bands.get(&bar.name).copied(),
+                                    &bar.name,
+                                ))
                                 .with_dot(dot_color),
                             row_areas[ri],
                         );
@@ -508,8 +512,13 @@ fn render_pipeline_centric(
                                 1,
                             );
                             frame.render_widget(
-                                BarWidget::new(stage, stage_name_width, bar_dim)
-                                    .with_intro(intro::level_for(intro_elapsed, &stage.name)),
+                                BarWidget::new(stage, stage_name_width, bar_dim).with_intro(
+                                    intro::frame_for(
+                                        intro_elapsed,
+                                        app.intro_bands.get(&stage.name).copied(),
+                                        &stage.name,
+                                    ),
+                                ),
                                 stage_area,
                             );
                         }
@@ -728,7 +737,11 @@ pub fn run_ui(
                         };
                         frame.render_widget(
                             BarWidget::new(bar, job_name_width, bar_dim)
-                                .with_intro(intro::level_for(intro_elapsed, &bar.name))
+                                .with_intro(intro::frame_for(
+                                    intro_elapsed,
+                                    app.intro_bands.get(&bar.name).copied(),
+                                    &bar.name,
+                                ))
                                 .with_dot(dot_color),
                             inner_areas[row],
                         );
@@ -772,8 +785,13 @@ pub fn run_ui(
                                     1,
                                 );
                                 frame.render_widget(
-                                    BarWidget::new(stage, stage_name_width, bar_dim)
-                                        .with_intro(intro::level_for(intro_elapsed, &stage.name)),
+                                    BarWidget::new(stage, stage_name_width, bar_dim).with_intro(
+                                        intro::frame_for(
+                                            intro_elapsed,
+                                            app.intro_bands.get(&stage.name).copied(),
+                                            &stage.name,
+                                        ),
+                                    ),
                                     stage_area,
                                 );
                                 row += 1;
@@ -811,7 +829,11 @@ pub fn run_ui(
                             }
                             frame.render_widget(
                                 BarWidget::new(bar, job_name_width, true)
-                                    .with_intro(intro::level_for(intro_elapsed, &bar.name))
+                                    .with_intro(intro::frame_for(
+                                        intro_elapsed,
+                                        app.intro_bands.get(&bar.name).copied(),
+                                        &bar.name,
+                                    ))
                                     .with_dot(theme::FG_DIM),
                                 inner_areas[row],
                             );
@@ -890,8 +912,13 @@ pub fn run_ui(
                         }
                         let bar_dim = dim || group.gone || group.pending_link;
                         frame.render_widget(
-                            BarWidget::new(bar, stage_name_width, bar_dim)
-                                .with_intro(intro::level_for(intro_elapsed, &bar.name)),
+                            BarWidget::new(bar, stage_name_width, bar_dim).with_intro(
+                                intro::frame_for(
+                                    intro_elapsed,
+                                    app.intro_bands.get(&bar.name).copied(),
+                                    &bar.name,
+                                ),
+                            ),
                             inner_areas[row],
                         );
                         row += 1;
