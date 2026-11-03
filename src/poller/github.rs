@@ -9,6 +9,65 @@ pub struct GitHubActionsClient {
     owner: String,
     repo: String,
     branch: Option<String>,
+    /// Latest run per workflow from earlier polls, so steady-state polls
+    /// only need page 1 of the (slow, ~40 KB/run) runs listing.
+    runs_cache: std::sync::Mutex<RunsCache>,
+}
+
+type LatestRuns = std::collections::HashMap<String, (u64, BuildStatus)>;
+
+#[derive(Default)]
+struct RunsCache {
+    latest: LatestRuns,
+    calls: u32,
+}
+
+/// Runs per page. Listing time scales with payload: 100/page ≈ 3.2 s,
+/// 30/page ≈ 1.4 s (measured on a real repo).
+const RUNS_PER_PAGE: u32 = 30;
+/// Safety cap on pages per full scan (≈ same 2000-run lookback as before).
+const MAX_PAGES: u32 = 60;
+/// Every Nth listing is a full scan, so removed workflows drop out.
+const FULL_SCAN_EVERY: u32 = 20;
+
+/// Full scan (all pages) vs page 1 merged into the cache.
+fn needs_full_scan(known: &LatestRuns, call: u32) -> bool {
+    known.is_empty() || call.is_multiple_of(FULL_SCAN_EVERY)
+}
+
+/// A cached Running workflow absent from the fresh page would freeze as
+/// Running; the poll then escalates to a full scan to find its latest run.
+fn has_stale_running(known: &LatestRuns, fresh: &LatestRuns) -> bool {
+    known
+        .iter()
+        .any(|(name, (_, st))| *st == BuildStatus::Running && !fresh.contains_key(name))
+}
+
+/// Whether to fetch the next runs page.
+fn more_pages(page: u32, fetched: u64, total_count: u64, found_new: bool, full_scan: bool) -> bool {
+    full_scan
+        && fetched >= RUNS_PER_PAGE as u64
+        && (page as u64) * (RUNS_PER_PAGE as u64) < total_count
+        && page < MAX_PAGES
+        // no new workflows on this page: all later pages are older
+        && found_new
+}
+
+/// A page "made progress" if it found a new workflow, or if every run on it
+/// was filtered out (e.g. a flood of bot runs), which says nothing about
+/// older pages.
+fn page_progress(found_new: bool, eligible_runs: usize) -> bool {
+    found_new || eligible_runs == 0
+}
+
+/// Incremental poll: fresh runs win, workflows not on page 1 keep their last run.
+fn merge_latest(known: &mut LatestRuns, fresh: LatestRuns) {
+    known.extend(fresh);
+}
+
+/// Full scan is authoritative: replaces the cache.
+fn replace_latest(known: &mut LatestRuns, fresh: LatestRuns) {
+    *known = fresh;
 }
 
 impl GitHubActionsClient {
@@ -22,13 +81,15 @@ impl GitHubActionsClient {
             owner,
             repo,
             branch,
+            runs_cache: std::sync::Mutex::new(RunsCache::default()),
         })
     }
 }
 
 /// Build the API route for listing workflow runs, optionally filtered by branch.
 fn build_runs_route(owner: &str, repo: &str, page: u32, branch: Option<&str>) -> String {
-    let mut route = format!("/repos/{owner}/{repo}/actions/runs?per_page=100&page={page}");
+    let mut route =
+        format!("/repos/{owner}/{repo}/actions/runs?per_page={RUNS_PER_PAGE}&page={page}");
     if let Some(b) = branch {
         route.push_str("&branch=");
         route.push_str(b);
@@ -69,9 +130,18 @@ impl ActionsClient for GitHubActionsClient {
             std::collections::HashMap::new();
         let mut pr_numbers: std::collections::HashSet<u64> = std::collections::HashSet::new();
 
+        let (mut full_scan, known) = {
+            let mut cache = self
+                .runs_cache
+                .lock()
+                .map_err(|_| anyhow::anyhow!("runs cache mutex poisoned"))?;
+            cache.calls = cache.calls.wrapping_add(1);
+            (
+                needs_full_scan(&cache.latest, cache.calls),
+                cache.latest.clone(),
+            )
+        };
         let mut page: u32 = 1;
-        // Safety cap to avoid infinite loops on API misbehaviour.
-        const MAX_PAGES: u32 = 20;
 
         loop {
             let route = build_runs_route(&self.owner, &self.repo, page, self.branch.as_deref());
@@ -82,7 +152,7 @@ impl ActionsClient for GitHubActionsClient {
                 .context("failed to list workflow runs")?;
 
             let prev_count = latest_per_workflow.len();
-            parse_workflow_runs(
+            let eligible = parse_workflow_runs(
                 &resp,
                 &mut latest_per_workflow,
                 &mut pr_numbers,
@@ -95,22 +165,38 @@ impl ActionsClient for GitHubActionsClient {
                 .as_array()
                 .map_or(0, |a| a.len() as u64);
 
-            // No new workflows on this page — all subsequent pages are older, stop.
-            let no_new_workflows = new_count == prev_count;
-
-            if fetched < 100
-                || (page as u64) * 100 >= total_count
-                || page >= MAX_PAGES
-                || no_new_workflows
-            {
+            if !full_scan && has_stale_running(&known, &latest_per_workflow) {
+                full_scan = true;
+            }
+            if !more_pages(
+                page,
+                fetched,
+                total_count,
+                page_progress(new_count > prev_count, eligible),
+                full_scan,
+            ) {
                 break;
             }
             page += 1;
         }
 
+        let latest_per_workflow = {
+            let mut cache = self
+                .runs_cache
+                .lock()
+                .map_err(|_| anyhow::anyhow!("runs cache mutex poisoned"))?;
+            if full_scan {
+                replace_latest(&mut cache.latest, latest_per_workflow);
+            } else {
+                merge_latest(&mut cache.latest, latest_per_workflow);
+            }
+            cache.latest.clone()
+        };
+
         tracing::debug!(
             workflows = latest_per_workflow.len(),
             pages = page,
+            full_scan,
             "deduped workflow runs"
         );
 
@@ -371,7 +457,8 @@ fn parse_workflow_runs(
     latest: &mut std::collections::HashMap<String, (u64, BuildStatus)>,
     prs: &mut std::collections::HashSet<u64>,
     branch_filter: Option<&str>,
-) {
+) -> usize {
+    let mut eligible = 0;
     if let Some(runs) = resp["workflow_runs"].as_array() {
         for run in runs {
             let run_id = match run["id"].as_u64() {
@@ -421,23 +508,149 @@ fn parse_workflow_runs(
             }
 
             let name = run["name"].as_str().unwrap_or("unknown").to_string();
+            eligible += 1;
             latest
                 .entry(name)
                 .or_insert((run_id, map_run_status(status, conclusion)));
         }
     }
+    eligible
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
 
     // --- build_runs_route tests ---
+
+    // --- incremental run listing ---
+
+    fn known(entries: &[(&str, u64, BuildStatus)]) -> HashMap<String, (u64, BuildStatus)> {
+        entries
+            .iter()
+            .map(|(n, id, st)| (n.to_string(), (*id, *st)))
+            .collect()
+    }
+
+    #[test]
+    fn full_scan_on_first_call() {
+        assert!(needs_full_scan(&HashMap::new(), 1));
+    }
+
+    #[test]
+    fn page_one_only_when_cache_warm() {
+        let k = known(&[("CI", 1, BuildStatus::Succeeded)]);
+        assert!(!needs_full_scan(&k, 1));
+    }
+
+    #[test]
+    fn periodic_full_rescan() {
+        let k = known(&[("CI", 1, BuildStatus::Succeeded)]);
+        assert!(needs_full_scan(&k, FULL_SCAN_EVERY));
+        assert!(needs_full_scan(&k, 2 * FULL_SCAN_EVERY));
+    }
+
+    #[test]
+    fn running_cached_run_does_not_force_full_scan() {
+        let k = known(&[("CI", 1, BuildStatus::Running)]);
+        assert!(!needs_full_scan(&k, 1));
+    }
+
+    #[test]
+    fn stale_running_when_cached_running_missing_from_page() {
+        // a running run must not freeze in the cache: keep paging until seen
+        let k = known(&[
+            ("CI", 1, BuildStatus::Succeeded),
+            ("Deploy", 2, BuildStatus::Running),
+        ]);
+        assert!(has_stale_running(
+            &k,
+            &known(&[("CI", 3, BuildStatus::Running)])
+        ));
+        assert!(!has_stale_running(
+            &k,
+            &known(&[("Deploy", 2, BuildStatus::Succeeded)])
+        ));
+        let idle = known(&[("CI", 1, BuildStatus::Succeeded)]);
+        assert!(!has_stale_running(&idle, &HashMap::new()));
+    }
+
+    #[test]
+    fn parse_counts_eligible_runs_only() {
+        let resp = serde_json::json!({
+            "total_count": 3,
+            "workflow_runs": [
+                {"id": 1, "name": "CI", "event": "push", "status": "completed",
+                 "conclusion": "success", "actor": {"login": "renovate[bot]"}},
+                {"id": 2, "name": "CI", "event": "push", "status": "completed",
+                 "conclusion": "success", "actor": {"login": "glnds"}},
+                {"id": 3, "name": "Claude", "event": "push", "status": "completed",
+                 "conclusion": "skipped", "actor": {"login": "glnds"}},
+            ]
+        });
+        let mut latest = HashMap::new();
+        let mut prs = std::collections::HashSet::new();
+        assert_eq!(parse_workflow_runs(&resp, &mut latest, &mut prs, None), 1);
+    }
+
+    #[test]
+    fn all_filtered_page_still_counts_as_progress() {
+        // a page of only bot runs says nothing about older pages: keep going
+        assert!(page_progress(false, 0));
+        assert!(page_progress(true, 5));
+        assert!(!page_progress(false, 5), "eligible runs, nothing new: stop");
+    }
+
+    #[test]
+    fn more_pages_rules() {
+        let full = |page, fetched, total, new| more_pages(page, fetched, total, new, true);
+        assert!(full(1, RUNS_PER_PAGE as u64, 500, true));
+        assert!(!full(1, 10, 500, true), "short page = last page");
+        assert!(
+            !full(1, RUNS_PER_PAGE as u64, RUNS_PER_PAGE as u64, true),
+            "total reached"
+        );
+        assert!(
+            !full(1, RUNS_PER_PAGE as u64, 500, false),
+            "no new workflows"
+        );
+        assert!(
+            !full(MAX_PAGES, RUNS_PER_PAGE as u64, 5000, true),
+            "page cap"
+        );
+        assert!(
+            !more_pages(1, RUNS_PER_PAGE as u64, 500, true, false),
+            "incremental = page 1"
+        );
+    }
+
+    #[test]
+    fn merge_keeps_unseen_and_overwrites_seen() {
+        let mut k = known(&[
+            ("CI", 1, BuildStatus::Succeeded),
+            ("Nightly", 5, BuildStatus::Failed),
+        ]);
+        let fresh = known(&[("CI", 9, BuildStatus::Running)]);
+        merge_latest(&mut k, fresh);
+        assert_eq!(k.get("CI"), Some(&(9, BuildStatus::Running)));
+        assert_eq!(k.get("Nightly"), Some(&(5, BuildStatus::Failed)));
+    }
+
+    #[test]
+    fn full_scan_result_replaces_cache() {
+        // full scan is authoritative: workflows gone from GitHub drop out
+        let mut k = known(&[("Old", 1, BuildStatus::Succeeded)]);
+        let fresh = known(&[("CI", 2, BuildStatus::Succeeded)]);
+        replace_latest(&mut k, fresh);
+        assert!(!k.contains_key("Old"));
+        assert!(k.contains_key("CI"));
+    }
 
     #[test]
     fn build_runs_route_no_branch() {
         let route = build_runs_route("owner", "repo", 1, None);
-        assert_eq!(route, "/repos/owner/repo/actions/runs?per_page=100&page=1");
+        assert_eq!(route, "/repos/owner/repo/actions/runs?per_page=30&page=1");
     }
 
     #[test]
@@ -445,7 +658,7 @@ mod tests {
         let route = build_runs_route("owner", "repo", 1, Some("master"));
         assert_eq!(
             route,
-            "/repos/owner/repo/actions/runs?per_page=100&page=1&branch=master"
+            "/repos/owner/repo/actions/runs?per_page=30&page=1&branch=master"
         );
     }
 
@@ -454,7 +667,7 @@ mod tests {
         let route = build_runs_route("o", "r", 2, Some("main"));
         assert_eq!(
             route,
-            "/repos/o/r/actions/runs?per_page=100&page=2&branch=main"
+            "/repos/o/r/actions/runs?per_page=30&page=2&branch=main"
         );
     }
 
