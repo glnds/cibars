@@ -161,6 +161,20 @@ fn section_height(has_content: bool, expanded: bool, content_rows: usize) -> u16
     }
 }
 
+/// Section height, or 0 when its source is disabled (section hidden).
+fn visible_section_height(
+    enabled: bool,
+    has_content: bool,
+    expanded: bool,
+    content_rows: usize,
+) -> u16 {
+    if enabled {
+        section_height(has_content, expanded, content_rows)
+    } else {
+        0
+    }
+}
+
 /// Compute layout constraints for the main UI.
 fn compute_layout_constraints(actions_height: u16, pipelines_height: u16) -> Vec<Constraint> {
     vec![
@@ -369,9 +383,9 @@ fn render_pipeline_centric(
     frame: &mut ratatui::Frame,
     app: &App,
     sections: &[PipelineCentricSection],
-    profile: &str,
-    region: &str,
-    repo: &str,
+    profile: Option<&str>,
+    region: Option<&str>,
+    repo: Option<&str>,
     dim: bool,
 ) {
     let size = frame.area();
@@ -503,6 +517,7 @@ fn render_pipeline_centric(
             push_signal_at: app.push_signal_at,
             linkage_broken: app.linkage_broken,
             linkage_discovering: app.linkage_discovering,
+            linkage_enabled: app.linkage_enabled(),
         },
         status_area,
     );
@@ -512,9 +527,9 @@ fn render_pipeline_centric(
 pub fn run_ui(
     app: Arc<Mutex<App>>,
     mut terminal: DefaultTerminal,
-    profile: &str,
-    region: &str,
-    repo: &str,
+    profile: Option<&str>,
+    region: Option<&str>,
+    repo: Option<&str>,
     boost_notify: Arc<Notify>,
     link_notify: Arc<Notify>,
     term_flag: &AtomicBool,
@@ -621,8 +636,18 @@ pub fn run_ui(
             };
 
             // Compute block heights
-            let actions_height = section_height(has_actions, app.actions_expanded, action_rows);
-            let pipelines_height = section_height(has_pipelines, app.pipelines_expanded, pipe_rows);
+            let actions_height = visible_section_height(
+                app.actions_enabled,
+                has_actions,
+                app.actions_expanded,
+                action_rows,
+            );
+            let pipelines_height = visible_section_height(
+                app.pipelines_enabled,
+                has_pipelines,
+                app.pipelines_expanded,
+                pipe_rows,
+            );
 
             let constraints = compute_layout_constraints(actions_height, pipelines_height);
             let areas = Layout::vertical(constraints).split(size);
@@ -870,6 +895,7 @@ pub fn run_ui(
                     push_signal_at: app.push_signal_at,
                     linkage_broken: app.linkage_broken,
                     linkage_discovering: app.linkage_discovering,
+                    linkage_enabled: app.linkage_enabled(),
                 },
                 areas[4],
             );
@@ -1495,6 +1521,13 @@ mod tests {
         let sorted = sorted_workflow_groups(&groups);
         assert_eq!(sorted[0].name, "aaa-running");
         assert_eq!(sorted[1].name, "zzz-idle");
+    }
+
+    #[test]
+    fn disabled_section_has_zero_height() {
+        assert_eq!(visible_section_height(false, true, true, 5), 0);
+        assert_eq!(visible_section_height(true, true, true, 5), 7);
+        assert_eq!(visible_section_height(true, false, true, 0), 3);
     }
 
     #[test]

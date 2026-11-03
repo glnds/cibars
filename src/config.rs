@@ -14,6 +14,8 @@ pub struct WorkflowCategoryConfig {
 
 #[derive(Deserialize, Debug, Default)]
 pub struct FileConfig {
+    /// Which CI sources to monitor: "github", "aws". Absent = both.
+    pub sources: Option<Vec<String>>,
     pub aws_profile: Option<String>,
     pub region: Option<String>,
     pub github_repo: Option<String>,
@@ -24,6 +26,10 @@ pub struct FileConfig {
 #[derive(Parser, Debug, Clone)]
 #[command(name = "cibars", about = "CI build status bars")]
 pub struct CliArgs {
+    /// CI sources to monitor, comma-separated: github,aws (default: both)
+    #[arg(long, value_delimiter = ',')]
+    pub sources: Option<Vec<String>>,
+
     /// AWS profile name
     #[arg(long)]
     pub aws_profile: Option<String>,
@@ -41,46 +47,95 @@ pub struct CliArgs {
     pub branch: Option<String>,
 }
 
+/// AWS CodePipeline source settings.
 #[derive(Debug, Clone)]
-pub struct Config {
-    pub aws_profile: String,
+pub struct AwsSource {
+    pub profile: String,
     pub region: String,
-    pub github_repo: String,
+}
+
+/// GitHub Actions source settings.
+#[derive(Debug, Clone)]
+pub struct GithubSource {
+    /// owner/repo
+    pub repo: String,
     /// Git branch to filter GitHub Actions runs (None = all branches).
     pub branch: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct Config {
+    /// None = AWS CodePipeline monitoring disabled.
+    pub aws: Option<AwsSource>,
+    /// None = GitHub Actions monitoring disabled.
+    pub github: Option<GithubSource>,
     /// Explicit workflow names classified as Review (from config file).
     pub review_workflows: Vec<String>,
 }
 
+const SOURCE_GITHUB: &str = "github";
+const SOURCE_AWS: &str = "aws";
+
 impl Config {
-    pub fn load(cwd: &Path) -> Result<(Self, String)> {
+    /// Returns the config and, when GitHub is enabled, its token.
+    pub fn load(cwd: &Path) -> Result<(Self, Option<String>)> {
         let cli = CliArgs::parse();
         let file = load_file_config(cwd);
         let config = Self::merge_sources(cli, file)?;
-        let token = resolve_github_token()?;
+        let token = match config.github {
+            Some(_) => Some(resolve_github_token()?),
+            None => None,
+        };
         Ok((config, token))
     }
 
     fn merge_sources(cli: CliArgs, file: FileConfig) -> Result<Self> {
-        let aws_profile = cli
-            .aws_profile
-            .or(file.aws_profile)
-            .context("aws_profile: not provided via --aws-profile or config.toml")?;
-        let region = cli
-            .region
-            .or(file.region)
-            .context("region: not provided via --region or config.toml")?;
-        let github_repo = cli
-            .github_repo
-            .or(file.github_repo)
-            .context("github_repo: not provided via --github-repo or config.toml")?;
-
+        // Absent everywhere = both (backward compatible).
+        let sources = cli
+            .sources
+            .or(file.sources)
+            .unwrap_or_else(|| vec![SOURCE_GITHUB.into(), SOURCE_AWS.into()]);
         ensure!(
-            github_repo.contains('/'),
-            "github-repo must be in owner/repo format"
+            !sources.is_empty(),
+            "sources: empty; set at least one of \"github\", \"aws\""
         );
+        if let Some(bad) = sources
+            .iter()
+            .find(|s| *s != SOURCE_GITHUB && *s != SOURCE_AWS)
+        {
+            anyhow::bail!("sources: unknown source {bad:?}; expected \"github\" or \"aws\"");
+        }
+        let want = |name: &str| sources.iter().any(|s| s == name);
 
-        let branch = cli.branch.or(file.branch);
+        let aws = if want(SOURCE_AWS) {
+            let profile = cli
+                .aws_profile
+                .or(file.aws_profile)
+                .context("aws_profile: not provided via --aws-profile or config.toml (needed by source \"aws\")")?;
+            let region = cli.region.or(file.region).context(
+                "region: not provided via --region or config.toml (needed by source \"aws\")",
+            )?;
+            Some(AwsSource { profile, region })
+        } else {
+            None
+        };
+
+        let github = if want(SOURCE_GITHUB) {
+            let repo = cli
+                .github_repo
+                .or(file.github_repo)
+                .context("github_repo: not provided via --github-repo or config.toml (needed by source \"github\")")?;
+            ensure!(
+                repo.contains('/'),
+                "github-repo must be in owner/repo format"
+            );
+            Some(GithubSource {
+                repo,
+                branch: cli.branch.or(file.branch),
+            })
+        } else {
+            None
+        };
 
         let review_workflows = file
             .workflow_categories
@@ -88,10 +143,8 @@ impl Config {
             .unwrap_or_default();
 
         Ok(Config {
-            aws_profile,
-            region,
-            github_repo,
-            branch,
+            aws,
+            github,
             review_workflows,
         })
     }
@@ -425,9 +478,9 @@ mod tests {
             "acme/backend",
         ])
         .unwrap();
-        assert_eq!(config.aws_profile, "staging");
-        assert_eq!(config.region, "eu-west-1");
-        assert_eq!(config.github_repo, "acme/backend");
+        assert_eq!(config.aws.as_ref().unwrap().profile, "staging");
+        assert_eq!(config.aws.as_ref().unwrap().region, "eu-west-1");
+        assert_eq!(config.github.as_ref().unwrap().repo, "acme/backend");
     }
 
     #[test]
@@ -532,13 +585,14 @@ aws_profile = "staging"
             aws_profile: Some("from-file".into()),
             region: Some("eu-west-1".into()),
             github_repo: Some("org/repo".into()),
+            sources: None,
             branch: None,
             workflow_categories: None,
         };
         let config = Config::merge(&["cibars", "--aws-profile", "from-cli"], file).unwrap();
-        assert_eq!(config.aws_profile, "from-cli");
-        assert_eq!(config.region, "eu-west-1");
-        assert_eq!(config.github_repo, "org/repo");
+        assert_eq!(config.aws.as_ref().unwrap().profile, "from-cli");
+        assert_eq!(config.aws.as_ref().unwrap().region, "eu-west-1");
+        assert_eq!(config.github.as_ref().unwrap().repo, "org/repo");
     }
 
     #[test]
@@ -547,13 +601,14 @@ aws_profile = "staging"
             aws_profile: Some("staging".into()),
             region: Some("eu-west-1".into()),
             github_repo: Some("acme/backend".into()),
+            sources: None,
             branch: None,
             workflow_categories: None,
         };
         let config = Config::merge(&["cibars"], file).unwrap();
-        assert_eq!(config.aws_profile, "staging");
-        assert_eq!(config.region, "eu-west-1");
-        assert_eq!(config.github_repo, "acme/backend");
+        assert_eq!(config.aws.as_ref().unwrap().profile, "staging");
+        assert_eq!(config.aws.as_ref().unwrap().region, "eu-west-1");
+        assert_eq!(config.github.as_ref().unwrap().repo, "acme/backend");
     }
 
     #[test]
@@ -572,9 +627,9 @@ aws_profile = "staging"
             file,
         )
         .unwrap();
-        assert_eq!(config.aws_profile, "p");
-        assert_eq!(config.region, "r");
-        assert_eq!(config.github_repo, "o/r");
+        assert_eq!(config.aws.as_ref().unwrap().profile, "p");
+        assert_eq!(config.aws.as_ref().unwrap().region, "r");
+        assert_eq!(config.github.as_ref().unwrap().repo, "o/r");
     }
 
     #[test]
@@ -583,11 +638,137 @@ aws_profile = "staging"
             aws_profile: Some("staging".into()),
             region: None,
             github_repo: None,
+            sources: None,
             branch: None,
             workflow_categories: None,
         };
         let result = Config::merge(&["cibars"], file);
         assert!(result.is_err());
+    }
+
+    // --- optional sources ---
+
+    fn src_file(sources: Option<Vec<&str>>) -> FileConfig {
+        FileConfig {
+            sources: sources.map(|v| v.into_iter().map(String::from).collect()),
+            ..FileConfig::default()
+        }
+    }
+
+    #[test]
+    fn sources_default_to_both() {
+        let config = Config::try_from_args(&[
+            "cibars",
+            "--aws-profile",
+            "p",
+            "--region",
+            "r",
+            "--github-repo",
+            "o/r",
+        ])
+        .unwrap();
+        assert!(config.aws.is_some());
+        assert!(config.github.is_some());
+    }
+
+    #[test]
+    fn github_only_needs_no_aws_settings() {
+        let config =
+            Config::try_from_args(&["cibars", "--sources", "github", "--github-repo", "o/r"])
+                .unwrap();
+        assert!(config.aws.is_none());
+        assert_eq!(config.github.unwrap().repo, "o/r");
+    }
+
+    #[test]
+    fn aws_only_needs_no_github_settings() {
+        let config = Config::try_from_args(&[
+            "cibars",
+            "--sources",
+            "aws",
+            "--aws-profile",
+            "p",
+            "--region",
+            "r",
+        ])
+        .unwrap();
+        assert!(config.github.is_none());
+        let aws = config.aws.unwrap();
+        assert_eq!((aws.profile.as_str(), aws.region.as_str()), ("p", "r"));
+    }
+
+    #[test]
+    fn cli_sources_comma_separated() {
+        let config = Config::try_from_args(&[
+            "cibars",
+            "--sources",
+            "aws,github",
+            "--aws-profile",
+            "p",
+            "--region",
+            "r",
+            "--github-repo",
+            "o/r",
+        ])
+        .unwrap();
+        assert!(config.aws.is_some() && config.github.is_some());
+    }
+
+    #[test]
+    fn file_sources_respected() {
+        let mut file = src_file(Some(vec!["github"]));
+        file.github_repo = Some("o/r".into());
+        let config = Config::merge(&["cibars"], file).unwrap();
+        assert!(config.aws.is_none());
+        assert!(config.github.is_some());
+    }
+
+    #[test]
+    fn cli_sources_override_file() {
+        let mut file = src_file(Some(vec!["github"]));
+        file.aws_profile = Some("p".into());
+        file.region = Some("r".into());
+        let config = Config::merge(&["cibars", "--sources", "aws"], file).unwrap();
+        assert!(config.github.is_none());
+        assert!(config.aws.is_some());
+    }
+
+    #[test]
+    fn github_enabled_without_repo_fails() {
+        let err = Config::try_from_args(&["cibars", "--sources", "github"])
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("github_repo"), "got: {err}");
+    }
+
+    #[test]
+    fn aws_enabled_without_region_fails() {
+        let err = Config::try_from_args(&["cibars", "--sources", "aws", "--aws-profile", "p"])
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("region"), "got: {err}");
+    }
+
+    #[test]
+    fn empty_sources_fails() {
+        let err = Config::merge(&["cibars"], src_file(Some(vec![])))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("sources"), "got: {err}");
+    }
+
+    #[test]
+    fn unknown_source_fails() {
+        let err = Config::merge(&["cibars"], src_file(Some(vec!["gitlab"])))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("gitlab"), "got: {err}");
+    }
+
+    #[test]
+    fn file_config_parses_sources_key() {
+        let fc: FileConfig = toml::from_str("sources = [\"aws\"]").unwrap();
+        assert_eq!(fc.sources, Some(vec!["aws".to_string()]));
     }
 
     // --- pid_file_for tests ---
@@ -1274,6 +1455,7 @@ aws_profile = "staging"
             aws_profile: Some("p".into()),
             region: Some("r".into()),
             github_repo: Some("o/r".into()),
+            sources: None,
             branch: None,
             workflow_categories: Some(WorkflowCategoryConfig {
                 review: Some(vec!["My Custom Workflow".into()]),
@@ -1292,6 +1474,7 @@ aws_profile = "staging"
             aws_profile: Some("p".into()),
             region: Some("r".into()),
             github_repo: Some("o/r".into()),
+            sources: None,
             branch: None,
             workflow_categories: None,
         };
@@ -1338,7 +1521,10 @@ review = ["Claude Code Review", "dependabot"]
             "master",
         ])
         .unwrap();
-        assert_eq!(config.branch, Some("master".to_string()));
+        assert_eq!(
+            config.github.as_ref().unwrap().branch,
+            Some("master".to_string())
+        );
     }
 
     #[test]
@@ -1347,11 +1533,15 @@ review = ["Claude Code Review", "dependabot"]
             aws_profile: Some("p".into()),
             region: Some("r".into()),
             github_repo: Some("o/r".into()),
+            sources: None,
             branch: Some("master".into()),
             workflow_categories: None,
         };
         let config = Config::merge(&["cibars"], file).unwrap();
-        assert_eq!(config.branch, Some("master".to_string()));
+        assert_eq!(
+            config.github.as_ref().unwrap().branch,
+            Some("master".to_string())
+        );
     }
 
     #[test]
@@ -1360,11 +1550,15 @@ review = ["Claude Code Review", "dependabot"]
             aws_profile: Some("p".into()),
             region: Some("r".into()),
             github_repo: Some("o/r".into()),
+            sources: None,
             branch: Some("develop".into()),
             workflow_categories: None,
         };
         let config = Config::merge(&["cibars", "--branch", "main"], file).unwrap();
-        assert_eq!(config.branch, Some("main".to_string()));
+        assert_eq!(
+            config.github.as_ref().unwrap().branch,
+            Some("main".to_string())
+        );
     }
 
     #[test]
@@ -1379,7 +1573,7 @@ review = ["Claude Code Review", "dependabot"]
             "o/r",
         ])
         .unwrap();
-        assert!(config.branch.is_none());
+        assert!(config.github.as_ref().unwrap().branch.is_none());
     }
 
     #[test]

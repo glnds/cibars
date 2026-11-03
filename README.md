@@ -13,6 +13,8 @@ single screen -- no browser required.
 ### Core Monitoring
 
 - Live polling of AWS CodePipelines and GitHub Actions in a single TUI
+- Either source optional: monitor GitHub Actions only, CodePipeline only,
+  or both (`sources` setting)
 - Hook-driven polling: Sleep (zero polls) until `git push` or `b` key
   triggers Polling (3s) — 90s grace, 60s cooldown after builds finish
 - Auto-discovery of new pipelines and workflow runs (no restart needed)
@@ -74,10 +76,10 @@ single screen -- no browser required.
 
 - [mise](https://mise.jdx.dev) — installs the pinned Rust toolchain and build
   deps (see `mise.toml`)
-- An AWS profile configured via `~/.aws/credentials`,
+- For the `aws` source: an AWS profile configured via `~/.aws/credentials`,
   `~/.aws/config`, or `AWS_PROFILE` (SSO profiles supported)
-- A GitHub token: either `GITHUB_TOKEN` env var or `gh auth token`
-  (GitHub CLI auto-fallback)
+- For the `github` source: a GitHub token, either `GITHUB_TOKEN` env var or
+  `gh auth token` (GitHub CLI auto-fallback)
 
 ## Installation
 
@@ -98,6 +100,7 @@ cibars --aws-profile <profile> --region <region> --github-repo <owner/repo>
 
 | Argument | Description | Example |
 | --- | --- | --- |
+| `--sources` | Sources to monitor, comma-separated (default: both) | `github,aws` |
 | `--aws-profile` | AWS named profile to use | `staging` |
 | `--region` | AWS region | `eu-west-1` |
 | `--github-repo` | GitHub repository in `owner/repo` format | `acme/backend` |
@@ -109,6 +112,7 @@ Instead of passing CLI flags, create a `config.toml` in the working
 directory. CLI args take precedence.
 
 ```toml
+# sources = ["github", "aws"]   # default: both
 aws_profile = "staging"
 region = "eu-west-1"
 github_repo = "acme/backend"
@@ -117,6 +121,21 @@ github_repo = "acme/backend"
 # [workflow_categories]
 # review = ["Claude Code Review"]
 ```
+
+#### Sources
+
+`sources` picks what cibars monitors: `"github"` (GitHub Actions), `"aws"`
+(CodePipeline), or both (the default when the key is absent). Each enabled
+source fails fast at startup if its settings are missing:
+
+| Source | Requires |
+| --- | --- |
+| `github` | `github_repo` + a GitHub token |
+| `aws` | `aws_profile` + `region` |
+
+With a single source, its section, header fields and the token/SSO checks of
+the other source are skipped. Smart linkage (and the `l=relink` key) needs
+both.
 
 Copy `config.toml.example` to get started:
 

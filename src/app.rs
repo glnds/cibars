@@ -30,6 +30,10 @@ pub struct App {
     pub loading_pipelines: bool,
     /// True until first actions poll completes.
     pub loading_actions: bool,
+    /// GitHub Actions source configured.
+    pub actions_enabled: bool,
+    /// AWS CodePipeline source configured.
+    pub pipelines_enabled: bool,
     /// Current poll state machine state, for UI display.
     pub poll_state: PollState,
     /// Git pre-push hook status for boost integration.
@@ -57,6 +61,23 @@ pub struct App {
 impl App {
     pub const MAX_WARNINGS: usize = 10;
 
+    /// App for the configured sources. A disabled source is never loading,
+    /// so it cannot block loading-gated logic (linkage health, intro).
+    pub fn with_sources(github: bool, aws: bool) -> Self {
+        Self {
+            actions_enabled: github,
+            pipelines_enabled: aws,
+            loading_actions: github,
+            loading_pipelines: aws,
+            ..Self::new()
+        }
+    }
+
+    /// Linkage (GH Actions → CodePipeline) needs both sources.
+    pub fn linkage_enabled(&self) -> bool {
+        self.actions_enabled && self.pipelines_enabled
+    }
+
     pub fn new() -> Self {
         Self {
             pipeline_groups: Vec::new(),
@@ -69,6 +90,8 @@ impl App {
             rate_limited_until: None,
             loading_pipelines: true,
             loading_actions: true,
+            actions_enabled: true,
+            pipelines_enabled: true,
             poll_state: PollState::Sleep,
             hook_status: HookStatus::NoGitDir,
             has_global_hooks_path: false,
@@ -174,6 +197,34 @@ mod tests {
     fn app_starts_with_unknown_aws_health() {
         let app = App::new();
         assert_eq!(app.aws_health, SourceHealth::Unknown);
+    }
+
+    #[test]
+    fn with_sources_github_only_skips_pipeline_loading() {
+        let app = App::with_sources(true, false);
+        assert!(app.actions_enabled && !app.pipelines_enabled);
+        assert!(app.loading_actions);
+        assert!(
+            !app.loading_pipelines,
+            "disabled source must not block loading"
+        );
+        assert!(!app.linkage_enabled());
+    }
+
+    #[test]
+    fn with_sources_aws_only_skips_actions_loading() {
+        let app = App::with_sources(false, true);
+        assert!(!app.actions_enabled && app.pipelines_enabled);
+        assert!(!app.loading_actions);
+        assert!(app.loading_pipelines);
+        assert!(!app.linkage_enabled());
+    }
+
+    #[test]
+    fn new_enables_both_sources() {
+        let app = App::new();
+        assert!(app.actions_enabled && app.pipelines_enabled);
+        assert!(app.linkage_enabled());
     }
 
     #[test]

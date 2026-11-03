@@ -1,6 +1,9 @@
 # Copy this file to config.toml and replace the placeholder values.
 # config.toml is gitignored and will not be committed.
 
+# sources = ["github", "aws"]     # what to monitor; default both.
+#                                  # github needs github_repo, aws needs aws_profile + region
+
 aws_profile = "your-aws-profile"   # AWS CLI profile name
 region = "eu-west-1"               # AWS region
 github_repo = "owner/repo"         # GitHub repo (owner/name)

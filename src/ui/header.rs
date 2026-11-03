@@ -8,10 +8,11 @@ use ratatui::widgets::{Block, BorderType, Widget};
 use super::theme;
 use crate::app::SourceHealth;
 
+/// None fields belong to a disabled source and are omitted.
 pub struct Header<'a> {
-    pub profile: &'a str,
-    pub region: &'a str,
-    pub repo: &'a str,
+    pub profile: Option<&'a str>,
+    pub region: Option<&'a str>,
+    pub repo: Option<&'a str>,
     pub aws_health: &'a SourceHealth,
 }
 
@@ -36,40 +37,41 @@ impl Widget for Header<'_> {
         let inner = block.inner(area);
         block.render(area, buf);
 
-        // Profile span: color + icon reflects AWS SSO session state
-        let profile_spans: Vec<Span> = match self.aws_health {
-            SourceHealth::AuthFailed { .. } => vec![
-                Span::styled(self.profile, Style::default().fg(theme::STATUS_FAILED)),
-                Span::styled(
-                    " \u{26A0} SSO expired",
-                    Style::default().fg(theme::STATUS_FAILED),
-                ),
-            ],
-            SourceHealth::Healthy => vec![
-                Span::raw(self.profile),
-                Span::styled(
-                    format!(" {}", theme::CHECK_MARK),
-                    Style::default().fg(theme::STATUS_SUCCESS),
-                ),
-            ],
-            SourceHealth::Unknown => vec![
-                Span::raw(self.profile),
-                Span::styled(
-                    format!(" {}", theme::CHECK_MARK),
-                    Style::default().fg(theme::FG_DIM),
-                ),
-            ],
-        };
-
         let sep = Span::styled(" \u{2502} ", Style::default().fg(theme::SEPARATOR));
-
         let mut spans: Vec<Span> = Vec::new();
-        spans.extend(profile_spans);
-        spans.push(sep.clone());
-        spans.push(Span::raw(self.region));
-        spans.push(sep.clone());
-        spans.push(Span::raw(self.repo));
-        spans.push(sep);
+
+        // Profile span: color + icon reflects AWS SSO session state
+        if let Some(profile) = self.profile {
+            match self.aws_health {
+                SourceHealth::AuthFailed { .. } => {
+                    spans.push(Span::styled(
+                        profile,
+                        Style::default().fg(theme::STATUS_FAILED),
+                    ));
+                    spans.push(Span::styled(
+                        " \u{26A0} SSO expired",
+                        Style::default().fg(theme::STATUS_FAILED),
+                    ));
+                }
+                SourceHealth::Healthy | SourceHealth::Unknown => {
+                    let check = if matches!(self.aws_health, SourceHealth::Healthy) {
+                        theme::STATUS_SUCCESS
+                    } else {
+                        theme::FG_DIM
+                    };
+                    spans.push(Span::raw(profile));
+                    spans.push(Span::styled(
+                        format!(" {}", theme::CHECK_MARK),
+                        Style::default().fg(check),
+                    ));
+                }
+            }
+            spans.push(sep.clone());
+        }
+        for part in [self.region, self.repo].into_iter().flatten() {
+            spans.push(Span::raw(part));
+            spans.push(sep.clone());
+        }
         spans.push(Span::styled(
             format!("{time}"),
             Style::default().fg(theme::FG_DIM),
@@ -95,9 +97,9 @@ mod tests {
         aws_health: &SourceHealth,
     ) -> Buffer {
         let header = Header {
-            profile,
-            region,
-            repo,
+            profile: Some(profile),
+            region: Some(region),
+            repo: Some(repo),
             aws_health,
         };
         let area = Rect::new(0, 0, 100, 3);
@@ -108,6 +110,49 @@ mod tests {
 
     fn render_header(profile: &str, region: &str, repo: &str) -> Buffer {
         render_header_with_health(profile, region, repo, &SourceHealth::Healthy)
+    }
+
+    fn render_header_opt(
+        profile: Option<&str>,
+        region: Option<&str>,
+        repo: Option<&str>,
+    ) -> String {
+        let header = Header {
+            profile,
+            region,
+            repo,
+            aws_health: &SourceHealth::Healthy,
+        };
+        let area = Rect::new(0, 0, 100, 3);
+        let mut buf = Buffer::empty(area);
+        header.render(area, &mut buf);
+        // strip the rounded border cells (same │ glyph as the separator)
+        let row = row_text(&buf, 1);
+        let inner: Vec<char> = row.chars().collect();
+        inner[1..inner.len() - 1].iter().collect()
+    }
+
+    #[test]
+    fn github_only_header_omits_aws_parts() {
+        let content = render_header_opt(None, None, Some("owner/repo"));
+        assert!(content.contains("owner/repo"), "got: {content}");
+        assert!(!content.contains('\u{2713}'), "no SSO check: {content}");
+        assert_eq!(
+            content.matches('\u{2502}').count(),
+            1,
+            "repo │ time: {content}"
+        );
+    }
+
+    #[test]
+    fn aws_only_header_omits_repo() {
+        let content = render_header_opt(Some("prof"), Some("eu-west-1"), None);
+        assert!(content.contains("prof") && content.contains("eu-west-1"));
+        assert_eq!(
+            content.matches('\u{2502}').count(),
+            2,
+            "prof │ region │ time: {content}"
+        );
     }
 
     /// Extract text from a single row of the buffer.

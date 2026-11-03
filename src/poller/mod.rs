@@ -317,6 +317,34 @@ pub async fn poll_actions_tick(app: &Arc<Mutex<App>>, client: &dyn ActionsClient
 ///
 /// On fetch errors, state and `last_checked` are left untouched so the
 /// next tick retries.
+/// One poll cycle over the enabled sources, concurrently.
+/// `aws` is (client, profile). Returns true when a watched PR merged.
+pub async fn poll_sources_tick(
+    app: &Arc<Mutex<App>>,
+    gh: Option<&dyn ActionsClient>,
+    aws: Option<(&dyn PipelineClient, &str)>,
+    pr_min_interval: Duration,
+) -> bool {
+    let actions = async {
+        if let Some(gh) = gh {
+            poll_actions_tick(app, gh).await;
+        }
+    };
+    let pipelines = async {
+        if let Some((client, profile)) = aws {
+            poll_pipelines_tick(app, client, profile, false).await;
+        }
+    };
+    let prs = async {
+        match gh {
+            Some(gh) => poll_pr_states_tick(app, gh, pr_min_interval).await,
+            None => false,
+        }
+    };
+    let (_, _, merge_detected) = tokio::join!(actions, pipelines, prs);
+    merge_detected
+}
+
 pub async fn poll_pr_states_tick(
     app: &Arc<Mutex<App>>,
     client: &dyn ActionsClient,
@@ -635,6 +663,31 @@ mod tests {
         async fn fetch_workflow_files(&self) -> Result<Vec<WorkflowFile>> {
             Ok(Vec::new())
         }
+    }
+
+    #[tokio::test]
+    async fn poll_sources_tick_github_only_leaves_pipelines_alone() {
+        let app = Arc::new(Mutex::new(App::with_sources(true, false)));
+        let gh = MockActionsClient::default();
+        let merged = poll_sources_tick(&app, Some(&gh), None, Duration::ZERO).await;
+        assert!(!merged);
+        let a = app.lock().unwrap();
+        assert!(!a.loading_actions, "actions polled");
+        assert!(a.pipeline_groups.is_empty());
+    }
+
+    #[tokio::test]
+    async fn poll_sources_tick_aws_only_polls_pipelines() {
+        let app = Arc::new(Mutex::new(App::with_sources(false, true)));
+        let aws = MockPipelineClient {
+            pipelines: vec![mock_pipeline("p1", BuildStatus::Succeeded, vec![])],
+        };
+        let merged = poll_sources_tick(&app, None, Some((&aws, "prof")), Duration::ZERO).await;
+        assert!(!merged);
+        let a = app.lock().unwrap();
+        assert!(!a.loading_pipelines, "pipelines polled");
+        assert_eq!(a.pipeline_groups.len(), 1);
+        assert!(a.workflow_groups.is_empty());
     }
 
     fn mock_pipeline(name: &str, status: BuildStatus, stages: Vec<StageState>) -> PipelineState {

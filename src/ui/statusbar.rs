@@ -24,6 +24,8 @@ pub struct StatusBar<'a> {
     pub push_signal_at: Option<Instant>,
     pub linkage_broken: bool,
     pub linkage_discovering: bool,
+    /// False when only one source is configured: no relink hint.
+    pub linkage_enabled: bool,
 }
 
 fn spinner_frame() -> char {
@@ -126,7 +128,9 @@ impl Widget for StatusBar<'_> {
             }
         }
 
-        if self.linkage_discovering {
+        if !self.linkage_enabled {
+            // single source: nothing to link
+        } else if self.linkage_discovering {
             spans.push(dim_sep.clone());
             spans.push(Span::styled(
                 "\u{27F3} relinking...",
@@ -187,6 +191,7 @@ mod tests {
             push_signal_at: None,
             linkage_broken: false,
             linkage_discovering: false,
+            linkage_enabled: true,
         };
         let area = Rect::new(0, 0, 120, 3);
         let mut buf = Buffer::empty(area);
@@ -242,6 +247,7 @@ mod tests {
             push_signal_at: None,
             linkage_broken: false,
             linkage_discovering: false,
+            linkage_enabled: true,
         };
         let area = Rect::new(0, 0, 120, 3);
         let mut buf = Buffer::empty(area);
@@ -321,6 +327,7 @@ mod tests {
             push_signal_at: None,
             linkage_broken: false,
             linkage_discovering: false,
+            linkage_enabled: true,
         };
         let area = Rect::new(0, 0, 120, 3);
         let mut buf = Buffer::empty(area);
@@ -381,6 +388,7 @@ mod tests {
             push_signal_at: None,
             linkage_broken,
             linkage_discovering,
+            linkage_enabled: true,
         };
         let area = Rect::new(0, 0, 120, 3);
         let mut buf = Buffer::empty(area);
@@ -388,6 +396,28 @@ mod tests {
         (0..120)
             .map(|x| buf.cell((x, 1)).unwrap().symbol().to_string())
             .collect()
+    }
+
+    #[test]
+    fn no_relink_hint_when_linkage_disabled() {
+        let bar = StatusBar {
+            poll_state: &PollState::Sleep,
+            warnings: &[],
+            hook_status: &HookStatus::Installed(HookLocation::Local),
+            has_global_hooks_path: false,
+            boost_pressed_at: None,
+            push_signal_at: None,
+            linkage_broken: true,
+            linkage_discovering: false,
+            linkage_enabled: false,
+        };
+        let area = Rect::new(0, 0, 120, 3);
+        let mut buf = Buffer::empty(area);
+        bar.render(area, &mut buf);
+        let content: String = (0..120)
+            .map(|x| buf.cell((x, 1)).unwrap().symbol().to_string())
+            .collect();
+        assert!(!content.contains("relink"), "got: {content}");
     }
 
     #[test]
@@ -424,6 +454,7 @@ mod tests {
             push_signal_at: None,
             linkage_broken: false,
             linkage_discovering: false,
+            linkage_enabled: true,
         };
         let area = Rect::new(0, 0, 40, 3);
         let mut buf = Buffer::empty(area);
@@ -443,6 +474,7 @@ mod tests {
             push_signal_at: None,
             linkage_broken: false,
             linkage_discovering: false,
+            linkage_enabled: true,
         };
         let area = Rect::new(0, 0, 40, 3);
         let mut buf = Buffer::empty(area);
@@ -466,6 +498,7 @@ mod tests {
             push_signal_at: None,
             linkage_broken: false,
             linkage_discovering: false,
+            linkage_enabled: true,
         };
         let area = Rect::new(0, 0, 120, 3);
         let mut buf = Buffer::empty(area);
@@ -506,6 +539,7 @@ mod tests {
             push_signal_at,
             linkage_broken: false,
             linkage_discovering: false,
+            linkage_enabled: true,
         };
         let area = Rect::new(0, 0, 120, 3);
         let mut buf = Buffer::empty(area);
@@ -541,6 +575,7 @@ mod tests {
             push_signal_at: Some(Instant::now()),
             linkage_broken: false,
             linkage_discovering: false,
+            linkage_enabled: true,
         };
         let area = Rect::new(0, 0, 120, 3);
         let mut buf = Buffer::empty(area);
@@ -562,6 +597,7 @@ mod tests {
             push_signal_at: None,
             linkage_broken: false,
             linkage_discovering: false,
+            linkage_enabled: true,
         };
         let area = Rect::new(0, 0, 120, 3);
         let mut buf = Buffer::empty(area);
@@ -583,6 +619,7 @@ mod tests {
             push_signal_at: None,
             linkage_broken: false,
             linkage_discovering: false,
+            linkage_enabled: true,
         };
         let area = Rect::new(0, 0, 120, 3);
         let mut buf = Buffer::empty(area);

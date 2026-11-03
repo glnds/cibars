@@ -34,10 +34,10 @@ fn setup_tracing() -> Result<()> {
     Ok(())
 }
 
-async fn init_aws_pipeline_client(config: &Config) -> poller::aws::AwsPipelineClient {
+async fn init_aws_pipeline_client(aws: &config::AwsSource) -> poller::aws::AwsPipelineClient {
     let aws_config = aws_config::defaults(aws_config::BehaviorVersion::latest())
-        .profile_name(&config.aws_profile)
-        .region(aws_config::Region::new(config.region.clone()))
+        .profile_name(&aws.profile)
+        .region(aws_config::Region::new(aws.region.clone()))
         .identity_cache(
             aws_config::identity::IdentityCache::lazy()
                 .load_timeout(std::time::Duration::from_secs(15))
@@ -51,22 +51,29 @@ async fn init_aws_pipeline_client(config: &Config) -> poller::aws::AwsPipelineCl
 async fn run_poll_orchestrator(
     app: Arc<Mutex<App>>,
     config: Config,
-    token: String,
+    token: Option<String>,
     boost_notify: Arc<tokio::sync::Notify>,
     link_notify: Arc<tokio::sync::Notify>,
     mut sigusr1: tokio::signal::unix::Signal,
     cwd: std::path::PathBuf,
 ) -> Result<()> {
-    let (owner, repo) = config
-        .github_repo
-        .split_once('/')
-        .context("github-repo missing '/'; should have been validated in config")?;
-    let gh_client = poller::github::GitHubActionsClient::new(
-        &token,
-        owner.to_string(),
-        repo.to_string(),
-        config.branch.clone(),
-    )?;
+    let gh_client = match (&config.github, token) {
+        (Some(gh), Some(token)) => {
+            let (owner, repo) = gh
+                .repo
+                .split_once('/')
+                .context("github-repo missing '/'; should have been validated in config")?;
+            Some(poller::github::GitHubActionsClient::new(
+                &token,
+                owner.to_string(),
+                repo.to_string(),
+                gh.branch.clone(),
+            )?)
+        }
+        (Some(_), None) => anyhow::bail!("github source enabled but no token resolved"),
+        (None, _) => None,
+    };
+    let linkage_enabled = gh_client.is_some() && config.aws.is_some();
 
     let mut aws_client: Option<poller::aws::AwsPipelineClient> = None;
     let mut scheduler = PollScheduler::new();
@@ -79,32 +86,34 @@ async fn run_poll_orchestrator(
     loop {
         if scheduler.is_polling() {
             // Lazy-init AWS + link cache on first Polling tick.
-            if aws_client.is_none() {
+            if let (Some(aws_cfg), None) = (&config.aws, &aws_client) {
                 tracing::info!("initializing AWS client (first Polling tick)");
-                let client = init_aws_pipeline_client(&config).await;
-                match linkage::load_link_cache(&cache_path) {
-                    Ok(Some(cache)) => {
-                        let cached_assignment = cache.job_assignment.clone();
-                        link_map.load_from_cache(cache);
-                        linkage::sync_linked_pipelines(&app, &link_map);
-                        if let Some(assignment) = cached_assignment {
-                            app.lock().expect("app mutex poisoned").job_assignment =
-                                Some(assignment);
+                let client = init_aws_pipeline_client(aws_cfg).await;
+                if let Some(gh_client) = gh_client.as_ref() {
+                    match linkage::load_link_cache(&cache_path) {
+                        Ok(Some(cache)) => {
+                            let cached_assignment = cache.job_assignment.clone();
+                            link_map.load_from_cache(cache);
+                            linkage::sync_linked_pipelines(&app, &link_map);
+                            if let Some(assignment) = cached_assignment {
+                                app.lock().expect("app mutex poisoned").job_assignment =
+                                    Some(assignment);
+                            }
+                            tracing::info!(
+                                links = link_map.links().len(),
+                                "loaded link cache from disk"
+                            );
                         }
-                        tracing::info!(
-                            links = link_map.links().len(),
-                            "loaded link cache from disk"
-                        );
-                    }
-                    Ok(None) => {
-                        link_map =
-                            linkage::run_discovery(&client, &gh_client, &app, &cache_path).await;
-                    }
-                    Err(e) => {
-                        tracing::warn!(error = %e, "corrupt link cache, re-discovering");
-                        let _ = std::fs::remove_file(&cache_path);
-                        link_map =
-                            linkage::run_discovery(&client, &gh_client, &app, &cache_path).await;
+                        Ok(None) => {
+                            link_map =
+                                linkage::run_discovery(&client, gh_client, &app, &cache_path).await;
+                        }
+                        Err(e) => {
+                            tracing::warn!(error = %e, "corrupt link cache, re-discovering");
+                            let _ = std::fs::remove_file(&cache_path);
+                            link_map =
+                                linkage::run_discovery(&client, gh_client, &app, &cache_path).await;
+                        }
                     }
                 }
                 aws_client = Some(client);
@@ -112,21 +121,17 @@ async fn run_poll_orchestrator(
 
             let aws = aws_client
                 .as_ref()
-                .expect("aws_client just initialized above");
+                .zip(config.aws.as_ref())
+                .map(|(c, cfg)| (c as &dyn poller::PipelineClient, cfg.profile.as_str()));
+            let gh = gh_client.as_ref().map(|c| c as &dyn poller::ActionsClient);
             let cycle_start = Instant::now();
 
             let outcome = tokio::select! {
                 biased;
                 _ = boost_notify.notified() => CycleOutcome::Interrupted(InterruptSource::Boost),
                 _ = sigusr1.recv() => CycleOutcome::Interrupted(InterruptSource::Sigusr1),
-                merge_detected = async {
-                    let (_, _, merge_detected) = tokio::join!(
-                        poller::poll_actions_tick(&app, &gh_client),
-                        poller::poll_pipelines_tick(&app, aws, &config.aws_profile, false),
-                        poller::poll_pr_states_tick(&app, &gh_client, PR_POLL_MIN_INTERVAL),
-                    );
-                    merge_detected
-                } => CycleOutcome::Completed { merge_detected },
+                merge_detected = poller::poll_sources_tick(&app, gh, aws, PR_POLL_MIN_INTERVAL)
+                    => CycleOutcome::Completed { merge_detected },
             };
 
             let merge_detected = match outcome {
@@ -143,8 +148,10 @@ async fn run_poll_orchestrator(
                 let mut a = app.lock().expect("app mutex poisoned");
                 poller::classify_workflows(&mut a, &config);
             }
-            linkage::apply_links(&app, &mut link_map, &mut stopped_runs);
-            linkage::sync_linked_pipelines(&app, &link_map);
+            if linkage_enabled {
+                linkage::apply_links(&app, &mut link_map, &mut stopped_runs);
+                linkage::sync_linked_pipelines(&app, &link_map);
+            }
 
             let any_running = {
                 let mut a = app.lock().expect("app mutex poisoned");
@@ -179,7 +186,9 @@ async fn run_poll_orchestrator(
                     handle_poll_interrupt(&app, &mut scheduler, InterruptSource::Sigusr1);
                 }
                 _ = link_notify.notified() => {
-                    handle_link_notify(&app, &mut link_map, &gh_client, aws_client.as_ref(), &cache_path).await;
+                    if let Some(gh) = gh_client.as_ref() {
+                        handle_link_notify(&app, &mut link_map, gh, aws_client.as_ref(), &cache_path).await;
+                    }
                 }
                 _ = tokio::time::sleep(remaining) => {}
             }
@@ -194,7 +203,9 @@ async fn run_poll_orchestrator(
                     handle_poll_interrupt(&app, &mut scheduler, InterruptSource::Sigusr1);
                 }
                 _ = link_notify.notified() => {
-                    handle_link_notify(&app, &mut link_map, &gh_client, aws_client.as_ref(), &cache_path).await;
+                    if let Some(gh) = gh_client.as_ref() {
+                        handle_link_notify(&app, &mut link_map, gh, aws_client.as_ref(), &cache_path).await;
+                    }
                 }
             }
         }
@@ -321,7 +332,7 @@ fn main() -> Result<()> {
     let pid_path = config::pid_file_for(&cwd)?;
     acquire_pid_file(&pid_path)?;
     tracing::info!(pid = std::process::id(), "starting cibars");
-    let mut app_state = App::new();
+    let mut app_state = App::with_sources(config.github.is_some(), config.aws.is_some());
     config::ensure_delegation(&cwd);
     app_state.hook_status = config::check_pre_push_hook(&cwd);
     app_state.has_global_hooks_path = config::has_global_hooks_path(&cwd);
@@ -340,12 +351,14 @@ fn main() -> Result<()> {
     let sigusr1 =
         signal(SignalKind::user_defined1()).context("failed to register SIGUSR1 handler")?;
 
-    // SSO health task: independent 5-min loop, runs always.
-    rt.spawn(sso_health::run_sso_health_loop(
-        app.clone(),
-        config.aws_profile.clone(),
-        config.region.clone(),
-    ));
+    // SSO health task: independent 5-min loop, AWS source only.
+    if let Some(aws) = &config.aws {
+        rt.spawn(sso_health::run_sso_health_loop(
+            app.clone(),
+            aws.profile.clone(),
+            aws.region.clone(),
+        ));
+    }
 
     // Poll orchestrator
     let poll_app = app.clone();
@@ -373,9 +386,9 @@ fn main() -> Result<()> {
     let result = ui::run_ui(
         app.clone(),
         terminal,
-        &config.aws_profile,
-        &config.region,
-        &config.github_repo,
+        config.aws.as_ref().map(|a| a.profile.as_str()),
+        config.aws.as_ref().map(|a| a.region.as_str()),
+        config.github.as_ref().map(|g| g.repo.as_str()),
         boost_notify,
         link_notify,
         &term_flag,
