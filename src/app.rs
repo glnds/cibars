@@ -18,6 +18,8 @@ pub enum SourceHealth {
 pub struct App {
     pub pipeline_groups: Vec<PipelineGroup>,
     pub workflow_groups: Vec<WorkflowGroup>,
+    /// Last complete live inventory; retained across polls, never restored from topology.
+    pub github_inventory_names: Option<HashSet<String>>,
     pub actions_expanded: bool,
     pub pipelines_expanded: bool,
     pub last_poll: Option<DateTime<Utc>>,
@@ -131,6 +133,7 @@ impl App {
         Self {
             pipeline_groups: Vec::new(),
             workflow_groups: Vec::new(),
+            github_inventory_names: None,
             actions_expanded: true,
             pipelines_expanded: true,
             last_poll: None,

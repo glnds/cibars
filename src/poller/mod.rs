@@ -275,14 +275,13 @@ pub async fn poll_actions_tick(app: &Arc<Mutex<App>>, client: &dyn ActionsClient
     let mut discovery_done = false;
     let mut updates_done = false;
     let mut requested = HashSet::new();
-    let mut inventory_names: Option<HashSet<String>> = None;
     let mut jobs = FuturesUnordered::new();
     while !discovery_done || !updates_done || !jobs.is_empty() {
         tokio::select! {
             result = &mut discovery, if !discovery_done => {
                 discovery_done = true;
                 if let Err(error) = result {
-                    record_actions_error(app, &format!("{error:#}"));
+                    record_actions_error(app, error);
                 }
             }
             update = receiver.recv(), if !updates_done => {
@@ -290,11 +289,11 @@ pub async fn poll_actions_tick(app: &Arc<Mutex<App>>, client: &dyn ActionsClient
                 let mut a = app.lock().expect("app mutex poisoned");
                 match update {
                     ActionsUpdate::Inventory(entries) => {
-                        inventory_names = Some(entries.iter().map(|e| e.name.clone()).collect());
+                        a.github_inventory_names = Some(entries.iter().map(|e| e.name.clone()).collect());
                         update_workflow_inventory(&mut a, &entries);
                     }
                     ActionsUpdate::Runs(mut page) => {
-                        if let Some(names) = &inventory_names {
+                        if let Some(names) = &a.github_inventory_names {
                             page.summaries.retain(|s| names.contains(&s.workflow_name));
                         }
                         update_workflow_summaries(&mut a, &page.summaries);
@@ -321,7 +320,7 @@ pub async fn poll_actions_tick(app: &Arc<Mutex<App>>, client: &dyn ActionsClient
                             update_workflow_jobs(&mut a, &summary.workflow_name, jobs);
                         }
                     }
-                    Err(error) => record_actions_error(app, &format!("jobs for {} run {}: {error:#}", summary.workflow_name, summary.run_id)),
+                    Err(error) => record_actions_error(app, error.context(format!("jobs for {} run {}", summary.workflow_name, summary.run_id))),
                 }
             }
         }
@@ -331,19 +330,52 @@ pub async fn poll_actions_tick(app: &Arc<Mutex<App>>, client: &dyn ActionsClient
     a.last_poll = Some(Utc::now());
 }
 
-fn record_actions_error(app: &Arc<Mutex<App>>, message: &str) {
+#[derive(Debug)]
+pub(crate) struct ActionsErrors(pub Vec<anyhow::Error>);
+
+impl std::fmt::Display for ActionsErrors {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        for (index, error) in self.0.iter().enumerate() {
+            if index > 0 {
+                write!(formatter, "; ")?;
+            }
+            write!(formatter, "{error:#}")?;
+        }
+        Ok(())
+    }
+}
+
+impl std::error::Error for ActionsErrors {}
+
+fn actions_rate_limited(error: &anyhow::Error) -> bool {
+    if let Some(errors) = error.downcast_ref::<ActionsErrors>() {
+        return errors.0.iter().any(actions_rate_limited);
+    }
+    for cause in error.chain() {
+        if let Some(octocrab::Error::GitHub { source, .. }) =
+            cause.downcast_ref::<octocrab::Error>()
+        {
+            return matches!(source.status_code.as_u16(), 403 | 429);
+        }
+    }
+    // Legacy adapters expose plain errors. Inspect their leaf message, never run/job context.
+    let lower = error.root_cause().to_string().to_lowercase();
+    lower.contains("rate limit")
+        || lower.contains("abuse detection")
+        || ["http 403 ", "http 429 ", "403 ", "429 "]
+            .iter()
+            .any(|prefix| lower.starts_with(prefix))
+}
+
+fn record_actions_error(app: &Arc<Mutex<App>>, error: anyhow::Error) {
     let mut a = app.lock().expect("app mutex poisoned");
-    let lower = message.to_lowercase();
-    if ["rate limit", "403", "429", "abuse detection"]
-        .iter()
-        .any(|text| lower.contains(text))
-    {
+    if actions_rate_limited(&error) {
         a.rate_limited_until = Some(Instant::now() + Duration::from_secs(RATE_LIMIT_BACKOFF_SECS));
         a.push_warning(format!(
             "GitHub: rate limited, backing off {RATE_LIMIT_BACKOFF_SECS}s"
         ));
     } else {
-        a.push_warning(format!("GitHub: {message}"));
+        a.push_warning(format!("GitHub: {error:#}"));
     }
 }
 
@@ -878,6 +910,35 @@ mod tests {
         )
         .await;
         assert!(app.lock().unwrap().workflow_groups[0].gone);
+        poll_actions_tick(
+            &app,
+            &StreamingClient {
+                fail: false,
+                hold: false,
+                inventory: None,
+            },
+        )
+        .await;
+        assert!(
+            app.lock().unwrap().workflow_groups[0].gone,
+            "ordinary run polls cannot undo authoritative deletion"
+        );
+    }
+
+    #[tokio::test]
+    async fn progressive_numeric_run_identifiers_do_not_trigger_rate_limit() {
+        let app = Arc::new(Mutex::new(App::new()));
+        let client = RateLimitActionsClient {
+            error_msg: "GitHub request timed out after 15s: /repos/o/r/actions/runs/123429000/jobs"
+                .into(),
+        };
+        poll_actions_tick(&app, &client).await;
+        let a = app.lock().unwrap();
+        assert!(
+            a.rate_limited_until.is_none(),
+            "run identifiers are not HTTP statuses"
+        );
+        assert!(a.warnings[0].contains("timed out"));
     }
 
     #[derive(Default)]

@@ -265,7 +265,7 @@ impl GitHubActionsClient {
         let (mut resp, fresh) = recent?;
         let mut errors = Vec::new();
         if let Some(error) = inventory_error {
-            errors.push(format!("{error:#}"));
+            errors.push(error);
         }
         if let Some(entries) = inventory {
             // Inventory can complete before recent runs. Reconcile again after both
@@ -295,7 +295,7 @@ impl GitHubActionsClient {
             while let Some(result) = scans.next().await {
                 match result {
                     Ok((fresh, prs)) => self.publish_runs(&updates, fresh, prs)?,
-                    Err(error) => errors.push(format!("{error:#}")),
+                    Err(error) => errors.push(error),
                 }
             }
         } else if refresh || has_stale_running(&known, &fresh) {
@@ -322,7 +322,7 @@ impl GitHubActionsClient {
         if errors.is_empty() {
             Ok(())
         } else {
-            anyhow::bail!("{}", errors.join("; "))
+            Err(super::ActionsErrors(errors).into())
         }
     }
 }
@@ -749,12 +749,11 @@ mod tests {
                             release.notified().await;
                         }
                     }
-                    let body = pages
-                        .get(&route)
-                        .expect("unexpected API request")
-                        .to_string();
+                    let fixture = pages.get(&route).expect("unexpected API request");
+                    let status = fixture["_fixture_status"].as_u64().unwrap_or(200);
+                    let body = fixture.to_string();
                     let response = format!(
-                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        "HTTP/1.1 {status} Fixture\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
                     body.len()
                 );
                     let _ = socket.write_all(response.as_bytes()).await;
@@ -806,6 +805,31 @@ mod tests {
             client.runs_cache.lock().unwrap().latest.is_empty(),
             "authoritative empty inventory must remain empty"
         );
+    }
+
+    #[tokio::test]
+    async fn progressive_rate_limit_classification_uses_http_status() {
+        let client = client_with_pages(vec![
+            (
+                "/missing429000&page=1".into(),
+                serde_json::json!({"_fixture_status":404,"message":"resource missing"}),
+            ),
+            (
+                "/blocked&page=1".into(),
+                serde_json::json!({"_fixture_status":403,"message":"blocked"}),
+            ),
+        ])
+        .await;
+        let missing = client
+            .get_json("/missing429000", false)
+            .await
+            .err()
+            .unwrap();
+        assert!(!super::super::actions_rate_limited(&missing));
+        let blocked = client.get_json("/blocked", false).await.err().unwrap();
+        assert!(super::super::actions_rate_limited(&blocked));
+        let aggregate: anyhow::Error = super::super::ActionsErrors(vec![missing, blocked]).into();
+        assert!(super::super::actions_rate_limited(&aggregate));
     }
 
     #[tokio::test]
