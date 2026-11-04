@@ -305,8 +305,14 @@ struct PipelineCentricSection {
 }
 
 enum PipelineCentricRow {
-    /// A workflow job bar by name (looked up from workflow_groups)
-    JobBar { job_name: String, dim: bool },
+    /// Resolve a live job only within its own workflow.
+    JobBar {
+        workflow_name: String,
+        job_name: String,
+        dim: bool,
+    },
+    /// Inventory-only workflow with no live job to resolve.
+    WorkflowPlaceholder { name: String },
     /// Pipeline header line "  └─ ● pipeline-name"
     PipelineHeader { name: String },
     /// Pipeline stage bar
@@ -331,6 +337,7 @@ fn build_pipeline_centric_sections(
         let mut rows = Vec::new();
         for job_name in shared_names {
             rows.push(PipelineCentricRow::JobBar {
+                workflow_name: wf_name.clone(),
                 job_name: job_name.clone(),
                 dim: false,
             });
@@ -340,7 +347,7 @@ fn build_pipeline_centric_sections(
                 " {wf_name} · latest GH run{} ",
                 app.workflow_groups
                     .iter()
-                    .find(|g| g.name == *wf_name)
+                    .find(|g| !g.gone && g.name == *wf_name)
                     .and_then(|g| g.run_id)
                     .map(|id| format!(" #{id}"))
                     .unwrap_or_default()
@@ -369,12 +376,13 @@ fn build_pipeline_centric_sections(
     });
 
     for pipeline_name in pipeline_names {
-        let (_, job_names) = &assignment.pipeline_jobs[pipeline_name];
+        let (workflow_name, job_names) = &assignment.pipeline_jobs[pipeline_name];
         let mut rows = Vec::new();
 
         // Job bars
         for job_name in job_names {
             rows.push(PipelineCentricRow::JobBar {
+                workflow_name: workflow_name.clone(),
                 job_name: job_name.clone(),
                 dim: false,
             });
@@ -404,7 +412,7 @@ fn build_pipeline_centric_sections(
                 " {pipeline_name} · latest GH run{} ",
                 app.workflow_groups
                     .iter()
-                    .find(|g| g.name == assignment.pipeline_jobs[pipeline_name].0)
+                    .find(|g| !g.gone && g.name == *workflow_name)
                     .and_then(|g| g.run_id)
                     .map(|id| format!(" #{id}"))
                     .unwrap_or_default()
@@ -421,9 +429,8 @@ fn build_pipeline_centric_sections(
         }
         let mut rows = Vec::new();
         if !group.jobs.iter().any(|job| !job.gone) {
-            rows.push(PipelineCentricRow::JobBar {
-                job_name: group.name.clone(),
-                dim: true,
+            rows.push(PipelineCentricRow::WorkflowPlaceholder {
+                name: group.name.clone(),
             });
         } else if group.category == WorkflowCategory::CI {
             for job in group.jobs.iter().filter(|job| !job.gone) {
@@ -435,6 +442,7 @@ fn build_pipeline_centric_sections(
                     });
                 if !assigned {
                     rows.push(PipelineCentricRow::JobBar {
+                        workflow_name: group.name.clone(),
                         job_name: job.name.clone(),
                         dim: false,
                     });
@@ -466,6 +474,7 @@ fn build_pipeline_centric_sections(
         for group in &review_groups {
             for job in group.jobs.iter().filter(|j| !j.gone) {
                 rows.push(PipelineCentricRow::JobBar {
+                    workflow_name: group.name.clone(),
                     job_name: job.name.clone(),
                     dim: true,
                 });
@@ -524,6 +533,7 @@ fn render_pipeline_centric(
         .flat_map(|section| &section.rows)
         .filter_map(|row| match row {
             PipelineCentricRow::JobBar { job_name, .. } => Some(job_name.chars().count()),
+            PipelineCentricRow::WorkflowPlaceholder { name } => Some(name.chars().count()),
             _ => None,
         })
         .max()
@@ -555,6 +565,7 @@ fn render_pipeline_centric(
             }
             match row {
                 PipelineCentricRow::JobBar {
+                    workflow_name,
                     job_name,
                     dim: force_dim,
                 } => {
@@ -563,8 +574,8 @@ fn render_pipeline_centric(
                     let bar = app
                         .workflow_groups
                         .iter()
-                        .flat_map(|g| g.jobs.iter())
-                        .find(|b| b.name == *job_name)
+                        .find(|g| !g.gone && g.name == *workflow_name)
+                        .and_then(|g| g.jobs.iter().find(|b| !b.gone && b.name == *job_name))
                         .unwrap_or(&fallback);
                     let bar_dim = dim || *force_dim;
                     let dot_color = if *force_dim {
@@ -576,6 +587,15 @@ fn render_pipeline_centric(
                         BarWidget::new(bar, job_name_width, bar_dim)
                             .with_intro(intro_for(app, &intro_bands, intro_now, &bar.name))
                             .with_dot(dot_color),
+                        row_areas[ri],
+                    );
+                }
+                PipelineCentricRow::WorkflowPlaceholder { name } => {
+                    let placeholder = crate::model::Bar::new(name.clone());
+                    frame.render_widget(
+                        BarWidget::new(&placeholder, job_name_width, true)
+                            .with_intro(intro_for(app, &intro_bands, intro_now, name))
+                            .with_dot(theme::FG_DIM),
                         row_areas[ri],
                     );
                 }
@@ -2012,6 +2032,169 @@ mod tests {
         assert!(text.contains("New workflow"));
         assert!(text.contains("New job"));
         assert!(text.contains("Old job"));
+    }
+
+    fn duplicate_job_app() -> App {
+        let mut app = App::new();
+        for (name, run_id, status) in [
+            ("A", 101, BuildStatus::Succeeded),
+            ("B", 202, BuildStatus::Failed),
+        ] {
+            let mut job = Bar::new("Build".into());
+            job.set_status(status);
+            app.workflow_groups.push(WorkflowGroup {
+                name: name.into(),
+                jobs: vec![job],
+                gone: false,
+                summary_status: status,
+                run_id: Some(run_id),
+                category: WorkflowCategory::CI,
+                linked_pipeline: None,
+            });
+        }
+        app
+    }
+
+    fn duplicate_job_assignments() -> Vec<JobAssignment> {
+        vec![
+            JobAssignment {
+                pipeline_jobs: HashMap::from([
+                    ("pa".into(), ("A".into(), vec!["Build".into()])),
+                    ("pb".into(), ("B".into(), vec!["Build".into()])),
+                ]),
+                shared_jobs: vec![],
+            },
+            JobAssignment {
+                pipeline_jobs: HashMap::new(),
+                shared_jobs: vec![
+                    ("A".into(), vec!["Build".into()]),
+                    ("B".into(), vec!["Build".into()]),
+                ],
+            },
+            JobAssignment {
+                pipeline_jobs: HashMap::new(),
+                shared_jobs: vec![],
+            },
+        ]
+    }
+
+    fn rendered_job_rows(
+        assignment: &JobAssignment,
+        app: &App,
+        label: &str,
+    ) -> Vec<(ratatui::style::Color, String)> {
+        let sections = build_pipeline_centric_sections(assignment, app);
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 30)).unwrap();
+        terminal
+            .draw(|frame| render_pipeline_centric(frame, app, &sections, None, None, None, false))
+            .unwrap();
+        terminal
+            .backend()
+            .buffer()
+            .content()
+            .chunks(100)
+            .filter_map(|row| {
+                let text: String = row.iter().map(|cell| cell.symbol()).collect();
+                text.contains(label)
+                    .then(|| {
+                        row.iter()
+                            .find(|cell| cell.symbol() == "●")
+                            .map(|cell| (cell.fg, text.clone()))
+                    })
+                    .flatten()
+            })
+            .collect()
+    }
+
+    fn rendered_job_dots(
+        assignment: &JobAssignment,
+        app: &App,
+        label: &str,
+    ) -> Vec<ratatui::style::Color> {
+        rendered_job_rows(assignment, app, label)
+            .into_iter()
+            .map(|(color, _)| color)
+            .collect()
+    }
+
+    #[test]
+    fn pipeline_jobs_with_duplicate_names_keep_each_workflow_status() {
+        let app = duplicate_job_app();
+        for assignment in duplicate_job_assignments() {
+            assert_eq!(
+                rendered_job_dots(&assignment, &app, "Build"),
+                vec![theme::STATUS_SUCCESS, theme::STATUS_FAILED]
+            );
+        }
+    }
+
+    #[test]
+    fn missing_cached_job_cannot_inherit_another_workflow_status() {
+        for missing in 0..4 {
+            let mut app = duplicate_job_app();
+            match missing {
+                0 => {
+                    app.workflow_groups.remove(0);
+                }
+                1 => app.workflow_groups[0].jobs.clear(),
+                2 => app.workflow_groups[0].jobs[0].gone = true,
+                _ => app.workflow_groups[0].gone = true,
+            }
+            for assignment in duplicate_job_assignments().into_iter().take(2) {
+                assert_eq!(
+                    rendered_job_dots(&assignment, &app, "Build"),
+                    vec![theme::STATUS_IDLE, theme::STATUS_FAILED],
+                    "missing variant {missing}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn review_jobs_with_duplicate_names_keep_each_workflow_timestamp() {
+        let mut app = duplicate_job_app();
+        let times: Vec<_> = [1_700_000_000, 1_700_003_600]
+            .into_iter()
+            .map(|seconds| chrono::DateTime::from_timestamp(seconds, 0).unwrap())
+            .collect();
+        for (group, finished) in app.workflow_groups.iter_mut().zip(&times) {
+            group.category = WorkflowCategory::Review;
+            group.jobs[0].last_finished = Some(*finished);
+        }
+        let assignment = duplicate_job_assignments().pop().unwrap();
+        let rows = rendered_job_rows(&assignment, &app, "Build");
+        assert_eq!(rows.len(), 2);
+        for ((_, row), finished) in rows.iter().zip(times) {
+            assert!(
+                row.contains(
+                    &finished
+                        .with_timezone(&chrono::Local)
+                        .format("%H:%M")
+                        .to_string()
+                ),
+                "{row}"
+            );
+        }
+    }
+
+    #[test]
+    fn inventory_placeholder_cannot_inherit_same_named_job_timestamp() {
+        let mut app = duplicate_job_app();
+        app.workflow_groups[0].name = "Build".into();
+        app.workflow_groups[0].jobs.clear();
+        let finished = chrono::DateTime::from_timestamp(1_700_000_000, 0).unwrap();
+        app.workflow_groups[1].jobs[0].last_finished = Some(finished);
+        let timestamp = finished
+            .with_timezone(&chrono::Local)
+            .format("%H:%M")
+            .to_string();
+        let assignment = duplicate_job_assignments().pop().unwrap();
+        let rows = rendered_job_rows(&assignment, &app, "Build");
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].0, theme::STATUS_IDLE);
+        assert!(!rows[0].1.contains(&timestamp));
+        assert!(rows[1].1.contains(&timestamp));
     }
 
     #[test]

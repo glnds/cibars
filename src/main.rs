@@ -123,12 +123,11 @@ fn load_scoped_links(config: &Config, cwd: &std::path::Path) -> Result<Option<li
     let Some(cache) = linkage::load_link_cache(&cwd.join(".cibars-links.toml"))? else {
         return Ok(None);
     };
-    let valid = match &cache.scope {
-        Some(scope) => Some(scope) == linkage::LinkScope::from_config(config).as_ref(),
-        // Assumption: matching topology establishes the source of an older unscoped cache.
-        None => topology::load_topology(&cwd.join(".cibars-topology.toml"))?
-            .is_some_and(|topology| topology.matches_link_scope(config)),
-    };
+    // Legacy files cannot prove their origin; only successful live discovery establishes scope.
+    let valid = cache
+        .scope
+        .as_ref()
+        .is_some_and(|scope| Some(scope) == linkage::LinkScope::from_config(config).as_ref());
     Ok(valid.then_some(cache))
 }
 
@@ -964,15 +963,20 @@ mod tests {
         assert!(aws_dropped.load(std::sync::atomic::Ordering::SeqCst));
     }
 
-    #[test]
-    fn startup_unscoped_legacy_assignment_requires_matching_topology() {
+    #[tokio::test]
+    async fn startup_legacy_assignment_stays_rejected_after_failed_discovery_and_restart() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(
             dir.path().join(".cibars-links.toml"),
             r#"
 schema_version = 2
 discovered_at = "2026-11-04"
-links = []
+[[links]]
+pipeline_name = "old-source"
+workflow_name = "CI"
+s3_bucket = "old-bucket"
+s3_key = "artifact"
+source = "YamlDiscovered"
 [job_assignment]
 pipeline_jobs = {}
 shared_jobs = [["CI", ["Tests"]]]
@@ -993,20 +997,33 @@ shared_jobs = [["CI", ["Tests"]]]
         let mut app = App::new();
         restore_startup_caches(&mut app, &config, dir.path());
         assert!(app.job_assignment.is_none());
+        assert!(load_scoped_links(&config, dir.path()).unwrap().is_none());
 
-        topology::save_topology(
-            &dir.path().join(".cibars-topology.toml"),
-            &topology::TopologyCache::capture(&app, &config),
+        let app = Arc::new(Mutex::new(app));
+        let mut links = LinkMap::new();
+        handle_link_notify(
+            &app,
+            &mut links,
+            &StartupActions,
+            Some(&RelinkPipelines(true)),
+            &dir.path().join(".cibars-links.toml"),
+            &config,
         )
-        .unwrap();
-        restore_startup_caches(&mut app, &config, dir.path());
-        assert_eq!(app.job_assignment.unwrap().shared_jobs[0].1, ["Tests"]);
-
-        let mut changed = config.clone();
-        changed.github.as_mut().unwrap().repo = "other/repo".into();
-        let mut changed_app = App::new();
-        restore_startup_caches(&mut changed_app, &changed, dir.path());
-        assert!(changed_app.job_assignment.is_none());
+        .await;
+        assert!(links.links().is_empty());
+        persist_topology(&app, &config, dir.path());
+        let mut restarted = App::new();
+        restore_startup_caches(&mut restarted, &config, dir.path());
+        assert!(
+            restarted.job_assignment.is_none(),
+            "persisting current topology cannot grant old links provenance"
+        );
+        assert!(load_scoped_links(&config, dir.path()).unwrap().is_none());
+        let legacy = linkage::load_link_cache(&dir.path().join(".cibars-links.toml"))
+            .unwrap()
+            .expect("legacy format remains parseable");
+        assert_eq!(legacy.links.len(), 1);
+        assert!(legacy.scope.is_none());
     }
 
     #[test]

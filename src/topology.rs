@@ -34,12 +34,6 @@ struct GroupTopology {
 }
 
 impl TopologyCache {
-    pub fn matches_link_scope(&self, config: &Config) -> bool {
-        matches!((&self.github, &config.github, &self.aws, &config.aws),
-            (Some(gh), Some(current_gh), Some(aws), Some(current_aws))
-            if gh.repo == current_gh.repo && gh.branch == current_gh.branch
-            && aws.profile == current_aws.profile && aws.region == current_aws.region)
-    }
     pub fn capture(app: &App, config: &Config) -> Self {
         Self {
             schema_version: 1,

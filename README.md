@@ -43,21 +43,22 @@ while AWS initializes; linkage discovery runs alongside live polling. Failed ref
 names; successful inventories remove deleted entries.
 
 GitHub topology is scoped to repository and branch; AWS topology is scoped to profile and region.
-Assumption: profile/region identify the local AWS source before credentials load. Remapping a profile
-can temporarily show old neutral names until refresh; no cached execution results cross accounts.
+Assumption: profile/region identify the local AWS source before credentials load. Remapping a
+profile can temporarily show old neutral names until refresh; cached execution results never cross
+accounts.
 Assumption: workflow names retain their existing identity; duplicate-name handling is unchanged.
 
 `.cibars-links.toml` stores linkage and job assignments separately, with both source scopes. Legacy
-files remain readable; their assignments apply early only when matching topology establishes the
-source context. Every startup revalidates linkage without delaying the first live results. Press `l`
-to retry. Successful empty discovery clears old links and assignments; failed or partial discovery
-retains the previous successful mapping. AWS initialization and linkage discovery have 15-second
-limits, with visible warnings on failure.
+files remain readable; unscoped links and assignments require successful live discovery before use.
+Matching topology does not establish their origin. Startup revalidates linkage during live polling.
+Press `l` to retry. Successful empty discovery clears old links and assignments; failed or partial
+discovery retains the previous successful mapping. AWS initialization and linkage discovery have
+15-second limits, with visible warnings on failure.
 After an initialization timeout, `b` retries AWS initialization while GitHub refreshes continue.
 
 Live GitHub results describe the latest eligible run ID reported by GitHub, which may precede local
-HEAD. A green latest run does not establish that the local commit passed. Assumption: topology changes
-slowly enough for cached names to help; each successful refresh can revise them.
+HEAD. A green latest run does not establish that the local commit passed. Assumption: topology
+changes slowly enough for cached names to help; each successful refresh can revise them.
 
 ### Hook Integration
 
