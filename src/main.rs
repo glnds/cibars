@@ -5,6 +5,7 @@ mod model;
 mod poll_scheduler;
 mod poller;
 mod sso_health;
+mod topology;
 mod ui;
 
 use std::sync::atomic::AtomicBool;
@@ -147,6 +148,19 @@ async fn run_poll_orchestrator(
             if linkage_enabled {
                 linkage::apply_links(&app, &mut link_map, &mut stopped_runs);
                 linkage::sync_linked_pipelines(&app, &link_map);
+            }
+
+            let topology = {
+                let a = app.lock().expect("app mutex poisoned");
+                topology::TopologyCache::capture(&a, &config)
+            };
+            if let Err(error) =
+                topology::save_topology(&cwd.join(".cibars-topology.toml"), &topology)
+            {
+                tracing::warn!(%error, "cannot save topology cache");
+                app.lock()
+                    .expect("app mutex poisoned")
+                    .push_warning(format!("topology cache: {error}"));
             }
 
             let any_running = {
@@ -337,6 +351,27 @@ fn bootstrap_initial_poll(app: &Arc<Mutex<App>>, scheduler: &mut PollScheduler) 
     a.poll_state = scheduler.state();
 }
 
+fn restore_startup_caches(app: &mut App, config: &Config, cwd: &std::path::Path) {
+    match topology::load_topology(&cwd.join(".cibars-topology.toml")) {
+        Ok(Some(cache)) => cache.hydrate(app, config),
+        Ok(None) => {}
+        Err(error) => {
+            tracing::warn!(%error, "cannot load topology cache; discovering live structure");
+            app.push_warning(format!("topology cache: {error}"));
+        }
+    }
+    if app.linkage_enabled() {
+        match linkage::load_link_cache(&cwd.join(".cibars-links.toml")) {
+            Ok(Some(cache)) => app.job_assignment = cache.job_assignment,
+            Ok(None) => {}
+            Err(error) => {
+                tracing::warn!(%error, "cannot load link assignments; discovering live links");
+                app.push_warning(format!("link cache: {error}"));
+            }
+        }
+    }
+}
+
 fn main() -> Result<()> {
     rustls::crypto::aws_lc_rs::default_provider()
         .install_default()
@@ -355,6 +390,7 @@ fn main() -> Result<()> {
     };
     tracing::info!(pid = std::process::id(), "starting cibars");
     let mut app_state = App::with_sources(config.github.is_some(), config.aws.is_some());
+    restore_startup_caches(&mut app_state, &config, &cwd);
     config::ensure_delegation(&cwd);
     app_state.hook_status = config::check_pre_push_hook(&cwd);
     app_state.has_global_hooks_path = config::has_global_hooks_path(&cwd);
@@ -435,6 +471,56 @@ mod tests {
     use super::*;
     use crate::poll_scheduler::{PollState, PollingPhase};
     use std::sync::{Arc, Mutex};
+
+    #[test]
+    fn startup_restores_legacy_assignments_without_live_clients() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join(".cibars-links.toml"),
+            r#"
+schema_version = 2
+discovered_at = "2026-11-04"
+links = []
+[job_assignment]
+pipeline_jobs = {}
+shared_jobs = [["CI", ["Tests"]]]
+"#,
+        )
+        .unwrap();
+        let config = Config {
+            github: Some(config::GithubSource {
+                repo: "o/r".into(),
+                branch: None,
+            }),
+            aws: Some(config::AwsSource {
+                profile: "p".into(),
+                region: "r".into(),
+            }),
+            review_workflows: vec![],
+        };
+        let mut app = App::new();
+        restore_startup_caches(&mut app, &config, dir.path());
+        assert_eq!(app.job_assignment.unwrap().shared_jobs[0].1, ["Tests"]);
+    }
+
+    #[test]
+    fn startup_corrupt_topology_warns_without_restoring_live_state() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(".cibars-topology.toml"), "invalid [").unwrap();
+        let config = Config {
+            github: None,
+            aws: None,
+            review_workflows: vec![],
+        };
+        let mut app = App::with_sources(false, false);
+        restore_startup_caches(&mut app, &config, dir.path());
+        assert!(app
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("topology")));
+        assert!(app.workflow_groups.is_empty() && app.pipeline_groups.is_empty());
+        assert!(app.job_assignment.is_none());
+    }
 
     fn polling_phase(state: PollState) -> PollingPhase {
         match state {

@@ -442,7 +442,16 @@ fn render_pipeline_centric(
     );
 
     // Compute name widths
-    let job_name_width = all_jobs_name_width(&app.workflow_groups);
+    let job_name_width = sections
+        .iter()
+        .flat_map(|section| &section.rows)
+        .filter_map(|row| match row {
+            PipelineCentricRow::JobBar { job_name, .. } => Some(job_name.chars().count()),
+            _ => None,
+        })
+        .max()
+        .unwrap_or(0)
+        .max(all_jobs_name_width(&app.workflow_groups));
     let stage_name_width = all_pipeline_stages_name_width(&app.pipeline_groups);
 
     // Render each pipeline-centric section
@@ -472,26 +481,26 @@ fn render_pipeline_centric(
                     job_name,
                     dim: force_dim,
                 } => {
-                    // Find the bar in workflow_groups
-                    if let Some(bar) = app
+                    // Cached assignments carry names before live bars arrive.
+                    let fallback = crate::model::Bar::new(job_name.clone());
+                    let bar = app
                         .workflow_groups
                         .iter()
                         .flat_map(|g| g.jobs.iter())
                         .find(|b| b.name == *job_name)
-                    {
-                        let bar_dim = dim || *force_dim;
-                        let dot_color = if *force_dim {
-                            theme::FG_DIM
-                        } else {
-                            bar.status.color()
-                        };
-                        frame.render_widget(
-                            BarWidget::new(bar, job_name_width, bar_dim)
-                                .with_intro(intro_for(app, &intro_bands, intro_now, &bar.name))
-                                .with_dot(dot_color),
-                            row_areas[ri],
-                        );
-                    }
+                        .unwrap_or(&fallback);
+                    let bar_dim = dim || *force_dim;
+                    let dot_color = if *force_dim {
+                        theme::FG_DIM
+                    } else {
+                        bar.status.color()
+                    };
+                    frame.render_widget(
+                        BarWidget::new(bar, job_name_width, bar_dim)
+                            .with_intro(intro_for(app, &intro_bands, intro_now, &bar.name))
+                            .with_dot(dot_color),
+                        row_areas[ri],
+                    );
                 }
                 PipelineCentricRow::PipelineHeader { name } => {
                     if let Some(pg) = app.pipeline_groups.iter().find(|g| g.name == *name) {
@@ -1854,6 +1863,29 @@ mod tests {
         let app = App::new();
         let sections = build_pipeline_centric_sections(&assignment, &app);
         assert!(sections.is_empty());
+    }
+
+    #[test]
+    fn cached_assignment_renders_missing_jobs_with_neutral_status() {
+        let assignment = JobAssignment {
+            pipeline_jobs: HashMap::from([("deploy".into(), ("CI".into(), vec!["Build".into()]))]),
+            shared_jobs: vec![("CI".into(), vec!["Tests".into()])],
+        };
+        let app = App::new();
+        let sections = build_pipeline_centric_sections(&assignment, &app);
+        let backend = ratatui::backend::TestBackend::new(100, 24);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| render_pipeline_centric(frame, &app, &sections, None, None, None, false))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let text: String = buffer.content().iter().map(|cell| cell.symbol()).collect();
+        assert!(text.contains("Tests"), "cached shared label must appear");
+        assert!(text.contains("Build"), "cached pipeline job must appear");
+        for cell in buffer.content() {
+            assert_ne!(cell.fg, theme::STATUS_SUCCESS);
+            assert_ne!(cell.fg, theme::STATUS_FAILED);
+        }
     }
 
     #[test]

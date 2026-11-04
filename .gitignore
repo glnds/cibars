@@ -4,3 +4,5 @@ docs/plans/
 config.toml
 .worktrees/
 .superpowers/
+.cibars-topology.toml
+.cibars-topology.toml.tmp
