@@ -80,8 +80,8 @@ changes slowly enough for cached names to help; each successful refresh can revi
 
 - btop-inspired terminal UI with rounded borders and muted color palette
 - Startup intro: each bar plays a 3s spectrum analyzer the moment it first
-  appears (rows = bass to treble, a shared 70 BPM groove with moving melodic bands,
-  rounded attacks, smooth releases and responsive white peak markers at 30 fps),
+  appears (rows = bass to treble, one shared pulse per second across both sources,
+  changing band heights, rounded attacks, brief crests, slow releases and white peak markers at 30 fps),
   then shows real state; green to orange VU colors stay consistent
 - Color-coded bars: yellow-to-orange gradient (running), green
   (succeeded), red (failed), grey (idle)

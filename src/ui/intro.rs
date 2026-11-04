@@ -1,8 +1,8 @@
 //! Startup "equalizer" intro: each bar plays a spectrum analyzer for a few
 //! seconds the moment it first appears (no waiting for all sources). Each bar is a frequency band (top =
-//! bass, bottom = treble) driven by a 70 BPM groove and a moving melodic spectrum.
-//! Kick, backbeat snare and off-beat hats share one clock. Rounded attacks, decay,
-//! and a peak block that holds then falls. Render-only: never touches Bar state.
+//! bass, bottom = treble) driven by one shared pulse per second. A changing spectrum
+//! gives rows different heights while they rise and fall together. Rounded attacks,
+//! sustained crests, slow releases, and held peaks. Render-only: never touches Bar state.
 
 use std::time::Duration;
 
@@ -17,8 +17,8 @@ pub const INTRO_FRAME: Duration = Duration::from_millis(33);
 /// VU low end: btop `cpu_start` green.
 pub const INTRO_LOW: Color = Color::Rgb(80, 240, 149);
 
-/// Seconds per beat at 70 BPM (slow, relaxed groove).
-pub const BEAT: f32 = 60.0 / 70.0;
+/// Seconds per shared pulse; frame rate only controls rendering smoothness.
+pub const BEAT: f32 = 1.0;
 /// How long a peak block sticks at its max before falling (s).
 pub const PEAK_HOLD: f32 = 0.22;
 /// Peak fall speed after the hold (full height per second).
@@ -28,11 +28,9 @@ const PEAK_STEP: f32 = 0.025;
 /// Fade-out at the end of the intro (s), so real bars take over smoothly.
 const FADE_OUT: f32 = 0.4;
 const FADE_IN: f32 = 0.16;
-const ATTACK: f32 = 0.035;
-
-const KICK_DECAY: f32 = 0.25;
-const SNARE_DECAY: f32 = 0.3;
-const HAT_DECAY: f32 = 0.15;
+const ATTACK: f32 = 0.10;
+const CREST: f32 = 0.08;
+const RELEASE: f32 = 0.67;
 
 /// One rendered intro frame for a bar: current level and held peak, in [0, 1].
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -45,41 +43,24 @@ pub struct IntroFrame {
 pub fn band_level(t: f32, band: f32, seed: u64) -> f32 {
     let t = t.max(0.0);
     let band = band.clamp(0.0, 1.0);
-    let beat = t / BEAT;
-    let beat_idx = beat.floor() as u64;
-    let mut drums = 0.0;
-    // Retain earlier tails across beat boundaries instead of resetting the envelope.
-    for index in beat_idx.saturating_sub(4)..=beat_idx {
-        let age = t - index as f32 * BEAT;
-        let accent = [1.0, 0.86, 0.94, 0.82][index as usize % 4];
-        drums += envelope(age, KICK_DECAY) * (1.0 - band).powi(3) * accent * 0.95;
-        if index % 2 == 1 {
-            drums += envelope(age, SNARE_DECAY) * spectral_band(band, 0.5, 0.23) * 0.72;
-        }
-        drums += envelope(age - BEAT / 2.0, HAT_DECAY)
-            * band.powi(2)
-            * (0.60 + 0.10 * jitter(17, index));
-    }
+    let beat = (t / BEAT).floor();
+    let age = t - beat * BEAT;
+    let pulse = smoothstep(age / ATTACK) * (1.0 - smoothstep((age - ATTACK - CREST) / RELEASE));
 
-    // Assumption: a silent simulated track. Shared melodic motion gives adjacent
-    // frequency bands a coherent shape; a small per-bar gain avoids identical rows.
+    // Assumption: one visible pulse per second, with a readable crest and release.
+    // Change the spectrum only between pulses, at rest: no offbeat instruments or
+    // per-band phase shifts that make the two source sections appear out of sync.
+    let accent = [1.0, 0.86, 0.94, 0.82][beat as usize % 4];
     let phrase = beat * std::f32::consts::TAU / 8.0;
-    let melody_center = 0.36 + 0.13 * phrase.sin();
-    let melody =
-        spectral_band(band, melody_center, 0.26) * (0.26 + 0.12 * (phrase * 2.0 + 0.7).sin());
-    let shimmer = spectral_band(band, 0.72, 0.25)
-        * (0.08 + 0.06 * (beat * std::f32::consts::TAU + band * 4.0).sin());
+    let center = 0.36 + 0.20 * phrase.sin();
+    let spectrum = 0.48 + 0.36 * spectral_band(band, center, 0.30);
     let gain = 0.94 + 0.12 * jitter(seed, 0);
-    ((0.08 + melody + shimmer + drums) * gain).clamp(0.0, 1.0)
+    ((0.08 + pulse * accent * spectrum) * gain).clamp(0.0, 1.0)
 }
 
 fn smoothstep(value: f32) -> f32 {
     let x = value.clamp(0.0, 1.0);
     x * x * (3.0 - 2.0 * x)
-}
-
-fn envelope(age: f32, decay: f32) -> f32 {
-    smoothstep(age / ATTACK) * (-(age - ATTACK).max(0.0) / decay).exp()
 }
 
 fn spectral_band(band: f32, center: f32, width: f32) -> f32 {
@@ -169,9 +150,9 @@ mod tests {
     }
 
     #[test]
-    fn melody_keeps_midrange_alive_between_drum_hits() {
+    fn spectrum_varies_across_the_phrase() {
         let levels: Vec<f32> = (0..8)
-            .map(|beat| band_level((beat as f32 + 0.65) * BEAT, 0.35, 7))
+            .map(|beat| band_level(beat as f32 * BEAT + 0.14, 0.35, 7))
             .collect();
         assert!(levels.iter().all(|level| *level > 0.2), "{levels:?}");
         let min = levels.iter().copied().fold(1.0, f32::min);
@@ -233,50 +214,82 @@ mod tests {
     }
 
     #[test]
-    fn kick_drives_bass_on_every_beat() {
-        for beat in 0..4 {
-            let hit = beat as f32 * BEAT;
-            assert!(band_level(hit + 0.04, BASS, 3) > 0.7, "beat {beat}");
+    fn all_bands_peak_together_regardless_of_name() {
+        for beat in 0..8 {
+            let peaks: Vec<usize> = (0..=10)
+                .map(|b| {
+                    let band = b as f32 / 10.0;
+                    let seed = name_seed(&format!("row-{b}"));
+                    (0..1000)
+                        .max_by(|a, b| {
+                            let level =
+                                |ms| band_level(beat as f32 + ms as f32 / 1000.0, band, seed);
+                            level(*a).total_cmp(&level(*b))
+                        })
+                        .unwrap()
+                })
+                .collect();
+            let spread = peaks.iter().max().unwrap() - peaks.iter().min().unwrap();
+            assert!(spread <= 33, "beat {beat}: peak times {peaks:?}");
+        }
+    }
+
+    #[test]
+    fn one_pulse_per_second_without_offbeat_rebounds() {
+        for beat in 0..8 {
+            for band in [BASS, 0.25, MID, 0.75, TREBLE] {
+                let t = beat as f32;
+                let crest = band_level(t + 0.14, band, 3);
+                let rest = band_level(t + 0.95, band, 3);
+                assert!(
+                    crest > rest + 0.3,
+                    "beat {beat} band {band}: {crest} vs {rest}"
+                );
+                assert!(rest < 0.12, "rest before next beat: {rest}");
+                for ms in (180..980).step_by(20) {
+                    let now = band_level(t + ms as f32 / 1000.0, band, 3);
+                    let next = band_level(t + (ms + 20) as f32 / 1000.0, band, 3);
+                    assert!(
+                        next <= now + 1e-5,
+                        "offbeat rebound: beat {beat} band {band} ms {ms}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn pulse_has_visible_attack_crest_and_long_release() {
+        for band in [BASS, MID, TREBLE] {
+            let level = |age: f32| band_level(1.0 + age, band, 3);
             assert!(
-                band_level(hit + 0.75 * BEAT, BASS, 3) < 0.35,
-                "beat {beat} decays"
+                level(0.10) > level(0.033) + 0.2,
+                "attack too fast: band {band}"
+            );
+            assert!(
+                (level(0.10) - level(0.17)).abs() < 0.03,
+                "crest too short: band {band}"
+            );
+            assert!(
+                level(0.40) > level(0.95) + 0.2,
+                "release too fast: band {band}"
             );
         }
     }
 
     #[test]
-    fn snare_hits_mids_on_two_and_four() {
-        let beat1 = band_level(0.04, MID, 3);
-        let beat2 = band_level(BEAT + 0.04, MID, 3);
-        let beat4 = band_level(3.0 * BEAT + 0.04, MID, 3);
-        assert!(beat2 > beat1 + 0.2, "b1={beat1} b2={beat2}");
-        assert!(beat4 > beat1 + 0.2, "b1={beat1} b4={beat4}");
-    }
-
-    #[test]
-    fn hihat_hits_treble_on_offbeats() {
-        let on = band_level(0.04, TREBLE, 3);
-        let off = band_level(BEAT / 2.0 + 0.04, TREBLE, 3);
-        assert!(off > on + 0.3, "on={on} off={off}");
-    }
-
-    #[test]
-    fn fast_attack_slow_decay() {
-        let before = band_level(BEAT - 0.02, BASS, 3);
-        // Rounded attack reaches its peak within 40 ms, then releases gradually.
-        let hit = band_level(BEAT + 0.04, BASS, 3);
-        let after = band_level(BEAT + 0.09, BASS, 3);
-        assert!(hit - before > 0.5, "attack: {before} -> {hit}");
-        assert!(hit - after < 0.4, "decay too fast: {hit} -> {after}");
-    }
-
-    #[test]
     fn bands_differ_like_a_spectrum() {
-        // on the off-beat treble is up while bass has decayed
-        let t = at((BEAT * 1000.0 * 2.5) as u64 + 40);
-        let bass = intro_frame(t, BASS, 3).unwrap().level;
-        let treble = intro_frame(t, TREBLE, 3).unwrap().level;
-        assert!((bass - treble).abs() > 0.2, "bass={bass} treble={treble}");
+        // A shared hit still has a spectrum, rather than identical row heights.
+        let t = at(1140);
+        let levels: Vec<f32> = (0..=10)
+            .map(|b| intro_frame(t, b as f32 / 10.0, 3).unwrap().level)
+            .collect();
+        let min = levels.iter().copied().fold(1.0, f32::min);
+        let max = levels.iter().copied().fold(0.0, f32::max);
+        assert!(
+            max - min > 0.15,
+            "spectrum should vary in height: {levels:?}"
+        );
     }
 
     #[test]
@@ -340,11 +353,6 @@ mod tests {
     #[test]
     fn vu_color_single_cell() {
         assert_eq!(vu_color(0, 1), INTRO_LOW);
-    }
-
-    #[test]
-    fn tempo_is_70_bpm() {
-        assert!((60.0 / BEAT - 70.0).abs() < 1e-3, "bpm = {}", 60.0 / BEAT);
     }
 
     #[test]
