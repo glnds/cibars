@@ -275,6 +275,7 @@ pub async fn poll_actions_tick(app: &Arc<Mutex<App>>, client: &dyn ActionsClient
     let mut discovery_done = false;
     let mut updates_done = false;
     let mut requested = HashSet::new();
+    let mut fresh_inventory = false;
     let mut jobs = FuturesUnordered::new();
     while !discovery_done || !updates_done || !jobs.is_empty() {
         tokio::select! {
@@ -289,13 +290,25 @@ pub async fn poll_actions_tick(app: &Arc<Mutex<App>>, client: &dyn ActionsClient
                 let mut a = app.lock().expect("app mutex poisoned");
                 match update {
                     ActionsUpdate::Inventory(entries) => {
-                        a.github_inventory_names = Some(entries.iter().map(|e| e.name.clone()).collect());
+                        fresh_inventory = true;
+                        let names: HashSet<_> = entries.iter().map(|e| e.name.clone()).collect();
+                        let previous: Vec<_> = a.github_inventory_names.iter().flatten().filter(|name| !names.contains(*name)).cloned().collect();
+                        a.github_removed_workflows.extend(previous);
                         update_workflow_inventory(&mut a, &entries);
+                        let gone: Vec<_> = a.workflow_groups.iter().filter(|g| g.gone).map(|g| g.name.clone()).collect();
+                        a.github_removed_workflows.extend(gone);
+                        a.github_removed_workflows.retain(|name| !names.contains(name));
+                        a.github_inventory_names = Some(names);
                     }
                     ActionsUpdate::Runs(mut page) => {
-                        if let Some(names) = &a.github_inventory_names {
-                            page.summaries.retain(|s| names.contains(&s.workflow_name));
+                        if fresh_inventory {
+                            if let Some(names) = &a.github_inventory_names {
+                                let rejected: Vec<_> = page.summaries.iter().filter(|s| !names.contains(&s.workflow_name)).map(|s| s.workflow_name.clone()).collect();
+                                a.github_removed_workflows.extend(rejected);
+                            }
                         }
+                        // Retained inventory rejects known deletions, not newly added workflows.
+                        page.summaries.retain(|s| !a.github_removed_workflows.contains(&s.workflow_name));
                         update_workflow_summaries(&mut a, &page.summaries);
                         let prs: Vec<_> = page.pr_numbers.into_iter().collect();
                         a.add_or_update_watched_prs(&prs, Instant::now());
@@ -923,6 +936,55 @@ mod tests {
             app.lock().unwrap().workflow_groups[0].gone,
             "ordinary run polls cannot undo authoritative deletion"
         );
+    }
+
+    #[tokio::test]
+    async fn progressive_new_workflow_between_inventory_refreshes_is_visible() {
+        let app = Arc::new(Mutex::new(App::new()));
+        // Prior inventory precedes the new CI workflow; it did not reject a CI run.
+        app.lock().unwrap().github_inventory_names = Some(HashSet::from(["Existing".into()]));
+        poll_actions_tick(
+            &app,
+            &StreamingClient {
+                fail: false,
+                hold: false,
+                inventory: None,
+            },
+        )
+        .await;
+        let a = app.lock().unwrap();
+        let new_workflow = a
+            .workflow_groups
+            .iter()
+            .find(|g| g.name == "CI")
+            .expect("new recent workflow must appear before next inventory refresh");
+        assert!(!new_workflow.gone);
+        assert_eq!(new_workflow.jobs.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn progressive_cold_empty_inventory_keeps_rejected_runs_absent_next_tick() {
+        let app = Arc::new(Mutex::new(App::new()));
+        poll_actions_tick(
+            &app,
+            &StreamingClient {
+                fail: false,
+                hold: false,
+                inventory: Some(vec![]),
+            },
+        )
+        .await;
+        assert!(app.lock().unwrap().workflow_groups.is_empty());
+        poll_actions_tick(
+            &app,
+            &StreamingClient {
+                fail: false,
+                hold: false,
+                inventory: None,
+            },
+        )
+        .await;
+        assert!(app.lock().unwrap().workflow_groups.is_empty());
     }
 
     #[tokio::test]

@@ -25,6 +25,31 @@ struct RunsCache {
     latest: LatestRuns,
     calls: u32,
     inventory: Option<Vec<WorkflowInventoryEntry>>,
+    /// Names explicitly removed by successful inventory, distinct from unseen workflows.
+    removed: std::collections::HashSet<String>,
+}
+
+impl RunsCache {
+    fn reconcile_inventory(&mut self, entries: &[WorkflowInventoryEntry]) {
+        let names: std::collections::HashSet<_> = entries.iter().map(|e| e.name.as_str()).collect();
+        self.removed.extend(
+            self.latest
+                .keys()
+                .filter(|name| !names.contains(name.as_str()))
+                .cloned(),
+        );
+        if let Some(previous) = &self.inventory {
+            self.removed.extend(
+                previous
+                    .iter()
+                    .filter(|e| !names.contains(e.name.as_str()))
+                    .map(|e| e.name.clone()),
+            );
+        }
+        self.removed.retain(|name| !names.contains(name.as_str()));
+        self.latest.retain(|name, _| names.contains(name.as_str()));
+        self.inventory = Some(entries.to_vec());
+    }
 }
 
 /// Runs per page. Listing time scales with payload: 100/page ≈ 3.2 s,
@@ -131,9 +156,17 @@ impl GitHubActionsClient {
     fn publish_runs(
         &self,
         updates: &tokio::sync::mpsc::UnboundedSender<ActionsUpdate>,
-        fresh: LatestRuns,
+        mut fresh: LatestRuns,
         pr_numbers: std::collections::HashSet<u64>,
     ) -> Result<()> {
+        {
+            let mut cache = self
+                .runs_cache
+                .lock()
+                .map_err(|_| anyhow::anyhow!("runs cache mutex poisoned"))?;
+            fresh.retain(|name, _| !cache.removed.contains(name));
+            merge_latest(&mut cache.latest, fresh.clone());
+        }
         let summaries = fresh
             .iter()
             .map(|(name, (run_id, status))| WorkflowRunSummary {
@@ -142,13 +175,6 @@ impl GitHubActionsClient {
                 status: *status,
             })
             .collect();
-        {
-            let mut cache = self
-                .runs_cache
-                .lock()
-                .map_err(|_| anyhow::anyhow!("runs cache mutex poisoned"))?;
-            merge_latest(&mut cache.latest, fresh);
-        }
         updates.send(ActionsUpdate::Runs(RunsPage {
             summaries,
             pr_numbers,
@@ -237,10 +263,7 @@ impl GitHubActionsClient {
                                 .runs_cache
                                 .lock()
                                 .map_err(|_| anyhow::anyhow!("runs cache mutex poisoned"))?;
-                            cache
-                                .latest
-                                .retain(|name, _| entries.iter().any(|e| &e.name == name));
-                            cache.inventory = Some(entries.clone());
+                            cache.reconcile_inventory(&entries);
                         }
                         updates.send(ActionsUpdate::Inventory(entries.clone()))?;
                         Ok(Some(entries))
@@ -254,6 +277,7 @@ impl GitHubActionsClient {
             }
         };
         let (recent, refreshed) = tokio::join!(recent, refresh_inventory);
+        let fresh_inventory = matches!(&refreshed, Ok(Some(_)));
         let inventory_error = match refreshed {
             Ok(Some(entries)) => {
                 inventory = Some(entries);
@@ -270,11 +294,12 @@ impl GitHubActionsClient {
         if let Some(entries) = inventory {
             // Inventory can complete before recent runs. Reconcile again after both
             // responses so delayed runs cannot resurrect a deleted workflow in cache.
-            self.runs_cache
-                .lock()
-                .map_err(|_| anyhow::anyhow!("runs cache mutex poisoned"))?
-                .latest
-                .retain(|name, _| entries.iter().any(|entry| &entry.name == name));
+            if fresh_inventory {
+                self.runs_cache
+                    .lock()
+                    .map_err(|_| anyhow::anyhow!("runs cache mutex poisoned"))?
+                    .reconcile_inventory(&entries);
+            }
             let targets: Vec<_> = entries
                 .into_iter()
                 .filter(|entry| {
@@ -805,6 +830,34 @@ mod tests {
             client.runs_cache.lock().unwrap().latest.is_empty(),
             "authoritative empty inventory must remain empty"
         );
+        gate.notify_one();
+        assert!(
+            client
+                .list_latest_runs()
+                .await
+                .unwrap()
+                .summaries
+                .is_empty(),
+            "ordinary polls must retain known deletion"
+        );
+    }
+
+    #[tokio::test]
+    async fn progressive_recent_new_workflow_survives_cached_inventory() {
+        let client = client_with_pages(vec![(
+            "/repos/owner/repo/actions/runs?per_page=30&page=1".into(),
+            serde_json::json!({"total_count":2,"workflow_runs":[run_fixture(10,"CI"),run_fixture(9,"Nightly")]}),
+        )]).await;
+        client.runs_cache.lock().unwrap().inventory = Some(vec![WorkflowInventoryEntry {
+            id: 1,
+            name: "CI".into(),
+        }]);
+        let page = client.list_latest_runs().await.unwrap();
+        assert!(
+            page.summaries.iter().any(|s| s.workflow_name == "Nightly"),
+            "cached inventory must not discard a new recent workflow"
+        );
+        assert_eq!(client.runs_cache.lock().unwrap().latest["Nightly"].0, 9);
     }
 
     #[tokio::test]
@@ -995,6 +1048,7 @@ mod tests {
             ]),
             calls: FULL_SCAN_EVERY - 1,
             inventory: None,
+            removed: Default::default(),
         };
         assert_sparse_workflow_found(&client).await;
     }
