@@ -469,7 +469,7 @@ pub fn apply_links(
     // Record GH workflow completions (non-Running terminal states).
     // Only record once per run_id to prevent the correlation window
     // from being refreshed every poll cycle.
-    for wg in &a.workflow_groups {
+    for wg in a.workflow_groups.iter().filter(|wg| !wg.gone) {
         if (wg.summary_status == BuildStatus::Succeeded || wg.summary_status == BuildStatus::Failed)
             && wg
                 .run_id
@@ -486,7 +486,7 @@ pub fn apply_links(
     let running_links: Vec<(String, String)> = a
         .pipeline_groups
         .iter()
-        .filter(|pg| pg.summary_status == BuildStatus::Running)
+        .filter(|pg| !pg.gone && pg.summary_status == BuildStatus::Running)
         .filter_map(|pg| {
             link_map
                 .workflow_for_pipeline(&pg.name)
@@ -498,7 +498,7 @@ pub fn apply_links(
     let unlinked_running: Vec<String> = a
         .pipeline_groups
         .iter()
-        .filter(|pg| pg.summary_status == BuildStatus::Running)
+        .filter(|pg| !pg.gone && pg.summary_status == BuildStatus::Running)
         .filter(|pg| link_map.workflow_for_pipeline(&pg.name).is_none())
         .map(|pg| pg.name.clone())
         .collect();
@@ -508,9 +508,9 @@ pub fn apply_links(
         .links()
         .iter()
         .filter(|l| {
-            !a.pipeline_groups
-                .iter()
-                .any(|pg| pg.name == l.pipeline_name && pg.summary_status == BuildStatus::Running)
+            !a.pipeline_groups.iter().any(|pg| {
+                !pg.gone && pg.name == l.pipeline_name && pg.summary_status == BuildStatus::Running
+            })
         })
         .map(|l| l.workflow_name.clone())
         .collect();
@@ -577,10 +577,9 @@ pub fn apply_links(
 fn set_pending_links(app: &mut App, link_map: &LinkMap) {
     for pg in &mut app.pipeline_groups {
         if let Some(wf_name) = link_map.workflow_for_pipeline(&pg.name) {
-            let linked_wf_running = app
-                .workflow_groups
-                .iter()
-                .any(|wg| wg.name == wf_name && wg.summary_status == BuildStatus::Running);
+            let linked_wf_running = app.workflow_groups.iter().any(|wg| {
+                !wg.gone && wg.name == wf_name && wg.summary_status == BuildStatus::Running
+            });
             let recently_completed = link_map.has_recent_completion(wf_name);
             pg.pending_link = (linked_wf_running || recently_completed)
                 && pg.summary_status != BuildStatus::Running;
@@ -1632,6 +1631,95 @@ source = "YamlDiscovered"
     }
 
     // --- pending_link tests ---
+
+    #[test]
+    fn gone_workflow_does_not_keep_linked_pipeline_polling() {
+        let app = Arc::new(Mutex::new(App::new()));
+        {
+            let mut a = app.lock().unwrap();
+            a.workflow_groups.push(WorkflowGroup {
+                name: "CI".into(),
+                jobs: vec![],
+                gone: true,
+                summary_status: BuildStatus::Running,
+                run_id: Some(1),
+                category: WorkflowCategory::CI,
+                linked_pipeline: Some("deploy".into()),
+            });
+            a.pipeline_groups.push(PipelineGroup {
+                name: "deploy".into(),
+                stages: vec![],
+                gone: false,
+                summary_status: BuildStatus::Idle,
+                pending_link: true,
+            });
+        }
+        let mut links = LinkMap::new();
+        links.add_discovered(
+            "deploy".into(),
+            "CI".into(),
+            "bucket".into(),
+            "a.zip".into(),
+        );
+        apply_links(&app, &mut links, &mut HashMap::new());
+        let a = app.lock().unwrap();
+        assert!(!a.pipeline_groups[0].pending_link);
+        assert!(!a.has_any_running());
+    }
+
+    #[test]
+    fn gone_pipeline_does_not_complete_live_workflow() {
+        let app = Arc::new(Mutex::new(App::new()));
+        {
+            let mut a = app.lock().unwrap();
+            let mut job = Bar::new("build".into());
+            job.set_status(BuildStatus::Running);
+            a.workflow_groups.push(WorkflowGroup {
+                name: "CI".into(),
+                jobs: vec![job],
+                gone: false,
+                summary_status: BuildStatus::Running,
+                run_id: Some(1),
+                category: WorkflowCategory::CI,
+                linked_pipeline: Some("deploy".into()),
+            });
+            a.pipeline_groups.push(PipelineGroup {
+                name: "deploy".into(),
+                stages: vec![],
+                gone: true,
+                summary_status: BuildStatus::Running,
+                pending_link: false,
+            });
+        }
+        let mut links = LinkMap::new();
+        links.add_discovered(
+            "deploy".into(),
+            "CI".into(),
+            "bucket".into(),
+            "a.zip".into(),
+        );
+        apply_links(&app, &mut links, &mut HashMap::new());
+        let a = app.lock().unwrap();
+        assert_eq!(a.workflow_groups[0].summary_status, BuildStatus::Running);
+        assert_eq!(a.workflow_groups[0].jobs[0].status, BuildStatus::Running);
+    }
+
+    #[test]
+    fn gone_workflow_does_not_record_fresh_completion() {
+        let app = Arc::new(Mutex::new(App::new()));
+        app.lock().unwrap().workflow_groups.push(WorkflowGroup {
+            name: "CI".into(),
+            jobs: vec![],
+            gone: true,
+            summary_status: BuildStatus::Succeeded,
+            run_id: Some(1),
+            category: WorkflowCategory::CI,
+            linked_pipeline: None,
+        });
+        let mut links = LinkMap::new();
+        apply_links(&app, &mut links, &mut HashMap::new());
+        assert!(!links.has_recent_completion("CI"));
+    }
 
     #[test]
     fn pending_link_set_when_gh_running_cp_idle() {

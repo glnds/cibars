@@ -251,28 +251,196 @@ pub fn pid_file_for(cwd: &Path) -> Result<PathBuf> {
     Ok(pids_dir.join(format!("{sanitized}.pid")))
 }
 
-/// Dynamic hook snippet — derives PID path at runtime using `pwd`.
+/// Dynamic hook snippet — derives PID path at runtime using the repository root.
 /// Works from any directory, targets the correct cibars instance.
 const HOOK_SNIPPET: &str = "\n# cibars: boost polling on push\n\
     _cibars_pid=\"$HOME/.cibars/pids/$(git rev-parse --show-toplevel | tr '/' '_').pid\"\n\
     kill -USR1 $(cat \"$_cibars_pid\" 2>/dev/null) 2>/dev/null || true\n";
 
-/// Delegation block: calls repo-local pre-push if it exists.
-/// Added when core.hooksPath overrides .git/hooks/.
+/// Legacy delegation block, retained for migration to the stdin-replaying wrapper.
 const DELEGATION_SNIPPET: &str = "\n# --- cibars: delegate to repo-local hook ---\n\
     _local=\"$(git rev-parse --git-dir)/hooks/pre-push\"\n\
     if [ -x \"$_local\" ]; then\n    \
     \"$_local\" \"$@\" || exit $?\n\
     fi\n";
 
+const HOOK_WRAPPER_HEADER: &str = "#!/bin/sh\n# cibars: managed pre-push wrapper\n";
+const ORIGINAL_DELEGATION_MARKER: &str =
+    "# cibars: preserved original delegates to repo-local hook\n";
+const ORIGINAL_HOOK_SNIPPET: &str =
+    "\"$0.cibars-original\" \"$@\" < \"$_cibars_stdin\" || exit $?\n";
+const REPLAY_DELEGATION_SNIPPET: &str = "\n# --- cibars: delegate to repo-local hook ---\n\
+    _local=\"$(git rev-parse --git-dir)/hooks/pre-push\"\n\
+    if [ -x \"$_local\" ] && ! [ \"$_local\" -ef \"$0\" ]; then\n    \
+    \"$_local\" \"$@\" < \"$_cibars_stdin\" || exit $?\n\
+    fi\n";
+
+fn read_hook(path: &Path) -> Result<String> {
+    match std::fs::read_to_string(path) {
+        Ok(contents) => Ok(contents),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
+        Err(error) => Err(error).with_context(|| format!("cannot read {}", path.display())),
+    }
+}
+
+fn make_hook_executable(path: &Path) -> Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut permissions = std::fs::metadata(path)?.permissions();
+        permissions.set_mode(permissions.mode() | 0o100);
+        std::fs::set_permissions(path, permissions)?;
+    }
+    Ok(())
+}
+
+fn create_private_hook(path: &Path) -> std::io::Result<std::fs::File> {
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    options.open(path)
+}
+
+/// Run existing hooks separately: their shebang, exit/exec, and status remain authoritative.
+/// Preserve known older snippets by moving their behavior into the wrapper.
+fn install_hook_wrapper(path: &Path, boost: bool, delegate: bool) -> Result<bool> {
+    use std::io::Write;
+
+    let existing = read_hook(path)?;
+    let managed = existing.starts_with(HOOK_WRAPPER_HEADER);
+    let boost = boost || has_cibars_hook(&existing);
+    let delegate = delegate || has_delegation(&existing);
+    let original = if managed {
+        String::new()
+    } else {
+        existing
+            .replace(HOOK_SNIPPET, "")
+            .replace(DELEGATION_SNIPPET, "")
+    };
+    let original_delegates = if managed {
+        existing.contains(ORIGINAL_DELEGATION_MARKER)
+    } else {
+        has_delegation(&original)
+    };
+    let has_original = if managed {
+        existing.contains(ORIGINAL_HOOK_SNIPPET)
+    } else {
+        // A shebang without a body needs no preserved executable.
+        !original
+            .strip_prefix("#!")
+            .and_then(|script| script.split_once('\n').map(|(_, body)| body))
+            .unwrap_or(&original)
+            .trim()
+            .is_empty()
+    };
+
+    // Moving a shell dispatcher changes $0 and can silently bypass its checks.
+    // Refuse installation rather than change path-dependent hook behavior.
+    anyhow::ensure!(
+        managed || !(original.contains("$0") || original.contains("${0}")),
+        "cannot wrap path-dependent hook {}; configure cibars signaling in that hook manually",
+        path.display()
+    );
+
+    let mut content = String::from(HOOK_WRAPPER_HEADER);
+    // Pre-push input is finite. A private file lets each hook read the complete ref list.
+    content.push_str(
+        "_cibars_stdin=$(mktemp \"${TMPDIR:-/tmp}/cibars-pre-push.XXXXXX\") || exit 1\n\
+         trap 'rm -f \"$_cibars_stdin\"' 0\n\
+         trap 'exit 1' HUP INT TERM\n\
+         cat > \"$_cibars_stdin\" || exit $?\n",
+    );
+    if has_original {
+        content.push_str(ORIGINAL_HOOK_SNIPPET);
+    }
+    // Assumption: custom delegation already owns its local-hook invocation. Only migrate
+    // cibars' exact legacy block; never duplicate an unrelated hook manager's delegation.
+    if original_delegates {
+        content.push_str(ORIGINAL_DELEGATION_MARKER);
+    } else if delegate {
+        content.push_str(REPLAY_DELEGATION_SNIPPET);
+    }
+    if boost {
+        content.push_str(HOOK_SNIPPET);
+    }
+    if existing == content {
+        return Ok(false);
+    }
+
+    let permissions = match std::fs::metadata(path) {
+        Ok(metadata) => Some(metadata.permissions()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => {
+            return Err(error).with_context(|| format!("cannot stat {}", path.display()));
+        }
+    };
+    if !managed && has_original {
+        let original_path = path.with_file_name("pre-push.cibars-original");
+        let mut preserved = create_private_hook(&original_path).with_context(|| {
+            format!(
+                "cannot preserve original hook at {}",
+                original_path.display()
+            )
+        })?;
+        if let Some(permissions) = &permissions {
+            preserved.set_permissions(permissions.clone())?;
+        }
+        preserved.write_all(original.as_bytes())?;
+        make_hook_executable(&original_path)?;
+    }
+    // Replace the directory entry atomically: do not truncate a shared symlink target.
+    let pending_path = path.with_file_name("pre-push.cibars-pending");
+    let mut pending = create_private_hook(&pending_path)
+        .with_context(|| format!("cannot stage hook at {}", pending_path.display()))?;
+    let installed = (|| -> Result<()> {
+        pending.write_all(content.as_bytes())?;
+        if let Some(permissions) = permissions {
+            pending.set_permissions(permissions)?;
+        }
+        make_hook_executable(&pending_path)?;
+        std::fs::rename(&pending_path, path)?;
+        Ok(())
+    })();
+    if installed.is_err() {
+        if let Err(error) = std::fs::remove_file(&pending_path) {
+            tracing::warn!(
+                "cannot remove staged hook {}: {error}",
+                pending_path.display()
+            );
+        }
+    }
+    installed.with_context(|| format!("cannot install hook at {}", path.display()))?;
+    Ok(true)
+}
+
 fn has_cibars_hook(contents: &str) -> bool {
     contents.contains("USR1") && contents.contains("cibars")
 }
 
+fn needs_hook_migration(contents: &str) -> bool {
+    if contents.starts_with(HOOK_WRAPPER_HEADER) || !contents.contains(HOOK_SNIPPET) {
+        return false;
+    }
+    let original = contents
+        .replace(HOOK_SNIPPET, "")
+        .replace(DELEGATION_SNIPPET, "");
+    !original
+        .strip_prefix("#!")
+        .map(|script| script.split_once('\n').map_or("", |(_, body)| body))
+        .unwrap_or(&original)
+        .trim()
+        .is_empty()
+}
+
 fn has_delegation(contents: &str) -> bool {
-    contents.contains("rev-parse --git-dir")
-        && contents.contains("hooks/pre-push")
-        && contents.contains("$_local")
+    contents.contains(ORIGINAL_DELEGATION_MARKER)
+        || (contents.contains("rev-parse --git-dir")
+            && contents.contains("hooks/pre-push")
+            && contents.contains("$_local"))
 }
 
 /// Resolve effective hooks directory, respecting core.hooksPath.
@@ -309,6 +477,9 @@ pub fn check_pre_push_hook(dir: &Path) -> HookStatus {
     // Check effective hooks dir first
     if let Ok(contents) = std::fs::read_to_string(&effective_hook) {
         if has_cibars_hook(&contents) {
+            if needs_hook_migration(&contents) {
+                return HookStatus::Incomplete;
+            }
             let location = if is_global {
                 HookLocation::Global
             } else {
@@ -320,6 +491,9 @@ pub fn check_pre_push_hook(dir: &Path) -> HookStatus {
         if is_global && has_delegation(&contents) {
             if let Ok(local_contents) = std::fs::read_to_string(&local_hook) {
                 if has_cibars_hook(&local_contents) {
+                    if needs_hook_migration(&local_contents) {
+                        return HookStatus::Incomplete;
+                    }
                     return HookStatus::Installed(HookLocation::Global);
                 }
             }
@@ -356,17 +530,12 @@ pub fn ensure_delegation(dir: &Path) -> bool {
     if !global_hook.is_file() || !local_hook.is_file() {
         return false; // Both must exist for this to be a broken state
     }
-    let content = std::fs::read_to_string(&global_hook).unwrap_or_default();
-    if has_delegation(&content) {
-        return false; // Already delegates
-    }
-    // Fix: prepend delegation to global hook (before any existing content after shebang)
-    let new_content = format!("{content}{DELEGATION_SNIPPET}");
-    if std::fs::write(&global_hook, new_content).is_ok() {
-        tracing::info!("auto-fixed: added delegation to global pre-push hook");
-        true
-    } else {
-        false
+    match install_hook_wrapper(&global_hook, false, true) {
+        Ok(changed) => changed,
+        Err(error) => {
+            tracing::warn!("cannot repair global pre-push delegation: {error:#}");
+            false
+        }
     }
 }
 
@@ -384,38 +553,7 @@ pub fn install_pre_push_hook(dir: &Path, target: HookTarget) -> Result<()> {
     std::fs::create_dir_all(&hook_dir)
         .with_context(|| format!("cannot create {}", hook_dir.display()))?;
 
-    let existing = std::fs::read_to_string(&hook_path).unwrap_or_default();
-
-    // Idempotent: skip if already contains cibars hook
-    if has_cibars_hook(&existing) {
-        return Ok(());
-    }
-
-    let mut additions = String::new();
-
-    // Global target always delegates to repo-local hooks (safe no-op)
-    if target == HookTarget::Global && !has_delegation(&existing) {
-        additions.push_str(DELEGATION_SNIPPET);
-    }
-
-    additions.push_str(HOOK_SNIPPET);
-
-    let content = if existing.is_empty() {
-        format!("#!/bin/sh{additions}")
-    } else {
-        format!("{existing}{additions}")
-    };
-
-    std::fs::write(&hook_path, content)
-        .with_context(|| format!("cannot write {}", hook_path.display()))?;
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mut perms = std::fs::metadata(&hook_path)?.permissions();
-        perms.set_mode(perms.mode() | 0o755);
-        std::fs::set_permissions(&hook_path, perms)?;
-    }
+    install_hook_wrapper(&hook_path, true, target == HookTarget::Global)?;
 
     // Local install with global override: ensure global hook delegates to local
     if target == HookTarget::Local {
@@ -424,23 +562,7 @@ pub fn install_pre_push_hook(dir: &Path, target: HookTarget) -> Result<()> {
             let global_hook_path = global_dir.join("pre-push");
             std::fs::create_dir_all(&global_dir)
                 .with_context(|| format!("cannot create {}", global_dir.display()))?;
-            let global_existing = std::fs::read_to_string(&global_hook_path).unwrap_or_default();
-            if !has_delegation(&global_existing) {
-                let global_content = if global_existing.is_empty() {
-                    format!("#!/bin/sh{DELEGATION_SNIPPET}")
-                } else {
-                    format!("{global_existing}{DELEGATION_SNIPPET}")
-                };
-                std::fs::write(&global_hook_path, &global_content)
-                    .with_context(|| format!("cannot write {}", global_hook_path.display()))?;
-                #[cfg(unix)]
-                {
-                    use std::os::unix::fs::PermissionsExt;
-                    let mut perms = std::fs::metadata(&global_hook_path)?.permissions();
-                    perms.set_mode(perms.mode() | 0o755);
-                    std::fs::set_permissions(&global_hook_path, perms)?;
-                }
-            }
+            install_hook_wrapper(&global_hook_path, false, true)?;
         }
     }
 
@@ -1084,6 +1206,305 @@ aws_profile = "staging"
 
     // --- install_pre_push_hook tests ---
 
+    #[cfg(unix)]
+    fn write_executable_hook(path: &Path, contents: &str) {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::write(path, contents).unwrap();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    #[cfg(unix)]
+    fn run_installed_hook(repo: &Path, path: &Path) -> std::process::Output {
+        use std::io::Seek;
+        let mut input = tempfile::tempfile().unwrap();
+        input
+            .write_all(b"refs/heads/main abc refs/heads/main def\n")
+            .unwrap();
+        input.rewind().unwrap();
+        Command::new(path)
+            .args(["origin", "ssh://example.test/repo with spaces"])
+            .current_dir(repo)
+            .env("HOME", repo)
+            .stdin(input)
+            .output()
+            .unwrap()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn installed_local_hook_preserves_original_failure() {
+        for original in ["#!/bin/sh\nfalse\n", "#!/bin/sh\nexit 23\n"] {
+            let dir = tempfile::tempdir().unwrap();
+            init_git_repo(dir.path());
+            let hook = dir.path().join(".git/hooks/pre-push");
+            write_executable_hook(&hook, original);
+            let expected = run_installed_hook(dir.path(), &hook).status.code();
+            install_pre_push_hook(dir.path(), HookTarget::Local).unwrap();
+            assert_eq!(
+                run_installed_hook(dir.path(), &hook).status.code(),
+                expected
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn installed_local_hook_signals_after_original_exit_or_exec() {
+        use std::os::unix::process::ExitStatusExt;
+        use std::time::{Duration, Instant};
+        for original in ["#!/bin/sh\nexit 0\n", "#!/bin/sh\nexec true\n"] {
+            let dir = tempfile::tempdir().unwrap();
+            init_git_repo(dir.path());
+            let hook = dir.path().join(".git/hooks/pre-push");
+            write_executable_hook(&hook, original);
+            install_pre_push_hook(dir.path(), HookTarget::Local).unwrap();
+
+            // A separate process keeps SIGUSR1 assertions isolated from other tests.
+            let mut receiver = Command::new("sleep").arg("30").spawn().unwrap();
+            let pids = dir.path().join(".cibars/pids");
+            std::fs::create_dir_all(&pids).unwrap();
+            let canonical = dir.path().canonicalize().unwrap();
+            let name = canonical.to_string_lossy().replace('/', "_");
+            std::fs::write(pids.join(format!("{name}.pid")), receiver.id().to_string()).unwrap();
+            let output = run_installed_hook(dir.path(), &hook);
+            let deadline = Instant::now() + Duration::from_secs(2);
+            let received = loop {
+                if let Some(status) = receiver.try_wait().unwrap() {
+                    break status.signal() == Some(signal_hook::consts::SIGUSR1);
+                }
+                if Instant::now() >= deadline {
+                    receiver.kill().unwrap();
+                    receiver.wait().unwrap();
+                    break false;
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            };
+            assert!(output.status.success(), "{output:?}");
+            assert!(received, "original hook prevented boost: {original}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn installed_hook_preserves_interpreter_arguments_and_stdin() {
+        let dir = tempfile::tempdir().unwrap();
+        init_git_repo(dir.path());
+        let hook = dir.path().join(".git/hooks/pre-push");
+        write_executable_hook(
+            &hook,
+            "#!/bin/bash\nargs=(\"$@\")\nprintf '%s\\n' \"${args[@]}\"\ncat\n",
+        );
+        install_pre_push_hook(dir.path(), HookTarget::Local).unwrap();
+        let output = run_installed_hook(dir.path(), &hook);
+        assert!(output.status.success(), "{output:?}");
+        assert_eq!(
+            String::from_utf8(output.stdout).unwrap(),
+            "origin\nssh://example.test/repo with spaces\nrefs/heads/main abc refs/heads/main def\n"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn installed_global_hook_replays_stdin_to_both_hooks() {
+        let dir = tempfile::tempdir().unwrap();
+        let global_hooks = dir.path().join("global hooks");
+        std::fs::create_dir_all(&global_hooks).unwrap();
+        init_git_repo_with_hooks_path(dir.path(), &global_hooks);
+        let global = global_hooks.join("pre-push");
+        write_executable_hook(&global, "#!/bin/sh\nprintf 'global\\n'\ncat\n");
+        write_executable_hook(
+            &dir.path().join(".git/hooks/pre-push"),
+            "#!/bin/sh\nprintf 'local\\n'\ncat\n",
+        );
+        install_pre_push_hook(dir.path(), HookTarget::Global).unwrap();
+        let output = run_installed_hook(dir.path(), &global);
+        assert!(output.status.success(), "{output:?}");
+        assert_eq!(
+            String::from_utf8(output.stdout).unwrap(),
+            "global\nrefs/heads/main abc refs/heads/main def\nlocal\nrefs/heads/main abc refs/heads/main def\n"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn global_delegation_preserves_failures_and_handles_original_exit() {
+        for target in [Some(HookTarget::Global), Some(HookTarget::Local), None] {
+            for (global_body, local_body, expected, stdout) in [
+                ("false", "printf local", 1, ""),
+                ("exit 0", "printf local", 0, "local"),
+                ("exec true", "printf local", 0, "local"),
+                ("true", "exit 31", 31, ""),
+                (
+                    "printf 'global\\n'; cat",
+                    "printf 'local\\n'; cat",
+                    0,
+                    "global\nrefs/heads/main abc refs/heads/main def\nlocal\nrefs/heads/main abc refs/heads/main def\n",
+                ),
+            ] {
+                let dir = tempfile::tempdir().unwrap();
+                let global_hooks = dir.path().join("global-hooks");
+                std::fs::create_dir_all(&global_hooks).unwrap();
+                init_git_repo_with_hooks_path(dir.path(), &global_hooks);
+                let global = global_hooks.join("pre-push");
+                write_executable_hook(&global, &format!("#!/bin/sh\n{global_body}\n"));
+                write_executable_hook(
+                    &dir.path().join(".git/hooks/pre-push"),
+                    &format!("#!/bin/sh\n{local_body}\n"),
+                );
+                if let Some(target) = target {
+                    install_pre_push_hook(dir.path(), target).unwrap();
+                } else {
+                    assert!(ensure_delegation(dir.path()));
+                    assert!(!ensure_delegation(dir.path()), "repair must be idempotent");
+                }
+                let output = run_installed_hook(dir.path(), &global);
+                assert_eq!(output.status.code(), Some(expected), "{target:?}: {output:?}");
+                assert_eq!(String::from_utf8(output.stdout).unwrap(), stdout);
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn installed_global_hook_does_not_delegate_to_itself() {
+        let dir = tempfile::tempdir().unwrap();
+        init_git_repo(dir.path());
+        let hook = dir.path().join(".git/hooks/pre-push");
+        // Bound a broken recursive delegation without creating an unbounded process tree.
+        write_executable_hook(
+            &hook,
+            "#!/bin/sh\n[ ! -e hook-ran ] || exit 73\ntouch hook-ran\n",
+        );
+        install_pre_push_hook(dir.path(), HookTarget::Global).unwrap();
+        let output = run_installed_hook(dir.path(), &hook);
+        assert!(output.status.success(), "{output:?}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn installed_hook_runs_original_once_after_reinstallation() {
+        let dir = tempfile::tempdir().unwrap();
+        init_git_repo(dir.path());
+        let hook = dir.path().join(".git/hooks/pre-push");
+        write_executable_hook(&hook, "#!/bin/sh\nprintf original\n");
+        install_pre_push_hook(dir.path(), HookTarget::Local).unwrap();
+        install_pre_push_hook(dir.path(), HookTarget::Local).unwrap();
+        let output = run_installed_hook(dir.path(), &hook);
+        assert!(output.status.success(), "{output:?}");
+        assert_eq!(output.stdout, b"original");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn installed_hook_repairs_legacy_appended_snippet() {
+        let dir = tempfile::tempdir().unwrap();
+        init_git_repo(dir.path());
+        let hook = dir.path().join(".git/hooks/pre-push");
+        write_executable_hook(&hook, &format!("#!/bin/sh\nfalse\n{HOOK_SNIPPET}"));
+        assert_eq!(check_pre_push_hook(dir.path()), HookStatus::Incomplete);
+        install_pre_push_hook(dir.path(), HookTarget::Local).unwrap();
+        assert_eq!(run_installed_hook(dir.path(), &hook).status.code(), Some(1));
+        assert_eq!(
+            check_pre_push_hook(dir.path()),
+            HookStatus::Installed(HookLocation::Local)
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn installed_hook_refuses_path_dependent_original() {
+        let dir = tempfile::tempdir().unwrap();
+        init_git_repo(dir.path());
+        let hook = dir.path().join(".git/hooks/pre-push");
+        let body = "#!/bin/sh\ncase \"$0\" in */pre-push) exit 23;; *) exit 0;; esac\n";
+        write_executable_hook(&hook, body);
+        assert_eq!(
+            run_installed_hook(dir.path(), &hook).status.code(),
+            Some(23)
+        );
+        assert!(install_pre_push_hook(dir.path(), HookTarget::Local).is_err());
+        assert_eq!(std::fs::read_to_string(&hook).unwrap(), body);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn installed_hook_refuses_to_overwrite_preserved_original() {
+        let dir = tempfile::tempdir().unwrap();
+        init_git_repo(dir.path());
+        let hook = dir.path().join(".git/hooks/pre-push");
+        let original = dir.path().join(".git/hooks/pre-push.cibars-original");
+        write_executable_hook(&hook, "#!/bin/sh\nfalse\n");
+        std::fs::write(&original, "existing backup").unwrap();
+        assert!(install_pre_push_hook(dir.path(), HookTarget::Local).is_err());
+        assert_eq!(
+            std::fs::read_to_string(original).unwrap(),
+            "existing backup"
+        );
+        assert_eq!(run_installed_hook(dir.path(), &hook).status.code(), Some(1));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn installed_hook_keeps_custom_delegation_once_after_reinstallation() {
+        let dir = tempfile::tempdir().unwrap();
+        let global_hooks = dir.path().join("global-hooks");
+        std::fs::create_dir_all(&global_hooks).unwrap();
+        init_git_repo_with_hooks_path(dir.path(), &global_hooks);
+        let global = global_hooks.join("pre-push");
+        write_executable_hook(
+            &global,
+            "#!/bin/sh\n_local=\"$(git rev-parse --git-dir)/hooks/pre-push\"\nexec \"$_local\" \"$@\"\n",
+        );
+        write_executable_hook(
+            &dir.path().join(".git/hooks/pre-push"),
+            "#!/bin/sh\nprintf local\n",
+        );
+        install_pre_push_hook(dir.path(), HookTarget::Global).unwrap();
+        install_pre_push_hook(dir.path(), HookTarget::Global).unwrap();
+        assert!(!ensure_delegation(dir.path()));
+        let output = run_installed_hook(dir.path(), &global);
+        assert!(output.status.success(), "{output:?}");
+        assert_eq!(output.stdout, b"local");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn installed_hook_preserves_private_hook_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        init_git_repo(dir.path());
+        let hook = dir.path().join(".git/hooks/pre-push");
+        write_executable_hook(&hook, "#!/bin/sh\nexit 0\n");
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o700)).unwrap();
+        install_pre_push_hook(dir.path(), HookTarget::Local).unwrap();
+        for path in [hook, dir.path().join(".git/hooks/pre-push.cibars-original")] {
+            assert_eq!(
+                std::fs::metadata(path).unwrap().permissions().mode() & 0o777,
+                0o700
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn installed_hook_does_not_overwrite_symlink_target() {
+        use std::os::unix::fs::symlink;
+        let dir = tempfile::tempdir().unwrap();
+        init_git_repo(dir.path());
+        let hook = dir.path().join(".git/hooks/pre-push");
+        let shared = dir.path().join("shared-hook");
+        write_executable_hook(&shared, "#!/bin/sh\nprintf shared\n");
+        symlink(&shared, &hook).unwrap();
+        install_pre_push_hook(dir.path(), HookTarget::Local).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(shared).unwrap(),
+            "#!/bin/sh\nprintf shared\n"
+        );
+        let output = run_installed_hook(dir.path(), &hook);
+        assert!(output.status.success(), "{output:?}");
+        assert_eq!(output.stdout, b"shared");
+    }
+
     #[test]
     fn install_hook_local_creates_new_file() {
         let dir = tempfile::tempdir().unwrap();
@@ -1096,16 +1517,19 @@ aws_profile = "staging"
         assert!(content.contains("$(git rev-parse --show-toplevel | tr"));
     }
 
+    #[cfg(unix)]
     #[test]
-    fn install_hook_local_appends_to_existing() {
+    fn install_hook_local_preserves_existing_behavior() {
         let dir = tempfile::tempdir().unwrap();
         init_git_repo(dir.path());
         let hooks_dir = dir.path().join(".git/hooks");
         std::fs::write(hooks_dir.join("pre-push"), "#!/bin/sh\necho pushing\n").unwrap();
         install_pre_push_hook(dir.path(), HookTarget::Local).unwrap();
         let content = std::fs::read_to_string(hooks_dir.join("pre-push")).unwrap();
-        assert!(content.contains("echo pushing"));
         assert!(content.contains("cibars"));
+        let output = run_installed_hook(dir.path(), &hooks_dir.join("pre-push"));
+        assert!(output.status.success());
+        assert_eq!(output.stdout, b"pushing\n");
     }
 
     #[test]
@@ -1251,6 +1675,7 @@ aws_profile = "staging"
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn install_local_preserves_existing_global_hook_and_adds_delegation() {
         let dir = tempfile::tempdir().unwrap();
@@ -1261,11 +1686,10 @@ aws_profile = "staging"
         std::fs::write(global_hooks.join("pre-push"), "#!/bin/sh\necho existing\n").unwrap();
         install_pre_push_hook(dir.path(), HookTarget::Local).unwrap();
         let global = std::fs::read_to_string(global_hooks.join("pre-push")).unwrap();
-        assert!(
-            global.contains("echo existing"),
-            "should preserve: {global}"
-        );
         assert!(has_delegation(&global), "should add delegation: {global}");
+        let output = run_installed_hook(dir.path(), &global_hooks.join("pre-push"));
+        assert!(output.status.success());
+        assert_eq!(output.stdout, b"existing\n");
     }
 
     #[test]
@@ -1325,7 +1749,7 @@ aws_profile = "staging"
     }
 
     #[test]
-    fn ensure_delegation_noop_when_already_delegates() {
+    fn ensure_delegation_migrates_legacy_delegation_once() {
         let dir = tempfile::tempdir().unwrap();
         let global_hooks = dir.path().join("global-hooks");
         std::fs::create_dir_all(&global_hooks).unwrap();
@@ -1337,6 +1761,7 @@ aws_profile = "staging"
         .unwrap();
         let local_hooks = dir.path().join(".git/hooks");
         std::fs::write(local_hooks.join("pre-push"), "#!/bin/sh\necho local\n").unwrap();
+        assert!(ensure_delegation(dir.path()));
         assert!(!ensure_delegation(dir.path()));
     }
 

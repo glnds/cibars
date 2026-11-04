@@ -171,11 +171,21 @@ pub async fn poll_pipelines_tick(
     }
 
     match poll_pipelines(client).await {
-        Ok(states) => {
-            tracing::debug!(count = states.len(), "polled pipelines");
+        Ok(poll) => {
+            tracing::debug!(count = poll.states.len(), "polled pipelines");
             let mut a = app.lock().expect("app mutex poisoned");
-            update_pipeline_groups(&mut a, states);
-            a.aws_health = SourceHealth::Healthy;
+            if poll.errors.is_empty() || !poll.states.is_empty() {
+                a.aws_health = SourceHealth::Healthy;
+            }
+            update_pipeline_groups(&mut a, poll.states, &poll.names);
+            for error in poll.errors {
+                let msg = format!("{error:#}");
+                if is_auth_error(&msg) {
+                    a.aws_health = SourceHealth::AuthFailed { since: Utc::now() };
+                    a.push_warning(aws_sso_expired_msg(profile));
+                }
+                a.push_warning(format!("AWS: {msg}"));
+            }
         }
         Err(e) => {
             let msg = format!("{e:#}");
@@ -410,10 +420,29 @@ pub async fn poll_once(
     );
 }
 
-async fn poll_pipelines(client: &dyn PipelineClient) -> Result<Vec<PipelineState>> {
+struct PipelinePoll {
+    names: Vec<String>,
+    states: Vec<PipelineState>,
+    errors: Vec<anyhow::Error>,
+}
+
+async fn poll_pipelines(client: &dyn PipelineClient) -> Result<PipelinePoll> {
     let names = client.list_pipeline_names().await?;
     let futs: Vec<_> = names.iter().map(|n| client.get_pipeline_state(n)).collect();
-    futures::future::join_all(futs).await.into_iter().collect()
+    let results = futures::future::join_all(futs).await;
+    let mut states = Vec::new();
+    let mut errors = Vec::new();
+    for (name, result) in names.iter().zip(results) {
+        match result {
+            Ok(state) => states.push(state),
+            Err(error) => errors.push(error.context(format!("pipeline {name}"))),
+        }
+    }
+    Ok(PipelinePoll {
+        names,
+        states,
+        errors,
+    })
 }
 
 fn reconcile_bars(
@@ -447,26 +476,36 @@ fn reconcile_bars(
     bars.sort_by_key(|b| order.get(b.name.as_str()).copied().unwrap_or(usize::MAX));
 }
 
-/// Compute stage-level status and finished timestamp from the last action.
+/// Aggregate all action statuses and use the latest completion timestamp.
 fn stage_status_and_timestamp(
     actions: &[ActionState],
 ) -> (BuildStatus, Option<chrono::DateTime<chrono::Utc>>) {
-    let last = actions.last();
-    let status = last.map(|a| a.status).unwrap_or(BuildStatus::Idle);
+    // Assume active actions take priority, matching pipeline-level aggregation.
+    let status = actions
+        .iter()
+        .map(|a| a.status)
+        .max_by_key(|status| match status {
+            BuildStatus::Running => 3,
+            BuildStatus::Failed => 2,
+            BuildStatus::Succeeded => 1,
+            BuildStatus::Idle => 0,
+        })
+        .unwrap_or(BuildStatus::Idle);
     let timestamp = match status {
-        BuildStatus::Succeeded | BuildStatus::Failed => last.and_then(|a| a.last_status_change),
+        BuildStatus::Succeeded | BuildStatus::Failed => {
+            actions.iter().filter_map(|a| a.last_status_change).max()
+        }
         _ => None,
     };
     (status, timestamp)
 }
 
-fn update_pipeline_groups(app: &mut App, states: Vec<PipelineState>) {
-    let seen: HashSet<&str> = states.iter().map(|s| s.name.as_str()).collect();
+fn update_pipeline_groups(app: &mut App, states: Vec<PipelineState>, listed_names: &[String]) {
+    // A listed pipeline still exists even if its state request failed.
+    let seen: HashSet<&str> = listed_names.iter().map(String::as_str).collect();
 
     for group in &mut app.pipeline_groups {
-        if !seen.contains(group.name.as_str()) {
-            group.gone = true;
-        }
+        group.gone = !seen.contains(group.name.as_str());
     }
 
     for state in states {
@@ -1080,6 +1119,128 @@ mod tests {
         assert!(app.pipeline_groups[0].gone);
     }
 
+    struct PartialPipelineClient {
+        successful: MockPipelineClient,
+        errors: Vec<(&'static str, &'static str)>,
+    }
+
+    #[async_trait]
+    impl PipelineClient for PartialPipelineClient {
+        async fn list_pipeline_names(&self) -> Result<Vec<String>> {
+            let mut names = self.successful.list_pipeline_names().await?;
+            names.extend(self.errors.iter().map(|(name, _)| (*name).to_string()));
+            Ok(names)
+        }
+
+        async fn get_pipeline_state(&self, name: &str) -> Result<PipelineState> {
+            if let Some((_, error)) = self.errors.iter().find(|(failed, _)| *failed == name) {
+                anyhow::bail!("{error}");
+            }
+            self.successful.get_pipeline_state(name).await
+        }
+
+        async fn get_pipeline_definition(&self, name: &str) -> Result<PipelineDefinition> {
+            self.successful.get_pipeline_definition(name).await
+        }
+    }
+
+    #[tokio::test]
+    async fn poll_partial_failure_updates_successes_and_preserves_listed_pipeline() {
+        let app = Arc::new(Mutex::new(App::new()));
+        let initial = MockPipelineClient {
+            pipelines: vec![
+                mock_pipeline(
+                    "healthy",
+                    BuildStatus::Running,
+                    vec![mock_stage("Build", vec![("build", BuildStatus::Running)])],
+                ),
+                mock_pipeline(
+                    "denied",
+                    BuildStatus::Failed,
+                    vec![mock_stage("Build", vec![("build", BuildStatus::Failed)])],
+                ),
+                mock_pipeline("removed", BuildStatus::Succeeded, vec![]),
+            ],
+        };
+        poll_pipelines_tick(&app, &initial, "test-profile", false).await;
+
+        let partial = PartialPipelineClient {
+            successful: MockPipelineClient {
+                pipelines: vec![mock_pipeline(
+                    "healthy",
+                    BuildStatus::Succeeded,
+                    vec![mock_stage("Build", vec![("build", BuildStatus::Succeeded)])],
+                )],
+            },
+            errors: vec![
+                ("denied", "AccessDenied: not authorized"),
+                ("deleted-during-poll", "PipelineNotFoundException"),
+            ],
+        };
+        poll_pipelines_tick(&app, &partial, "test-profile", false).await;
+
+        let a = app.lock().unwrap();
+        let healthy = a
+            .pipeline_groups
+            .iter()
+            .find(|g| g.name == "healthy")
+            .unwrap();
+        assert_eq!(healthy.summary_status, BuildStatus::Succeeded);
+        assert_eq!(healthy.stages[0].status, BuildStatus::Succeeded);
+        let denied = a
+            .pipeline_groups
+            .iter()
+            .find(|g| g.name == "denied")
+            .unwrap();
+        assert!(!denied.gone, "a failed fetch is not evidence of deletion");
+        assert_eq!(denied.summary_status, BuildStatus::Failed);
+        assert_eq!(denied.stages[0].status, BuildStatus::Failed);
+        assert!(
+            a.pipeline_groups
+                .iter()
+                .find(|g| g.name == "removed")
+                .unwrap()
+                .gone
+        );
+        assert_eq!(a.pipeline_groups.len(), 3);
+        assert_eq!(a.aws_health, SourceHealth::Healthy);
+        assert!(!a.loading_pipelines);
+        assert!(a.last_poll.is_some());
+        assert!(a
+            .warnings
+            .iter()
+            .any(|w| w.contains("denied") && w.contains("AccessDenied")));
+        assert!(a
+            .warnings
+            .iter()
+            .any(|w| w.contains("deleted-during-poll") && w.contains("PipelineNotFoundException")));
+    }
+
+    #[tokio::test]
+    async fn poll_partial_auth_failure_applies_successes_and_keeps_auth_failed() {
+        let app = Arc::new(Mutex::new(App::new()));
+        let partial = PartialPipelineClient {
+            successful: MockPipelineClient {
+                pipelines: vec![mock_pipeline("healthy", BuildStatus::Succeeded, vec![])],
+            },
+            errors: vec![("expired", "ExpiredToken: the security token is expired")],
+        };
+        poll_pipelines_tick(&app, &partial, "test-profile", false).await;
+
+        let a = app.lock().unwrap();
+        assert_eq!(a.pipeline_groups.len(), 1);
+        assert_eq!(a.pipeline_groups[0].name, "healthy");
+        assert!(matches!(a.aws_health, SourceHealth::AuthFailed { .. }));
+        assert!(a
+            .warnings
+            .iter()
+            .any(|w| w.contains("aws sso login") && w.contains("test-profile")));
+        assert!(a
+            .warnings
+            .iter()
+            .any(|w| w.contains("expired") && w.contains("ExpiredToken")));
+    }
+
     #[tokio::test]
     async fn poll_updates_existing_pipeline_groups() {
         let app = Arc::new(Mutex::new(App::new()));
@@ -1137,7 +1298,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn poll_creates_pipeline_with_multi_stage_status_from_last_action() {
+    async fn poll_creates_pipeline_with_multi_action_stage_status() {
         let app = Arc::new(Mutex::new(App::new()));
         let pipes = MockPipelineClient {
             pipelines: vec![mock_pipeline(
@@ -1167,7 +1328,6 @@ mod tests {
         assert_eq!(group.stages[0].name, "Source");
         assert_eq!(group.stages[0].status, BuildStatus::Succeeded);
         assert_eq!(group.stages[1].name, "Build");
-        // Last action ("test") determines stage status
         assert_eq!(group.stages[1].status, BuildStatus::Running);
     }
 
@@ -2157,7 +2317,7 @@ mod tests {
     }
 
     #[test]
-    fn stage_status_and_timestamp_multi_action_uses_last() {
+    fn stage_status_and_timestamp_failed_after_success() {
         use chrono::TimeZone;
         let ts = chrono::Utc.with_ymd_and_hms(2026, 3, 18, 15, 0, 0).unwrap();
         let actions = vec![
@@ -2173,12 +2333,95 @@ mod tests {
             },
         ];
         let (status, timestamp) = stage_status_and_timestamp(&actions);
+        assert_eq!(status, BuildStatus::Failed);
+        assert_eq!(timestamp, Some(ts));
+    }
+
+    #[test]
+    fn stage_status_considers_earlier_running_or_failed_actions() {
+        for (statuses, expected) in [
+            (
+                [BuildStatus::Running, BuildStatus::Succeeded],
+                BuildStatus::Running,
+            ),
+            (
+                [BuildStatus::Failed, BuildStatus::Succeeded],
+                BuildStatus::Failed,
+            ),
+            (
+                [BuildStatus::Running, BuildStatus::Failed],
+                BuildStatus::Running,
+            ),
+            (
+                [BuildStatus::Failed, BuildStatus::Running],
+                BuildStatus::Running,
+            ),
+        ] {
+            let actions: Vec<_> = statuses
+                .into_iter()
+                .map(|status| ActionState {
+                    status,
+                    last_status_change: None,
+                })
+                .collect();
+            assert_eq!(stage_status_and_timestamp(&actions), (expected, None));
+        }
+    }
+
+    #[test]
+    fn stage_completion_timestamp_uses_latest_action_completion() {
+        let earlier = chrono::DateTime::from_timestamp(100, 0).unwrap();
+        let later = chrono::DateTime::from_timestamp(200, 0).unwrap();
+        for status in [BuildStatus::Succeeded, BuildStatus::Failed] {
+            let actions = vec![
+                ActionState {
+                    status,
+                    last_status_change: Some(later),
+                },
+                ActionState {
+                    status: BuildStatus::Succeeded,
+                    last_status_change: Some(earlier),
+                },
+            ];
+            assert_eq!(stage_status_and_timestamp(&actions), (status, Some(later)));
+        }
+    }
+
+    #[test]
+    fn stage_failed_action_is_not_hidden_by_later_success() {
+        let actions = vec![
+            ActionState {
+                status: BuildStatus::Failed,
+                last_status_change: None,
+            },
+            ActionState {
+                status: BuildStatus::Succeeded,
+                last_status_change: None,
+            },
+        ];
         assert_eq!(
-            status,
-            BuildStatus::Failed,
-            "should use last action's status"
+            stage_status_and_timestamp(&actions),
+            (BuildStatus::Failed, None)
         );
-        assert_eq!(timestamp, Some(ts), "should use last action's timestamp");
+    }
+
+    #[test]
+    fn stage_running_action_suppresses_finished_timestamp() {
+        let finished = chrono::DateTime::from_timestamp(100, 0).unwrap();
+        let actions = vec![
+            ActionState {
+                status: BuildStatus::Running,
+                last_status_change: None,
+            },
+            ActionState {
+                status: BuildStatus::Succeeded,
+                last_status_change: Some(finished),
+            },
+        ];
+        assert_eq!(
+            stage_status_and_timestamp(&actions),
+            (BuildStatus::Running, None)
+        );
     }
 
     #[tokio::test]

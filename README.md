@@ -15,8 +15,8 @@ single screen -- no browser required.
 - Live polling of AWS CodePipelines and GitHub Actions in a single TUI
 - Either source optional: monitor GitHub Actions only, CodePipeline only,
   or both (`sources` setting)
-- Hook-driven polling: Sleep (zero polls) until `git push` or `b` key
-  triggers Polling (3s) — 90s grace, 60s cooldown after builds finish
+- Initial poll at startup, then hook-driven polling: `git push` or `b` starts
+  Polling (3s) — 90s grace, 60s cooldown after builds finish
 - Auto-discovery of new pipelines and workflow runs (no restart needed)
 - Branch filtering for GitHub Actions (`--branch` flag)
 - Workflow categorization: CI vs Review (auto-detected via heuristics +
@@ -46,6 +46,7 @@ single screen -- no browser required.
 - SSO token health monitoring via independent 5-min STS
   `GetCallerIdentity` loop (decoupled from poll cycle)
 - Visual SSO expired indicator in header
+- After renewing your SSO session, press `b` to retry AWS immediately
 
 ### UI
 
@@ -201,12 +202,13 @@ pipelines indent under their GitHub Action with a `└` connector.
 ## Polling State Machine
 
 cibars polls only when it has a reason to. There are two top-level
-states: **Sleep** (zero API calls) and **Polling** (3s ticks, both
-GitHub and AWS together). Polling has three internal phases that
+states: **Sleep** (no build-status polls) and **Polling** (3s ticks over the
+enabled sources). The independent SSO health check continues during Sleep.
+Polling has three internal phases that
 drive the status-bar visual.
 
-**Startup:** the daemon launches in Sleep — no GitHub or AWS calls
-fire until you push or press `b`.
+**Startup:** the daemon immediately enters Polling{Grace} to load current status.
+Subsequent polling resumes when you push or press `b`.
 
 ```text
                    git push (SIGUSR1) or `b` key
@@ -226,8 +228,8 @@ fire until you push or press `b`.
 
 | Phase | Interval | API calls | Entry |
 | --- | --- | --- | --- |
-| Sleep | none | none | Startup, or 90s grace, or 60s cooldown expired |
-| Polling{Grace} | 3s | GH + AWS | SIGUSR1 (pre-push hook) or `b` key from Sleep |
+| Sleep | none | SSO health only | 90s grace or 60s cooldown expired |
+| Polling{Grace} | 3s | Enabled sources | Startup, SIGUSR1 (pre-push hook), or `b` |
 | Polling{Active} | 3s | GH + AWS | A running build is observed during Polling |
 | Polling{Cooldown} | 3s | GH + AWS | All builds finished (from Active), 60s timer |
 
@@ -266,6 +268,13 @@ immediately boosts polling -- no manual `b` press needed.
 4. On `git push`, the hook sends SIGUSR1 to the correct cibars
    instance via the PID file.
 5. The status bar shows `pushed!` flash for 1.5 seconds.
+
+Installation preserves existing hooks as `pre-push.cibars-original`. The wrapper
+preserves their interpreter, arguments and failure status, and replays the complete
+push ref input to each hook. Existing appended cibars snippets show an install hint
+so pressing `p` or `g` can migrate them safely.
+Hooks using `$0` for dispatch require manual signal integration; installation refuses
+to move them because changing their filename could bypass checks.
 
 **Status bar hook indicators:**
 

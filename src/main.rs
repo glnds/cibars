@@ -308,6 +308,13 @@ fn handle_poll_interrupt(
     scheduler.boost();
     let mut a = app.lock().expect("app mutex poisoned");
     a.poll_state = scheduler.state();
+    // An explicit retry after SSO login must bypass the cached auth failure.
+    // Unknown preserves honest health reporting until the next API result.
+    if source == InterruptSource::Boost
+        && matches!(a.aws_health, app::SourceHealth::AuthFailed { .. })
+    {
+        a.aws_health = app::SourceHealth::Unknown;
+    }
     if source == InterruptSource::Sigusr1 {
         a.push_signal_at = Some(Instant::now());
     }
@@ -742,6 +749,58 @@ mod tests {
         let mut scheduler = PollScheduler::new();
         handle_poll_interrupt(&app, &mut scheduler, InterruptSource::Boost);
         assert!(app.lock().unwrap().push_signal_at.is_none());
+    }
+
+    #[tokio::test]
+    async fn boost_retries_aws_after_auth_failure() {
+        struct RecoveredPipelineClient;
+
+        #[async_trait::async_trait]
+        impl poller::PipelineClient for RecoveredPipelineClient {
+            async fn list_pipeline_names(&self) -> Result<Vec<String>> {
+                Ok(Vec::new())
+            }
+
+            async fn get_pipeline_state(&self, _: &str) -> Result<poller::PipelineState> {
+                unreachable!("empty pipeline listing")
+            }
+
+            async fn get_pipeline_definition(&self, _: &str) -> Result<poller::PipelineDefinition> {
+                unreachable!("polling does not fetch definitions")
+            }
+        }
+
+        let app = Arc::new(Mutex::new(App::with_sources(false, true)));
+        app.lock().unwrap().aws_health = app::SourceHealth::AuthFailed {
+            since: chrono::Utc::now(),
+        };
+        let mut scheduler = PollScheduler::new();
+        handle_poll_interrupt(&app, &mut scheduler, InterruptSource::Boost);
+        poller::poll_sources_tick(
+            &app,
+            None,
+            Some((&RecoveredPipelineClient, "test-profile")),
+            PR_POLL_MIN_INTERVAL,
+        )
+        .await;
+
+        let a = app.lock().unwrap();
+        assert_eq!(a.aws_health, app::SourceHealth::Healthy);
+        assert!(!a.loading_pipelines);
+    }
+
+    #[test]
+    fn push_signal_preserves_auth_failure_backoff() {
+        let app = Arc::new(Mutex::new(App::new()));
+        app.lock().unwrap().aws_health = app::SourceHealth::AuthFailed {
+            since: chrono::Utc::now(),
+        };
+        let mut scheduler = PollScheduler::new();
+        handle_poll_interrupt(&app, &mut scheduler, InterruptSource::Sigusr1);
+        assert!(matches!(
+            app.lock().unwrap().aws_health,
+            app::SourceHealth::AuthFailed { .. }
+        ));
     }
 
     #[test]

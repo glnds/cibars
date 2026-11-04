@@ -222,12 +222,18 @@ impl App {
 
     pub fn has_any_running(&self) -> bool {
         self.pipeline_groups.iter().any(|g| {
-            g.summary_status == BuildStatus::Running
-                || g.stages.iter().any(|s| s.status == BuildStatus::Running)
-                || g.pending_link
+            !g.gone
+                && (g.summary_status == BuildStatus::Running
+                    || g.stages
+                        .iter()
+                        .any(|s| !s.gone && s.status == BuildStatus::Running)
+                    || g.pending_link)
         }) || self.workflow_groups.iter().any(|g| {
-            g.summary_status == BuildStatus::Running
-                || g.jobs.iter().any(|j| j.status == BuildStatus::Running)
+            !g.gone
+                && (g.summary_status == BuildStatus::Running
+                    || g.jobs
+                        .iter()
+                        .any(|j| !j.gone && j.status == BuildStatus::Running))
         })
     }
 }
@@ -440,6 +446,72 @@ mod tests {
             pending_link: true,
         });
         assert!(app.has_any_running());
+    }
+
+    #[test]
+    fn has_any_running_ignores_gone_pipeline() {
+        let mut app = App::new();
+        let mut stage = Bar::new("Build".into());
+        stage.set_status(BuildStatus::Running);
+        app.pipeline_groups.push(PipelineGroup {
+            name: "removed".into(),
+            stages: vec![stage],
+            gone: true,
+            summary_status: BuildStatus::Running,
+            pending_link: true,
+        });
+        assert!(!app.has_any_running());
+    }
+
+    #[test]
+    fn has_any_running_ignores_gone_workflow() {
+        let mut app = App::new();
+        let mut job = Bar::new("build".into());
+        job.set_status(BuildStatus::Running);
+        app.workflow_groups.push(WorkflowGroup {
+            name: "removed".into(),
+            jobs: vec![job],
+            gone: true,
+            summary_status: BuildStatus::Running,
+            run_id: Some(1),
+            category: WorkflowCategory::CI,
+            linked_pipeline: None,
+        });
+        assert!(!app.has_any_running());
+    }
+
+    #[test]
+    fn has_any_running_ignores_gone_stage() {
+        let mut app = App::new();
+        let mut stage = Bar::new("removed".into());
+        stage.set_status(BuildStatus::Running);
+        stage.gone = true;
+        app.pipeline_groups.push(PipelineGroup {
+            name: "deploy".into(),
+            stages: vec![stage],
+            gone: false,
+            summary_status: BuildStatus::Succeeded,
+            pending_link: false,
+        });
+        assert!(!app.has_any_running());
+    }
+
+    #[test]
+    fn has_any_running_ignores_gone_job() {
+        let mut app = App::new();
+        let mut job = Bar::new("removed".into());
+        job.set_status(BuildStatus::Running);
+        job.gone = true;
+        app.workflow_groups.push(WorkflowGroup {
+            name: "CI".into(),
+            jobs: vec![job],
+            gone: false,
+            summary_status: BuildStatus::Succeeded,
+            run_id: Some(2),
+            category: WorkflowCategory::CI,
+            linked_pipeline: None,
+        });
+        assert!(!app.has_any_running());
     }
 
     #[test]
