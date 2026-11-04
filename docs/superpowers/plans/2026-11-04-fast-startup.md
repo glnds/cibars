@@ -95,6 +95,7 @@ Inventory events carry only complete authoritative inventory; run events are add
 ## Task 3: Decouple startup and reconcile linkage safely
 
 **Files:** Modify `src/main.rs`, `src/linkage.rs`, `src/poller/github.rs`, `README.md`; tests local.
+Extend `src/topology.rs` only if a source-scope check is needed for legacy link validation.
 Use Task 1 topology APIs and Task 2 streaming poller.
 
 **Interfaces:** Change `discover_links` to
@@ -107,6 +108,10 @@ its concrete naming is local to `main.rs` and consumed nowhere else.
   precedes client initialization; stalled linkage cannot block initial status; interruption drops
   pending work; successful empty discovery clears memory/cache and survives restart; failed/partial
   discovery preserves prior mapping and clears the discovering flag. Cover both source-only modes.
+- [ ] Add optional source scope to link caches. Legacy files remain parseable, but unscoped links
+  require validation before applying them to a different or unknown configured source. Matching
+  topology scope can establish the legacy cache context. Persist scope after successful discovery;
+  source-mismatched links and assignments must not populate the UI.
 - [ ] Observe failures. Start GitHub polling independently while AWS initializes. Do not gate the
   first live poll on linkage discovery. Keep initialization/discovery futures owned by orchestrator,
   cancellable on shutdown, without detached tasks able to overwrite newer app state. Bound AWS
