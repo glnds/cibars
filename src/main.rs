@@ -45,6 +45,93 @@ async fn init_aws_pipeline_client(aws: &config::AwsSource) -> poller::aws::AwsPi
     poller::aws::AwsPipelineClient::new(aws_sdk_codepipeline::Client::new(&aws_config))
 }
 
+/// Both branches own their work; dropping startup cancels pending requests.
+async fn startup_sources<A, G, T>(aws: A, github: G) -> T
+where
+    A: std::future::Future<Output = T>,
+    G: std::future::Future<Output = ()>,
+{
+    tokio::join!(aws, github).0
+}
+
+async fn retry_missing_source<A, G, T>(
+    client: &mut Option<T>,
+    requested: bool,
+    initialize: A,
+    github: G,
+) -> bool
+where
+    A: std::future::Future<Output = Option<T>>,
+    G: std::future::Future<Output = ()>,
+{
+    if !requested || client.is_some() {
+        return false;
+    }
+    *client = startup_sources(initialize, github).await;
+    true
+}
+
+const SETUP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+
+async fn initialize_aws_source(
+    app: &Arc<Mutex<App>>,
+    source: Option<&config::AwsSource>,
+) -> Option<poller::aws::AwsPipelineClient> {
+    let aws = source?;
+    match tokio::time::timeout(SETUP_TIMEOUT, init_aws_pipeline_client(aws)).await {
+        Ok(client) => {
+            if let Err(error) = tokio::time::timeout(
+                SETUP_TIMEOUT,
+                poller::poll_sources_tick(
+                    app,
+                    None,
+                    Some((&client, aws.profile.as_str())),
+                    PR_POLL_MIN_INTERVAL,
+                ),
+            )
+            .await
+            {
+                let mut a = app.lock().expect("app mutex poisoned");
+                a.loading_pipelines = false;
+                a.push_warning(format!("AWS: initial poll: {error}"));
+            }
+            app.lock()
+                .expect("app mutex poisoned")
+                .clear_warnings_by_prefix("AWS initialization:");
+            Some(client)
+        }
+        Err(error) => {
+            let mut a = app.lock().expect("app mutex poisoned");
+            a.loading_pipelines = false;
+            a.push_warning(format!("AWS initialization: {error}"));
+            None
+        }
+    }
+}
+
+fn persist_topology(app: &Arc<Mutex<App>>, config: &Config, cwd: &std::path::Path) {
+    let cache = topology::TopologyCache::capture(&app.lock().expect("app mutex poisoned"), config);
+    if let Err(error) = topology::save_topology(&cwd.join(".cibars-topology.toml"), &cache) {
+        tracing::warn!(%error, "cannot save topology cache");
+        app.lock()
+            .expect("app mutex poisoned")
+            .push_warning(format!("topology cache: {error}"));
+    }
+}
+
+fn load_scoped_links(config: &Config, cwd: &std::path::Path) -> Result<Option<linkage::LinkCache>> {
+    let Some(cache) = linkage::load_link_cache(&cwd.join(".cibars-links.toml"))? else {
+        return Ok(None);
+    };
+    let valid = match &cache.scope {
+        Some(scope) => Some(scope) == linkage::LinkScope::from_config(config).as_ref(),
+        // Assumption: matching topology establishes the source of an older unscoped cache.
+        None => topology::load_topology(&cwd.join(".cibars-topology.toml"))?
+            .is_some_and(|topology| topology.matches_link_scope(config)),
+    };
+    Ok(valid.then_some(cache))
+}
+
 async fn run_poll_orchestrator(
     app: Arc<Mutex<App>>,
     config: Config,
@@ -72,7 +159,6 @@ async fn run_poll_orchestrator(
     };
     let linkage_enabled = gh_client.is_some() && config.aws.is_some();
 
-    let mut aws_client: Option<poller::aws::AwsPipelineClient> = None;
     let mut scheduler = PollScheduler::new();
     let mut link_map = LinkMap::new();
     let cache_path = cwd.join(".cibars-links.toml");
@@ -80,42 +166,66 @@ async fn run_poll_orchestrator(
 
     bootstrap_initial_poll(&app, &mut scheduler);
 
-    loop {
-        if scheduler.is_polling() {
-            // Lazy-init AWS + link cache on first Polling tick.
-            if let (Some(aws_cfg), None) = (&config.aws, &aws_client) {
-                tracing::info!("initializing AWS client (first Polling tick)");
-                let client = init_aws_pipeline_client(aws_cfg).await;
-                if let Some(gh_client) = gh_client.as_ref() {
-                    match linkage::load_link_cache(&cache_path) {
-                        Ok(Some(cache)) => {
-                            let cached_assignment = cache.job_assignment.clone();
-                            link_map.load_from_cache(cache);
-                            linkage::sync_linked_pipelines(&app, &link_map);
-                            if let Some(assignment) = cached_assignment {
-                                app.lock().expect("app mutex poisoned").job_assignment =
-                                    Some(assignment);
-                            }
-                            tracing::info!(
-                                links = link_map.links().len(),
-                                "loaded link cache from disk"
-                            );
-                        }
-                        Ok(None) => {
-                            link_map =
-                                linkage::run_discovery(&client, gh_client, &app, &cache_path).await;
-                        }
-                        Err(e) => {
-                            tracing::warn!(error = %e, "corrupt link cache, re-discovering");
-                            let _ = std::fs::remove_file(&cache_path);
-                            link_map =
-                                linkage::run_discovery(&client, gh_client, &app, &cache_path).await;
-                        }
-                    }
-                }
-                aws_client = Some(client);
+    if let Ok(Some(cache)) = load_scoped_links(&config, &cwd) {
+        link_map.load_from_cache(cache);
+        linkage::sync_linked_pipelines(&app, &link_map);
+    }
+    let mut aws_client = loop {
+        let aws_setup = async {
+            let client = initialize_aws_source(&app, config.aws.as_ref()).await;
+            persist_topology(&app, &config, &cwd);
+            client
+        };
+        let github_setup = async {
+            if let Some(gh) = gh_client.as_ref() {
+                poller::poll_sources_tick(&app, Some(gh), None, PR_POLL_MIN_INTERVAL).await;
+                persist_topology(&app, &config, &cwd);
             }
+        };
+        let outcome = tokio::select! {
+            biased;
+            _ = boost_notify.notified() => Err(InterruptSource::Boost),
+            _ = sigusr1.recv() => Err(InterruptSource::Sigusr1),
+            client = startup_sources(aws_setup, github_setup) => Ok(client),
+        };
+        persist_topology(&app, &config, &cwd);
+        match outcome {
+            Ok(client) => break client,
+            Err(source) => handle_poll_interrupt(&app, &mut scheduler, source),
+        }
+    };
+    // Assumption: setup is not observation time; start the initial Grace budget afterward.
+    bootstrap_initial_poll(&app, &mut scheduler);
+    let mut discover_requested = linkage_enabled && aws_client.is_some();
+    let mut retry_aws_initialization = false;
 
+    loop {
+        if retry_aws_initialization {
+            let github = async {
+                if let Some(gh) = gh_client.as_ref() {
+                    poller::poll_sources_tick(&app, Some(gh), None, PR_POLL_MIN_INTERVAL).await;
+                }
+            };
+            let outcome = tokio::select! {
+                biased;
+                _ = boost_notify.notified() => Err(InterruptSource::Boost),
+                _ = sigusr1.recv() => Err(InterruptSource::Sigusr1),
+                _ = retry_missing_source(&mut aws_client, true, initialize_aws_source(&app, config.aws.as_ref()), github) => Ok(()),
+            };
+            persist_topology(&app, &config, &cwd);
+            match outcome {
+                Ok(()) => {
+                    retry_aws_initialization = false;
+                    discover_requested = linkage_enabled && aws_client.is_some();
+                    bootstrap_initial_poll(&app, &mut scheduler);
+                }
+                Err(source) => {
+                    handle_poll_interrupt(&app, &mut scheduler, source);
+                    continue;
+                }
+            }
+        }
+        if scheduler.is_polling() {
             let aws = aws_client
                 .as_ref()
                 .zip(config.aws.as_ref())
@@ -127,18 +237,34 @@ async fn run_poll_orchestrator(
                 biased;
                 _ = boost_notify.notified() => CycleOutcome::Interrupted(InterruptSource::Boost),
                 _ = sigusr1.recv() => CycleOutcome::Interrupted(InterruptSource::Sigusr1),
-                merge_detected = poller::poll_sources_tick(&app, gh, aws, PR_POLL_MIN_INTERVAL)
-                    => CycleOutcome::Completed { merge_detected },
+                merge_detected = async {
+                    let poll = poller::poll_sources_tick(&app, gh, aws, PR_POLL_MIN_INTERVAL);
+                    let discovery = async {
+                        if discover_requested {
+                            if let (Some(gh), Some(aws)) = (gh_client.as_ref(), aws_client.as_ref()) {
+                                handle_link_notify(&app, &mut link_map, gh, Some(aws), &cache_path, &config).await;
+                            }
+                        }
+                    };
+                    tokio::join!(poll, discovery).0
+                } => CycleOutcome::Completed { merge_detected },
             };
+
+            // Streaming updates survive an interrupted cycle and are useful on the next launch.
+            persist_topology(&app, &config, &cwd);
 
             let merge_detected = match outcome {
                 CycleOutcome::Interrupted(source) => {
                     handle_poll_interrupt(&app, &mut scheduler, source);
+                    retry_aws_initialization = source == InterruptSource::Boost
+                        && aws_client.is_none()
+                        && config.aws.is_some();
                     tracing::info!(state = ?scheduler.state(), ?source, "interrupt during poll");
                     continue;
                 }
                 CycleOutcome::Completed { merge_detected } => merge_detected,
             };
+            discover_requested = false;
 
             // Process poll results
             {
@@ -148,19 +274,6 @@ async fn run_poll_orchestrator(
             if linkage_enabled {
                 linkage::apply_links(&app, &mut link_map, &mut stopped_runs);
                 linkage::sync_linked_pipelines(&app, &link_map);
-            }
-
-            let topology = {
-                let a = app.lock().expect("app mutex poisoned");
-                topology::TopologyCache::capture(&a, &config)
-            };
-            if let Err(error) =
-                topology::save_topology(&cwd.join(".cibars-topology.toml"), &topology)
-            {
-                tracing::warn!(%error, "cannot save topology cache");
-                app.lock()
-                    .expect("app mutex poisoned")
-                    .push_warning(format!("topology cache: {error}"));
             }
 
             let any_running = {
@@ -191,14 +304,14 @@ async fn run_poll_orchestrator(
                 biased;
                 _ = boost_notify.notified() => {
                     handle_poll_interrupt(&app, &mut scheduler, InterruptSource::Boost);
+                    retry_aws_initialization = aws_client.is_none() && config.aws.is_some();
                 }
                 _ = sigusr1.recv() => {
                     handle_poll_interrupt(&app, &mut scheduler, InterruptSource::Sigusr1);
                 }
                 _ = link_notify.notified() => {
-                    if let Some(gh) = gh_client.as_ref() {
-                        handle_link_notify(&app, &mut link_map, gh, aws_client.as_ref(), &cache_path).await;
-                    }
+                    discover_requested = linkage_enabled && aws_client.is_some();
+                    bootstrap_initial_poll(&app, &mut scheduler);
                 }
                 _ = tokio::time::sleep(remaining) => {}
             }
@@ -208,14 +321,14 @@ async fn run_poll_orchestrator(
                 biased;
                 _ = boost_notify.notified() => {
                     handle_poll_interrupt(&app, &mut scheduler, InterruptSource::Boost);
+                    retry_aws_initialization = aws_client.is_none() && config.aws.is_some();
                 }
                 _ = sigusr1.recv() => {
                     handle_poll_interrupt(&app, &mut scheduler, InterruptSource::Sigusr1);
                 }
                 _ = link_notify.notified() => {
-                    if let Some(gh) = gh_client.as_ref() {
-                        handle_link_notify(&app, &mut link_map, gh, aws_client.as_ref(), &cache_path).await;
-                    }
+                    discover_requested = linkage_enabled && aws_client.is_some();
+                    bootstrap_initial_poll(&app, &mut scheduler);
                 }
             }
         }
@@ -225,14 +338,49 @@ async fn run_poll_orchestrator(
 async fn handle_link_notify(
     app: &Arc<Mutex<App>>,
     link_map: &mut LinkMap,
-    gh_client: &poller::github::GitHubActionsClient,
-    aws_client: Option<&poller::aws::AwsPipelineClient>,
+    gh_client: &dyn poller::ActionsClient,
+    aws_client: Option<&dyn poller::PipelineClient>,
     cache_path: &std::path::Path,
+    config: &Config,
 ) {
     tracing::info!("link re-discovery triggered by 'l' key");
-    link_map.clear();
     if let Some(aws) = aws_client {
-        *link_map = linkage::run_discovery(aws, gh_client, app, cache_path).await;
+        match tokio::time::timeout(
+            SETUP_TIMEOUT,
+            linkage::run_discovery(aws, gh_client, app, cache_path),
+        )
+        .await
+        {
+            Ok(Ok(fresh)) => {
+                *link_map = fresh;
+                app.lock()
+                    .expect("app mutex poisoned")
+                    .clear_warnings_by_prefix("link discovery:");
+                let assignment = app
+                    .lock()
+                    .expect("app mutex poisoned")
+                    .job_assignment
+                    .clone();
+                let mut cache = link_map.to_cache(&chrono::Utc::now().to_rfc3339(), assignment);
+                cache.scope = linkage::LinkScope::from_config(config);
+                if let Err(error) = linkage::save_link_cache(cache_path, &cache) {
+                    app.lock()
+                        .expect("app mutex poisoned")
+                        .push_warning(format!("link cache: {error}"));
+                }
+            }
+            result => {
+                let error = match result {
+                    Ok(Err(error)) => error.to_string(),
+                    Err(error) => error.to_string(),
+                    _ => unreachable!(),
+                };
+                tracing::warn!(%error, "link discovery failed; retaining previous links");
+                app.lock()
+                    .expect("app mutex poisoned")
+                    .push_warning(format!("link discovery: {error}"));
+            }
+        }
     }
     let mut a = app.lock().expect("app mutex poisoned");
     a.linkage_broken = false;
@@ -361,7 +509,7 @@ fn restore_startup_caches(app: &mut App, config: &Config, cwd: &std::path::Path)
         }
     }
     if app.linkage_enabled() {
-        match linkage::load_link_cache(&cwd.join(".cibars-links.toml")) {
+        match load_scoped_links(config, cwd) {
             Ok(Some(cache)) => app.job_assignment = cache.job_assignment,
             Ok(None) => {}
             Err(error) => {
@@ -424,7 +572,7 @@ fn main() -> Result<()> {
     let poll_boost = boost_notify.clone();
     let poll_link = link_notify.clone();
     let poll_cwd = cwd.clone();
-    rt.spawn(async move {
+    let poll_task = rt.spawn(async move {
         if let Err(e) = run_poll_orchestrator(
             poll_app,
             poll_config,
@@ -453,6 +601,11 @@ fn main() -> Result<()> {
     );
     ratatui::restore();
 
+    // Stop owned requests before capturing their last useful partial structure.
+    poll_task.abort();
+    let _ = rt.block_on(poll_task);
+    persist_topology(&app, &config, &cwd);
+
     cleanup_pid_file(&pid_path);
     tracing::info!("shutting down");
     result
@@ -472,8 +625,347 @@ mod tests {
     use crate::poll_scheduler::{PollState, PollingPhase};
     use std::sync::{Arc, Mutex};
 
+    struct StartupActions;
+    #[async_trait::async_trait]
+    impl poller::ActionsClient for StartupActions {
+        async fn list_latest_runs(&self) -> Result<poller::RunsPage> {
+            Ok(poller::RunsPage {
+                summaries: vec![poller::WorkflowRunSummary {
+                    workflow_name: "CI".into(),
+                    run_id: 7,
+                    status: model::BuildStatus::Succeeded,
+                }],
+                ..Default::default()
+            })
+        }
+        async fn fetch_run_jobs(&self, _: u64) -> Result<Vec<poller::JobInfo>> {
+            Ok(vec![poller::JobInfo {
+                name: "Tests".into(),
+                status: model::BuildStatus::Succeeded,
+                completed_at: None,
+            }])
+        }
+        async fn fetch_workflow_files(&self) -> Result<Vec<poller::WorkflowFile>> {
+            Ok(vec![])
+        }
+        async fn fetch_pr_state(&self, _: u64) -> Result<model::WatchedPrState> {
+            Ok(model::WatchedPrState::Unknown)
+        }
+    }
+
+    #[tokio::test]
+    async fn boost_retries_missing_aws_after_timeout_without_losing_github_rows() {
+        use futures::FutureExt;
+        let app = Arc::new(Mutex::new(App::new()));
+        let mut client: Option<StartupPipelines> = None;
+        // Automatic ticks leave a timed-out source alone until an explicit boost.
+        assert!(
+            !retry_missing_source(
+                &mut client,
+                false,
+                async { panic!("automatic retry") },
+                async {}
+            )
+            .await
+        );
+        let ready = tokio::sync::Notify::new();
+        let mut retry = Box::pin(retry_missing_source(
+            &mut client,
+            true,
+            async {
+                ready.notified().await;
+                Some(StartupPipelines)
+            },
+            async {
+                poller::poll_sources_tick(&app, Some(&StartupActions), None, PR_POLL_MIN_INTERVAL)
+                    .await;
+            },
+        ));
+        assert!(retry.as_mut().now_or_never().is_none());
+        assert_eq!(app.lock().unwrap().workflow_groups[0].jobs[0].name, "Tests");
+        ready.notify_one();
+        assert!(retry.await);
+        assert!(client.is_some());
+        assert_eq!(app.lock().unwrap().workflow_groups[0].run_id, Some(7));
+    }
+
+    struct StartupPipelines;
+    #[async_trait::async_trait]
+    impl poller::PipelineClient for StartupPipelines {
+        async fn list_pipeline_names(&self) -> Result<Vec<String>> {
+            Ok(vec!["Deploy".into()])
+        }
+        async fn get_pipeline_state(&self, _: &str) -> Result<poller::PipelineState> {
+            Ok(poller::PipelineState {
+                name: "Deploy".into(),
+                status: model::BuildStatus::Running,
+                stages: vec![],
+            })
+        }
+        async fn get_pipeline_definition(&self, _: &str) -> Result<poller::PipelineDefinition> {
+            std::future::pending().await
+        }
+    }
+
+    struct RelinkPipelines(bool);
+    #[async_trait::async_trait]
+    impl poller::PipelineClient for RelinkPipelines {
+        async fn list_pipeline_names(&self) -> Result<Vec<String>> {
+            if self.0 {
+                anyhow::bail!("unavailable");
+            }
+            Ok(vec![])
+        }
+        async fn get_pipeline_state(&self, _: &str) -> Result<poller::PipelineState> {
+            unreachable!()
+        }
+        async fn get_pipeline_definition(&self, _: &str) -> Result<poller::PipelineDefinition> {
+            unreachable!()
+        }
+    }
+
+    #[tokio::test]
+    async fn relink_failure_retains_previous_and_success_clears_warning_and_disk_links() {
+        let config = Config {
+            github: Some(config::GithubSource {
+                repo: "o/r".into(),
+                branch: None,
+            }),
+            aws: Some(config::AwsSource {
+                profile: "p".into(),
+                region: "r".into(),
+            }),
+            review_workflows: vec![],
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".cibars-links.toml");
+        let app = Arc::new(Mutex::new(App::new()));
+        let mut links = LinkMap::new();
+        links.add_discovered("Old".into(), "CI".into(), "b".into(), "k".into());
+        linkage::save_link_cache(&path, &links.to_cache("old", None)).unwrap();
+        let before = std::fs::read_to_string(&path).unwrap();
+        handle_link_notify(
+            &app,
+            &mut links,
+            &StartupActions,
+            Some(&RelinkPipelines(true)),
+            &path,
+            &config,
+        )
+        .await;
+        assert_eq!(links.links().len(), 1);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
+        assert!(app
+            .lock()
+            .unwrap()
+            .warnings
+            .iter()
+            .any(|w| w.starts_with("link discovery:")));
+        handle_link_notify(
+            &app,
+            &mut links,
+            &StartupActions,
+            Some(&RelinkPipelines(false)),
+            &path,
+            &config,
+        )
+        .await;
+        assert!(links.links().is_empty());
+        assert!(app
+            .lock()
+            .unwrap()
+            .warnings
+            .iter()
+            .all(|w| !w.starts_with("link discovery:")));
+        let saved = linkage::load_link_cache(&path).unwrap().unwrap();
+        assert!(saved.links.is_empty());
+        assert_eq!(saved.scope, linkage::LinkScope::from_config(&config));
+        let mut restored = App::new();
+        restore_startup_caches(&mut restored, &config, dir.path());
+        assert!(restored.job_assignment.is_none());
+    }
+
+    #[tokio::test]
+    async fn startup_real_github_poll_publishes_jobs_while_aws_initialization_pending() {
+        use futures::FutureExt;
+        let app = Arc::new(Mutex::new(App::new()));
+        let mut startup = Box::pin(startup_sources(std::future::pending::<()>(), async {
+            poller::poll_sources_tick(&app, Some(&StartupActions), None, PR_POLL_MIN_INTERVAL)
+                .await;
+        }));
+        assert!(startup.as_mut().now_or_never().is_none());
+        {
+            let a = app.lock().unwrap();
+            assert_eq!(a.workflow_groups[0].run_id, Some(7));
+            assert_eq!(a.workflow_groups[0].jobs[0].name, "Tests");
+            assert!(!a.loading_actions);
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let config = Config {
+            github: Some(config::GithubSource {
+                repo: "o/r".into(),
+                branch: None,
+            }),
+            aws: Some(config::AwsSource {
+                profile: "p".into(),
+                region: "r".into(),
+            }),
+            review_workflows: vec![],
+        };
+        // An interrupt preserves the published partial topology, without execution state.
+        drop(startup);
+        persist_topology(&app, &config, dir.path());
+        let mut warm = App::new();
+        restore_startup_caches(&mut warm, &config, dir.path());
+        startup_sources(
+            async {
+                // Client initialization observes hydration before it starts any external work.
+                assert_eq!(warm.workflow_groups[0].jobs[0].name, "Tests");
+                assert_eq!(
+                    warm.workflow_groups[0].jobs[0].status,
+                    model::BuildStatus::Idle
+                );
+                assert_eq!(warm.workflow_groups[0].run_id, None);
+            },
+            async {},
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn startup_real_aws_poll_publishes_while_github_pending() {
+        use futures::FutureExt;
+        let app = Arc::new(Mutex::new(App::new()));
+        let mut startup = Box::pin(startup_sources(
+            async {
+                poller::poll_sources_tick(
+                    &app,
+                    None,
+                    Some((&StartupPipelines, "p")),
+                    PR_POLL_MIN_INTERVAL,
+                )
+                .await;
+            },
+            std::future::pending::<()>(),
+        ));
+        assert!(startup.as_mut().now_or_never().is_none());
+        let a = app.lock().unwrap();
+        assert_eq!(a.pipeline_groups[0].name, "Deploy");
+        assert!(!a.loading_pipelines);
+    }
+
+    #[tokio::test]
+    async fn startup_single_source_modes_complete_without_other_client() {
+        for github in [true, false] {
+            let app = Arc::new(Mutex::new(App::with_sources(github, !github)));
+            startup_sources(
+                async {
+                    if !github {
+                        poller::poll_sources_tick(
+                            &app,
+                            None,
+                            Some((&StartupPipelines, "p")),
+                            PR_POLL_MIN_INTERVAL,
+                        )
+                        .await;
+                    }
+                },
+                async {
+                    if github {
+                        poller::poll_sources_tick(
+                            &app,
+                            Some(&StartupActions),
+                            None,
+                            PR_POLL_MIN_INTERVAL,
+                        )
+                        .await;
+                    }
+                },
+            )
+            .await;
+            let a = app.lock().unwrap();
+            assert_eq!(a.workflow_groups.len(), usize::from(github));
+            assert_eq!(a.pipeline_groups.len(), usize::from(!github));
+        }
+    }
+
+    #[tokio::test]
+    async fn pending_linkage_cannot_block_live_jobs_and_cancellation_clears_flag() {
+        use futures::FutureExt;
+        let app = Arc::new(Mutex::new(App::new()));
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("links.toml");
+        let mut work = Box::pin(async {
+            tokio::join!(
+                poller::poll_sources_tick(
+                    &app,
+                    Some(&StartupActions),
+                    Some((&StartupPipelines, "p")),
+                    PR_POLL_MIN_INTERVAL
+                ),
+                linkage::run_discovery(&StartupPipelines, &StartupActions, &app, &path),
+            )
+        });
+        assert!(work.as_mut().now_or_never().is_none());
+        assert_eq!(app.lock().unwrap().workflow_groups[0].jobs[0].name, "Tests");
+        assert!(app.lock().unwrap().linkage_discovering);
+        drop(work);
+        assert!(!app.lock().unwrap().linkage_discovering);
+    }
+
+    #[tokio::test]
+    async fn startup_sources_publish_independently_and_drop_pending_work() {
+        use futures::FutureExt;
+        let aws_ready = tokio::sync::Notify::new();
+        let gh_ready = tokio::sync::Notify::new();
+        let aws_published = AtomicBool::new(false);
+        let gh_published = AtomicBool::new(false);
+        let aws_dropped = AtomicBool::new(false);
+        struct Dropped<'a>(&'a AtomicBool);
+        impl Drop for Dropped<'_> {
+            fn drop(&mut self) {
+                self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+        let work = startup_sources(
+            async {
+                let _drop = Dropped(&aws_dropped);
+                aws_ready.notified().await;
+                aws_published.store(true, std::sync::atomic::Ordering::SeqCst);
+                42
+            },
+            async {
+                gh_published.store(true, std::sync::atomic::Ordering::SeqCst);
+                gh_ready.notified().await;
+            },
+        );
+        tokio::pin!(work);
+        assert!(work.as_mut().now_or_never().is_none());
+        assert!(gh_published.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(!aws_published.load(std::sync::atomic::Ordering::SeqCst));
+        aws_ready.notify_one();
+        assert!(work.as_mut().now_or_never().is_none());
+        assert!(aws_published.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(aws_dropped.load(std::sync::atomic::Ordering::SeqCst));
+        gh_ready.notify_one();
+        assert_eq!(work.await, 42);
+
+        let work = startup_sources(
+            async {
+                let _drop = Dropped(&aws_dropped);
+                std::future::pending::<()>().await
+            },
+            async {},
+        );
+        aws_dropped.store(false, std::sync::atomic::Ordering::SeqCst);
+        let mut work = Box::pin(work);
+        assert!(work.as_mut().now_or_never().is_none());
+        drop(work);
+        assert!(aws_dropped.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
     #[test]
-    fn startup_restores_legacy_assignments_without_live_clients() {
+    fn startup_unscoped_legacy_assignment_requires_matching_topology() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(
             dir.path().join(".cibars-links.toml"),
@@ -500,7 +992,63 @@ shared_jobs = [["CI", ["Tests"]]]
         };
         let mut app = App::new();
         restore_startup_caches(&mut app, &config, dir.path());
+        assert!(app.job_assignment.is_none());
+
+        topology::save_topology(
+            &dir.path().join(".cibars-topology.toml"),
+            &topology::TopologyCache::capture(&app, &config),
+        )
+        .unwrap();
+        restore_startup_caches(&mut app, &config, dir.path());
         assert_eq!(app.job_assignment.unwrap().shared_jobs[0].1, ["Tests"]);
+
+        let mut changed = config.clone();
+        changed.github.as_mut().unwrap().repo = "other/repo".into();
+        let mut changed_app = App::new();
+        restore_startup_caches(&mut changed_app, &changed, dir.path());
+        assert!(changed_app.job_assignment.is_none());
+    }
+
+    #[test]
+    fn startup_scoped_cache_requires_both_sources_to_match() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = Config {
+            github: Some(config::GithubSource {
+                repo: "o/r".into(),
+                branch: Some("main".into()),
+            }),
+            aws: Some(config::AwsSource {
+                profile: "p".into(),
+                region: "r".into(),
+            }),
+            review_workflows: vec![],
+        };
+        let assignment = linkage::JobAssignment {
+            pipeline_jobs: Default::default(),
+            shared_jobs: vec![("CI".into(), vec!["Tests".into()])],
+        };
+        let mut links = LinkMap::new().to_cache("now", Some(assignment));
+        links.scope = linkage::LinkScope::from_config(&config);
+        linkage::save_link_cache(&dir.path().join(".cibars-links.toml"), &links).unwrap();
+        for variant in 0..7 {
+            let mut current = config.clone();
+            match variant {
+                1 => current.github.as_mut().unwrap().repo = "other/repo".into(),
+                2 => current.github.as_mut().unwrap().branch = None,
+                3 => current.aws.as_mut().unwrap().profile = "other".into(),
+                4 => current.aws.as_mut().unwrap().region = "other".into(),
+                5 => current.github = None,
+                6 => current.aws = None,
+                _ => {}
+            }
+            let mut app = App::with_sources(current.github.is_some(), current.aws.is_some());
+            restore_startup_caches(&mut app, &current, dir.path());
+            assert_eq!(
+                app.job_assignment.is_some(),
+                variant == 0,
+                "variant {variant}"
+            );
+        }
     }
 
     #[test]

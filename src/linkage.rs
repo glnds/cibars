@@ -38,6 +38,29 @@ pub struct LinkCache {
     pub links: Vec<CachedLink>,
     #[serde(default)]
     pub job_assignment: Option<JobAssignment>,
+    #[serde(default)]
+    pub scope: Option<LinkScope>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct LinkScope {
+    pub repo: String,
+    pub branch: Option<String>,
+    pub profile: String,
+    pub region: String,
+}
+
+impl LinkScope {
+    pub fn from_config(config: &crate::config::Config) -> Option<Self> {
+        let gh = config.github.as_ref()?;
+        let aws = config.aws.as_ref()?;
+        Some(Self {
+            repo: gh.repo.clone(),
+            branch: gh.branch.clone(),
+            profile: aws.profile.clone(),
+            region: aws.region.clone(),
+        })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -215,6 +238,7 @@ impl LinkMap {
     ) -> LinkCache {
         LinkCache {
             schema_version: 2,
+            scope: None,
             discovered_at: discovered_at.to_string(),
             links: self
                 .links
@@ -237,6 +261,7 @@ impl LinkMap {
     }
 
     /// Remove all links and recent completions (before re-discovery).
+    #[cfg(test)]
     pub fn clear(&mut self) {
         self.links.clear();
         self.recent_completions.clear();
@@ -302,16 +327,13 @@ pub fn s3_keys_match(cp_key: &str, gh_key: &str) -> bool {
 pub async fn discover_links(
     aws: &dyn PipelineClient,
     gh: &dyn ActionsClient,
-) -> (LinkMap, Vec<crate::poller::WorkflowFile>) {
+) -> anyhow::Result<(LinkMap, Vec<crate::poller::WorkflowFile>)> {
     let mut link_map = LinkMap::new();
 
-    let pipeline_names = match aws.list_pipeline_names().await {
-        Ok(names) => names,
-        Err(e) => {
-            tracing::warn!(error = %e, "failed to list pipelines for link discovery");
-            return (link_map, Vec::new());
-        }
-    };
+    let pipeline_names = aws
+        .list_pipeline_names()
+        .await
+        .context("failed to list pipelines for link discovery")?;
 
     // Fetch pipeline definitions in parallel
     let def_futs: Vec<_> = pipeline_names
@@ -321,22 +343,13 @@ pub async fn discover_links(
     let definitions: Vec<_> = futures::future::join_all(def_futs)
         .await
         .into_iter()
-        .filter_map(|r| match r {
-            Ok(d) => Some(d),
-            Err(e) => {
-                tracing::warn!(error = %e, "failed to get pipeline definition");
-                None
-            }
-        })
-        .collect();
+        .collect::<anyhow::Result<_>>()
+        .context("failed to get pipeline definition")?;
 
-    let workflow_files = match gh.fetch_workflow_files().await {
-        Ok(wf) => wf,
-        Err(e) => {
-            tracing::warn!(error = %e, "failed to fetch workflow files for link discovery");
-            return (link_map, Vec::new());
-        }
-    };
+    let workflow_files = gh
+        .fetch_workflow_files()
+        .await
+        .context("failed to fetch workflow files for link discovery")?;
 
     // Log discovery inputs for diagnostics
     let s3_pipeline_count = definitions.iter().filter(|d| d.source_s3.is_some()).count();
@@ -390,7 +403,7 @@ pub async fn discover_links(
     }
 
     tracing::info!(links = link_map.links().len(), "link discovery complete");
-    (link_map, workflow_files)
+    Ok((link_map, workflow_files))
 }
 
 /// Update each WorkflowGroup's linked_pipeline from the LinkMap.
@@ -411,11 +424,22 @@ pub async fn run_discovery(
     gh: &dyn ActionsClient,
     app: &Arc<Mutex<App>>,
     cache_path: &std::path::Path,
-) -> LinkMap {
+) -> anyhow::Result<LinkMap> {
     app.lock().expect("app mutex poisoned").linkage_discovering = true;
-    let (link_map, workflow_files) = discover_links(aws, gh).await;
+    // Owned by the discovery future: timeout, interrupt and shutdown clear the flag.
+    struct Discovering<'a>(&'a Arc<Mutex<App>>);
+    impl Drop for Discovering<'_> {
+        fn drop(&mut self) {
+            self.0
+                .lock()
+                .expect("app mutex poisoned")
+                .linkage_discovering = false;
+        }
+    }
+    let _discovering = Discovering(app);
+    let (link_map, workflow_files) = discover_links(aws, gh).await?;
 
-    if !link_map.links().is_empty() {
+    {
         // Compute per-job pipeline assignments for pipeline-centric UI
         let assignment = assign_jobs_to_pipelines(&workflow_files, &link_map);
         let has_jobs = assignment
@@ -444,13 +468,13 @@ pub async fn run_discovery(
                 shared_workflows = assignment.shared_jobs.len(),
                 "computed job assignments for pipeline-centric UI"
             );
-            app.lock().expect("app mutex poisoned").job_assignment = Some(assignment);
         }
+        app.lock().expect("app mutex poisoned").job_assignment =
+            if has_jobs { Some(assignment) } else { None };
     }
 
     sync_linked_pipelines(app, &link_map);
-    app.lock().expect("app mutex poisoned").linkage_discovering = false;
-    link_map
+    Ok(link_map)
 }
 
 /// After polling, apply GH→CP links:
@@ -816,6 +840,74 @@ mod tests {
         definitions: Vec<PipelineDefinition>,
     }
 
+    struct FailingDefinitions;
+    #[async_trait::async_trait]
+    impl PipelineClient for FailingDefinitions {
+        async fn list_pipeline_names(&self) -> anyhow::Result<Vec<String>> {
+            Ok(vec!["old".into()])
+        }
+        async fn get_pipeline_state(&self, _: &str) -> anyhow::Result<PipelineState> {
+            anyhow::bail!("unavailable")
+        }
+        async fn get_pipeline_definition(&self, _: &str) -> anyhow::Result<PipelineDefinition> {
+            anyhow::bail!("unavailable")
+        }
+    }
+
+    struct PendingDefinitions;
+    #[async_trait::async_trait]
+    impl PipelineClient for PendingDefinitions {
+        async fn list_pipeline_names(&self) -> anyhow::Result<Vec<String>> {
+            std::future::pending().await
+        }
+        async fn get_pipeline_state(&self, _: &str) -> anyhow::Result<PipelineState> {
+            unreachable!()
+        }
+        async fn get_pipeline_definition(&self, _: &str) -> anyhow::Result<PipelineDefinition> {
+            unreachable!()
+        }
+    }
+
+    #[tokio::test]
+    async fn dropping_pending_discovery_clears_flag_without_erasing_prior_data() {
+        use futures::FutureExt;
+        let gh = LinkMockActions {
+            workflow_yamls: vec![],
+        };
+        let app = Arc::new(Mutex::new(App::new()));
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("links.toml");
+        std::fs::write(&path, "previous").unwrap();
+        let mut work = Box::pin(run_discovery(&PendingDefinitions, &gh, &app, &path));
+        assert!(work.as_mut().now_or_never().is_none());
+        assert!(app.lock().unwrap().linkage_discovering);
+        drop(work);
+        assert!(!app.lock().unwrap().linkage_discovering);
+        assert_eq!(std::fs::read_to_string(path).unwrap(), "previous");
+    }
+
+    #[tokio::test]
+    async fn failed_discovery_keeps_prior_assignment_and_disk() {
+        let gh = LinkMockActions {
+            workflow_yamls: vec![],
+        };
+        let app = Arc::new(Mutex::new(App::new()));
+        app.lock().unwrap().job_assignment = Some(JobAssignment {
+            pipeline_jobs: HashMap::new(),
+            shared_jobs: vec![("Old".into(), vec!["Job".into()])],
+        });
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("links.toml");
+        std::fs::write(&path, "previous").unwrap();
+        assert!(run_discovery(&FailingDefinitions, &gh, &app, &path)
+            .await
+            .is_err());
+        assert_eq!(std::fs::read_to_string(path).unwrap(), "previous");
+        let a = app.lock().unwrap();
+        assert!(a.job_assignment.is_some());
+        assert!(!a.linkage_discovering);
+    }
+
     #[async_trait::async_trait]
     impl PipelineClient for LinkMockPipeline {
         async fn list_pipeline_names(&self) -> anyhow::Result<Vec<String>> {
@@ -985,6 +1077,7 @@ source = "YamlDiscovered"
         let path = dir.path().join(".cibars-links.toml");
         let cache = LinkCache {
             schema_version: 1,
+            scope: None,
             discovered_at: "now".into(),
             links: vec![],
             job_assignment: None,
@@ -1875,7 +1968,7 @@ source = "YamlDiscovered"
             )],
         };
 
-        let (link_map, _wf) = super::discover_links(&aws, &gh).await;
+        let (link_map, _wf) = super::discover_links(&aws, &gh).await.unwrap();
         assert_eq!(link_map.links().len(), 1);
         assert_eq!(link_map.workflow_for_pipeline("deploy-pipe"), Some("CI"));
     }
@@ -1899,7 +1992,7 @@ source = "YamlDiscovered"
             )],
         };
 
-        let (link_map, _wf) = super::discover_links(&aws, &gh).await;
+        let (link_map, _wf) = super::discover_links(&aws, &gh).await.unwrap();
         assert!(link_map.links().is_empty());
     }
 
@@ -1937,7 +2030,7 @@ source = "YamlDiscovered"
             ],
         };
 
-        let (link_map, _wf) = super::discover_links(&aws, &gh).await;
+        let (link_map, _wf) = super::discover_links(&aws, &gh).await.unwrap();
         assert_eq!(link_map.links().len(), 2);
         assert_eq!(
             link_map.workflow_for_pipeline("frontend-pipe"),
@@ -1992,7 +2085,7 @@ jobs:
             )],
         };
 
-        let (link_map, _wf) = super::discover_links(&aws, &gh).await;
+        let (link_map, _wf) = super::discover_links(&aws, &gh).await.unwrap();
         assert_eq!(
             link_map.links().len(),
             2,
@@ -2025,7 +2118,9 @@ jobs:
         let dir = tempfile::tempdir().unwrap();
         let cache_path = dir.path().join(".cibars-links.toml");
 
-        let link_map = super::run_discovery(&aws, &gh, &app, &cache_path).await;
+        let link_map = super::run_discovery(&aws, &gh, &app, &cache_path)
+            .await
+            .unwrap();
         assert_eq!(link_map.links().len(), 1);
 
         // Cache file should exist
@@ -2043,7 +2138,7 @@ jobs:
     }
 
     #[tokio::test]
-    async fn run_discovery_skips_cache_when_no_links() {
+    async fn run_discovery_empty_result_clears_cached_assignment() {
         let aws = LinkMockPipeline {
             names: vec!["pipe".into()],
             definitions: vec![PipelineDefinition {
@@ -2052,19 +2147,30 @@ jobs:
             }],
         };
         let gh = LinkMockActions {
-            workflow_yamls: vec![],
+            workflow_yamls: vec![("other.yml", "name: Other\njobs:\n  upload:\n    steps:\n      - run: aws s3 cp x s3://other/key\n")],
         };
 
         let app = Arc::new(Mutex::new(App::new()));
         let dir = tempfile::tempdir().unwrap();
         let cache_path = dir.path().join(".cibars-links.toml");
+        app.lock().unwrap().job_assignment = Some(JobAssignment {
+            pipeline_jobs: HashMap::new(),
+            shared_jobs: vec![("Old".into(), vec!["Old job".into()])],
+        });
+        let mut previous = LinkMap::new();
+        previous.add_discovered("old".into(), "Old".into(), "b".into(), "k".into());
+        save_link_cache(&cache_path, &previous.to_cache("before", None)).unwrap();
 
-        let link_map = super::run_discovery(&aws, &gh, &app, &cache_path).await;
+        let link_map = super::run_discovery(&aws, &gh, &app, &cache_path)
+            .await
+            .unwrap();
         assert!(link_map.links().is_empty());
-        assert!(
-            !cache_path.exists(),
-            "cache file should not be written when no links"
-        );
+        assert!(load_link_cache(&cache_path)
+            .unwrap()
+            .unwrap()
+            .links
+            .is_empty());
+        assert!(app.lock().unwrap().job_assignment.is_none());
     }
 
     #[test]
@@ -2124,7 +2230,7 @@ jobs:
         };
 
         // Discover links (exercises YAML parsing → S3 extraction → key matching)
-        let (mut link_map, _wf) = super::discover_links(&aws, &gh).await;
+        let (mut link_map, _wf) = super::discover_links(&aws, &gh).await.unwrap();
         assert_eq!(link_map.workflow_for_pipeline("deploy-pipe"), Some("CI"));
 
         // Setup App with Running states

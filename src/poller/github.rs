@@ -482,10 +482,9 @@ impl ActionsClient for GitHubActionsClient {
             .await
             .context("failed to list workflow files")?;
 
-        let files = match listing.as_array() {
-            Some(a) => a,
-            None => return Ok(Vec::new()),
-        };
+        let files = listing
+            .as_array()
+            .context("invalid workflow file listing")?;
 
         let yaml_paths: Vec<String> = files
             .iter()
@@ -512,34 +511,27 @@ impl ActionsClient for GitHubActionsClient {
 
         let mut workflow_files = Vec::new();
         for (path, result) in results {
-            match result {
-                Ok(file_resp) => {
-                    let content = file_resp["content"]
-                        .as_str()
-                        .map(|c| c.replace('\n', ""))
-                        .and_then(|c| {
-                            use base64::Engine;
-                            base64::engine::general_purpose::STANDARD.decode(c).ok()
-                        })
-                        .and_then(|bytes| String::from_utf8(bytes).ok());
-
-                    if let Some(content) = content {
-                        let filename = path.rsplit('/').next().unwrap_or(path);
-                        if let Some(wf) = parse_workflow_yaml(filename, &content) {
-                            if !wf.s3_uploads.is_empty() {
-                                tracing::info!(
-                                    workflow = %wf.name,
-                                    uploads = wf.s3_uploads.len(),
-                                    "found S3 uploads in workflow"
-                                );
-                                workflow_files.push(wf);
-                            }
-                        }
-                    }
-                }
-                Err(e) => {
-                    tracing::warn!(path = %path, error = %e, "failed to fetch workflow file");
-                }
+            let file_resp =
+                result.with_context(|| format!("failed to fetch workflow file {path}"))?;
+            use base64::Engine;
+            let encoded = file_resp["content"]
+                .as_str()
+                .context("missing workflow content")?
+                .replace('\n', "");
+            let bytes = base64::engine::general_purpose::STANDARD
+                .decode(encoded)
+                .context("invalid workflow encoding")?;
+            let content = String::from_utf8(bytes).context("invalid workflow UTF-8")?;
+            let filename = path.rsplit('/').next().unwrap_or(path);
+            let wf = parse_workflow_yaml(filename, &content)
+                .with_context(|| format!("invalid workflow YAML {path}"))?;
+            if !wf.s3_uploads.is_empty() {
+                tracing::info!(
+                    workflow = %wf.name,
+                    uploads = wf.s3_uploads.len(),
+                    "found S3 uploads in workflow"
+                );
+                workflow_files.push(wf);
             }
         }
 
@@ -739,6 +731,31 @@ fn parse_workflow_runs(
 mod tests {
     use super::*;
     use std::collections::HashMap;
+
+    #[tokio::test]
+    async fn workflow_files_partial_http_failure_is_not_authoritative() {
+        use base64::Engine;
+        let good = base64::engine::general_purpose::STANDARD.encode("name: Deploy\njobs:\n  upload:\n    steps:\n      - run: aws s3 cp x s3://bucket/key\n");
+        let client = client_with_pages(vec![
+            (
+                "/repos/owner/repo/contents/.github/workflows&page=1".into(),
+                serde_json::json!([
+                    {"name":"good.yml", "path":".github/workflows/good.yml"},
+                    {"name":"bad.yml", "path":".github/workflows/bad.yml"}
+                ]),
+            ),
+            (
+                "/repos/owner/repo/contents/.github/workflows/good.yml&page=1".into(),
+                serde_json::json!({"content": good}),
+            ),
+            (
+                "/repos/owner/repo/contents/.github/workflows/bad.yml&page=1".into(),
+                serde_json::json!({"_fixture_status":500,"message":"unavailable"}),
+            ),
+        ])
+        .await;
+        assert!(client.fetch_workflow_files().await.is_err());
+    }
 
     async fn client_with_pages(pages: Vec<(String, serde_json::Value)>) -> GitHubActionsClient {
         client_with_gated_pages(pages, None).await
