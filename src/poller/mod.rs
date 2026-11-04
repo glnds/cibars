@@ -99,6 +99,17 @@ pub struct RunsPage {
     pub pr_numbers: std::collections::HashSet<u64>,
 }
 
+#[derive(Clone, Debug)]
+pub struct WorkflowInventoryEntry {
+    pub id: u64,
+    pub name: String,
+}
+
+pub enum ActionsUpdate {
+    Inventory(Vec<WorkflowInventoryEntry>),
+    Runs(RunsPage),
+}
+
 /// Full workflow run including jobs. Used in tests.
 #[cfg(test)]
 pub struct WorkflowRunInfo {
@@ -121,6 +132,14 @@ pub trait ActionsClient: Send + Sync {
     /// Fast: single API call, returns workflow-level summaries + harvested
     /// PR numbers (from pull_request[_target] events, pre-filter).
     async fn list_latest_runs(&self) -> Result<RunsPage>;
+    async fn stream_latest_runs(
+        &self,
+        updates: tokio::sync::mpsc::UnboundedSender<ActionsUpdate>,
+    ) -> Result<()> {
+        updates
+            .send(ActionsUpdate::Runs(self.list_latest_runs().await?))
+            .map_err(|_| anyhow::anyhow!("workflow update receiver closed"))
+    }
     /// Fetch jobs for a specific run.
     async fn fetch_run_jobs(&self, run_id: u64) -> Result<Vec<JobInfo>>;
     /// Fetch workflow YAML files and extract S3 upload targets.
@@ -249,72 +268,82 @@ pub async fn poll_actions_tick(app: &Arc<Mutex<App>>, client: &dyn ActionsClient
         return;
     }
 
-    // Phase 1: fetch workflow summaries (single API call)
-    let RunsPage {
-        summaries,
-        pr_numbers,
-    } = match client.list_latest_runs().await {
-        Ok(p) => p,
-        Err(e) => {
-            let msg = format!("{e:#}");
-            let mut a = app.lock().expect("app mutex poisoned");
-            let msg_lower = msg.to_lowercase();
-            if msg_lower.contains("rate limit")
-                || msg_lower.contains("403")
-                || msg_lower.contains("429")
-                || msg_lower.contains("abuse detection")
-            {
-                a.rate_limited_until =
-                    Some(Instant::now() + Duration::from_secs(RATE_LIMIT_BACKOFF_SECS));
-                a.push_warning(format!(
-                    "GitHub: rate limited, backing off {RATE_LIMIT_BACKOFF_SECS}s"
-                ));
-            } else {
-                a.push_warning(format!("GitHub: {msg}"));
+    use futures::{stream::FuturesUnordered, StreamExt};
+    let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    let discovery = client.stream_latest_runs(sender);
+    tokio::pin!(discovery);
+    let mut discovery_done = false;
+    let mut updates_done = false;
+    let mut requested = HashSet::new();
+    let mut inventory_names: Option<HashSet<String>> = None;
+    let mut jobs = FuturesUnordered::new();
+    while !discovery_done || !updates_done || !jobs.is_empty() {
+        tokio::select! {
+            result = &mut discovery, if !discovery_done => {
+                discovery_done = true;
+                if let Err(error) = result {
+                    record_actions_error(app, &format!("{error:#}"));
+                }
             }
-            a.loading_actions = false;
-            a.last_poll = Some(Utc::now());
-            return;
+            update = receiver.recv(), if !updates_done => {
+                let Some(update) = update else { updates_done = true; continue; };
+                let mut a = app.lock().expect("app mutex poisoned");
+                match update {
+                    ActionsUpdate::Inventory(entries) => {
+                        inventory_names = Some(entries.iter().map(|e| e.name.clone()).collect());
+                        update_workflow_inventory(&mut a, &entries);
+                    }
+                    ActionsUpdate::Runs(mut page) => {
+                        if let Some(names) = &inventory_names {
+                            page.summaries.retain(|s| names.contains(&s.workflow_name));
+                        }
+                        update_workflow_summaries(&mut a, &page.summaries);
+                        let prs: Vec<_> = page.pr_numbers.into_iter().collect();
+                        a.add_or_update_watched_prs(&prs, Instant::now());
+                        for summary in page.summaries {
+                            if requested.insert((summary.workflow_name.clone(), summary.run_id)) {
+                                jobs.push(async move {
+                                    let result = client.fetch_run_jobs(summary.run_id).await;
+                                    (summary, result)
+                                });
+                            }
+                        }
+                    }
+                }
+                a.loading_actions = false;
+                a.last_poll = Some(Utc::now());
+            }
+            Some((summary, result)) = jobs.next(), if !jobs.is_empty() => {
+                match result {
+                    Ok(jobs) => {
+                        let mut a = app.lock().expect("app mutex poisoned");
+                        if a.workflow_groups.iter().any(|g| !g.gone && g.name == summary.workflow_name && g.run_id == Some(summary.run_id)) {
+                            update_workflow_jobs(&mut a, &summary.workflow_name, jobs);
+                        }
+                    }
+                    Err(error) => record_actions_error(app, &format!("jobs for {} run {}: {error:#}", summary.workflow_name, summary.run_id)),
+                }
+            }
         }
-    };
-
-    // Update UI with workflow-level status immediately
-    {
-        let mut a = app.lock().expect("app mutex poisoned");
-        update_workflow_summaries(&mut a, &summaries);
-        a.rate_limited_until = None;
-        a.loading_actions = false;
-        a.last_poll = Some(Utc::now());
-        // Feed PR numbers harvested from pull_request[_target] runs into
-        // the watched-PR set so the scheduler can linger past Cooldown.
-        let prs: Vec<u64> = pr_numbers.into_iter().collect();
-        a.add_or_update_watched_prs(&prs, Instant::now());
     }
+    let mut a = app.lock().expect("app mutex poisoned");
+    a.loading_actions = false;
+    a.last_poll = Some(Utc::now());
+}
 
-    // Phase 2: fetch jobs for each workflow in parallel
-    let job_futs: Vec<_> = summaries
+fn record_actions_error(app: &Arc<Mutex<App>>, message: &str) {
+    let mut a = app.lock().expect("app mutex poisoned");
+    let lower = message.to_lowercase();
+    if ["rate limit", "403", "429", "abuse detection"]
         .iter()
-        .map(|s| client.fetch_run_jobs(s.run_id))
-        .collect();
-    let job_results = futures::future::join_all(job_futs).await;
-
+        .any(|text| lower.contains(text))
     {
-        let mut a = app.lock().expect("app mutex poisoned");
-        for (summary, jobs_result) in summaries.iter().zip(job_results) {
-            match jobs_result {
-                Ok(jobs) => {
-                    update_workflow_jobs(&mut a, &summary.workflow_name, jobs);
-                }
-                Err(e) => {
-                    tracing::error!(
-                        workflow = %summary.workflow_name,
-                        error = %e,
-                        "failed to fetch jobs"
-                    );
-                }
-            }
-        }
-        a.last_poll = Some(Utc::now());
+        a.rate_limited_until = Some(Instant::now() + Duration::from_secs(RATE_LIMIT_BACKOFF_SECS));
+        a.push_warning(format!(
+            "GitHub: rate limited, backing off {RATE_LIMIT_BACKOFF_SECS}s"
+        ));
+    } else {
+        a.push_warning(format!("GitHub: {message}"));
     }
 }
 
@@ -542,21 +571,22 @@ fn update_pipeline_groups(app: &mut App, states: Vec<PipelineState>, listed_name
 
 /// Phase 1: create/update workflow groups from summaries (no jobs yet).
 fn update_workflow_summaries(app: &mut App, summaries: &[WorkflowRunSummary]) {
-    let seen: HashSet<&str> = summaries.iter().map(|s| s.workflow_name.as_str()).collect();
-
-    for group in &mut app.workflow_groups {
-        if !seen.contains(group.name.as_str()) {
-            group.gone = true;
-        }
-    }
-
     for summary in summaries {
         if let Some(g) = app
             .workflow_groups
             .iter_mut()
             .find(|g| g.name == summary.workflow_name)
         {
+            // GitHub run IDs increase; delayed summaries cannot revive older executions.
+            if g.run_id.is_some_and(|id| id > summary.run_id) {
+                continue;
+            }
             g.gone = false;
+            if g.run_id != Some(summary.run_id) {
+                for job in &mut g.jobs {
+                    *job = Bar::new(job.name.clone());
+                }
+            }
             g.summary_status = summary.status;
             g.run_id = Some(summary.run_id);
         } else {
@@ -566,6 +596,29 @@ fn update_workflow_summaries(app: &mut App, summaries: &[WorkflowRunSummary]) {
                 gone: false,
                 summary_status: summary.status,
                 run_id: Some(summary.run_id),
+                category: WorkflowCategory::default(),
+                linked_pipeline: None,
+            });
+        }
+    }
+}
+
+fn update_workflow_inventory(app: &mut App, entries: &[WorkflowInventoryEntry]) {
+    for group in &mut app.workflow_groups {
+        group.gone = !entries.iter().any(|entry| entry.name == group.name);
+    }
+    for entry in entries {
+        if !app
+            .workflow_groups
+            .iter()
+            .any(|group| group.name == entry.name)
+        {
+            app.workflow_groups.push(WorkflowGroup {
+                name: entry.name.clone(),
+                jobs: Vec::new(),
+                gone: false,
+                summary_status: BuildStatus::Idle,
+                run_id: None,
                 category: WorkflowCategory::default(),
                 linked_pipeline: None,
             });
@@ -602,6 +655,313 @@ fn update_workflow_jobs(app: &mut App, workflow_name: &str, jobs: Vec<JobInfo>) 
 mod tests {
     use super::*;
     use anyhow::Context as _;
+
+    #[test]
+    fn progressive_summary_retains_sparse_workflows_and_resets_new_run_jobs() {
+        let mut app = App::new();
+        let summary = |name: &str, run_id| WorkflowRunSummary {
+            workflow_name: name.into(),
+            run_id,
+            status: BuildStatus::Running,
+        };
+        update_workflow_summaries(&mut app, &[summary("CI", 1), summary("Nightly", 2)]);
+        update_workflow_jobs(
+            &mut app,
+            "CI",
+            vec![JobInfo {
+                name: "build".into(),
+                status: BuildStatus::Succeeded,
+                completed_at: Some(Utc::now()),
+            }],
+        );
+        update_workflow_summaries(&mut app, &[summary("CI", 3)]);
+        assert!(
+            !app.workflow_groups[1].gone,
+            "run pages cannot delete sparse workflows"
+        );
+        let job = &app.workflow_groups[0].jobs[0];
+        assert_eq!(
+            job.status,
+            BuildStatus::Idle,
+            "new run must clear old success"
+        );
+        assert!(job.last_finished.is_none());
+    }
+
+    #[test]
+    fn progressive_superseded_summary_cannot_replace_newer_run() {
+        let mut app = App::new();
+        for id in [20, 10] {
+            update_workflow_summaries(
+                &mut app,
+                &[WorkflowRunSummary {
+                    workflow_name: "CI".into(),
+                    run_id: id,
+                    status: BuildStatus::Running,
+                }],
+            );
+        }
+        assert_eq!(app.workflow_groups[0].run_id, Some(20));
+    }
+
+    struct GatedJobsClient;
+
+    #[async_trait]
+    impl ActionsClient for GatedJobsClient {
+        async fn list_latest_runs(&self) -> Result<RunsPage> {
+            Ok(RunsPage {
+                summaries: [1, 2]
+                    .into_iter()
+                    .map(|id| WorkflowRunSummary {
+                        workflow_name: format!("workflow-{id}"),
+                        run_id: id,
+                        status: BuildStatus::Running,
+                    })
+                    .collect(),
+                ..Default::default()
+            })
+        }
+        async fn fetch_run_jobs(&self, id: u64) -> Result<Vec<JobInfo>> {
+            if id == 2 {
+                std::future::pending::<()>().await;
+            }
+            Ok(vec![JobInfo {
+                name: "fast".into(),
+                status: BuildStatus::Succeeded,
+                completed_at: None,
+            }])
+        }
+        async fn fetch_workflow_files(&self) -> Result<Vec<WorkflowFile>> {
+            Ok(vec![])
+        }
+        async fn fetch_pr_state(&self, _: u64) -> Result<crate::model::WatchedPrState> {
+            Ok(crate::model::WatchedPrState::Unknown)
+        }
+    }
+
+    #[tokio::test]
+    async fn progressive_fast_jobs_publish_while_other_jobs_pending() {
+        let app = Arc::new(Mutex::new(App::new()));
+        let tick = poll_actions_tick(&app, &GatedJobsClient);
+        tokio::pin!(tick);
+        tokio::select! {
+            _ = &mut tick => panic!("stalled job should keep tick pending"),
+            _ = tokio::time::sleep(Duration::from_millis(30)) => {}
+        }
+        assert_eq!(app.lock().unwrap().workflow_groups[0].jobs.len(), 1);
+    }
+
+    struct StreamingClient {
+        fail: bool,
+        hold: bool,
+        inventory: Option<Vec<WorkflowInventoryEntry>>,
+    }
+
+    #[async_trait]
+    impl ActionsClient for StreamingClient {
+        async fn list_latest_runs(&self) -> Result<RunsPage> {
+            unreachable!()
+        }
+        async fn stream_latest_runs(
+            &self,
+            sender: tokio::sync::mpsc::UnboundedSender<ActionsUpdate>,
+        ) -> Result<()> {
+            if let Some(entries) = &self.inventory {
+                sender.send(ActionsUpdate::Inventory(entries.clone()))?;
+            }
+            sender.send(ActionsUpdate::Runs(RunsPage {
+                summaries: vec![WorkflowRunSummary {
+                    workflow_name: "CI".into(),
+                    run_id: 1,
+                    status: BuildStatus::Running,
+                }],
+                ..Default::default()
+            }))?;
+            if self.hold {
+                std::future::pending::<()>().await;
+            }
+            if self.fail {
+                anyhow::bail!("late discovery failure");
+            }
+            Ok(())
+        }
+        async fn fetch_run_jobs(&self, _: u64) -> Result<Vec<JobInfo>> {
+            Ok(vec![JobInfo {
+                name: "build".into(),
+                status: BuildStatus::Succeeded,
+                completed_at: None,
+            }])
+        }
+        async fn fetch_workflow_files(&self) -> Result<Vec<WorkflowFile>> {
+            Ok(vec![])
+        }
+        async fn fetch_pr_state(&self, _: u64) -> Result<crate::model::WatchedPrState> {
+            Ok(crate::model::WatchedPrState::Unknown)
+        }
+    }
+
+    #[tokio::test]
+    async fn progressive_jobs_publish_before_discovery_finishes() {
+        let app = Arc::new(Mutex::new(App::new()));
+        let client = StreamingClient {
+            fail: false,
+            hold: true,
+            inventory: Some(vec![
+                WorkflowInventoryEntry {
+                    id: 1,
+                    name: "CI".into(),
+                },
+                WorkflowInventoryEntry {
+                    id: 2,
+                    name: "Never".into(),
+                },
+            ]),
+        };
+        let tick = poll_actions_tick(&app, &client);
+        tokio::pin!(tick);
+        tokio::select! { _ = &mut tick => panic!("discovery held"), _ = tokio::time::sleep(Duration::from_millis(30)) => {} }
+        let a = app.lock().unwrap();
+        assert_eq!(a.workflow_groups[0].jobs.len(), 1);
+        assert_eq!(a.workflow_groups[1].summary_status, BuildStatus::Idle);
+        assert_eq!(a.workflow_groups[1].run_id, None);
+    }
+
+    #[tokio::test]
+    async fn progressive_late_error_preserves_buffered_runs_and_jobs() {
+        let app = Arc::new(Mutex::new(App::new()));
+        poll_actions_tick(
+            &app,
+            &StreamingClient {
+                fail: true,
+                hold: false,
+                inventory: None,
+            },
+        )
+        .await;
+        let a = app.lock().unwrap();
+        assert_eq!(a.workflow_groups[0].jobs.len(), 1);
+        assert!(a
+            .warnings
+            .iter()
+            .any(|w| w.contains("late discovery failure")));
+    }
+
+    #[tokio::test]
+    async fn progressive_only_authoritative_empty_inventory_deletes() {
+        let app = Arc::new(Mutex::new(App::new()));
+        poll_actions_tick(
+            &app,
+            &StreamingClient {
+                fail: false,
+                hold: false,
+                inventory: None,
+            },
+        )
+        .await;
+        poll_actions_tick(
+            &app,
+            &StreamingClient {
+                fail: true,
+                hold: false,
+                inventory: None,
+            },
+        )
+        .await;
+        assert!(!app.lock().unwrap().workflow_groups[0].gone);
+        poll_actions_tick(
+            &app,
+            &StreamingClient {
+                fail: false,
+                hold: false,
+                inventory: Some(vec![]),
+            },
+        )
+        .await;
+        assert!(app.lock().unwrap().workflow_groups[0].gone);
+    }
+
+    #[derive(Default)]
+    struct SupersededJobsClient {
+        old_started: tokio::sync::Notify,
+        dropped: std::sync::atomic::AtomicBool,
+        hold: bool,
+    }
+
+    #[async_trait]
+    impl ActionsClient for SupersededJobsClient {
+        async fn list_latest_runs(&self) -> Result<RunsPage> {
+            unreachable!()
+        }
+        async fn stream_latest_runs(
+            &self,
+            sender: tokio::sync::mpsc::UnboundedSender<ActionsUpdate>,
+        ) -> Result<()> {
+            for id in [1, 2] {
+                sender.send(ActionsUpdate::Runs(RunsPage {
+                    summaries: vec![WorkflowRunSummary {
+                        workflow_name: "CI".into(),
+                        run_id: id,
+                        status: BuildStatus::Running,
+                    }],
+                    ..Default::default()
+                }))?;
+                if id == 1 {
+                    self.old_started.notified().await;
+                }
+            }
+            Ok(())
+        }
+        async fn fetch_run_jobs(&self, id: u64) -> Result<Vec<JobInfo>> {
+            struct Guard<'a>(&'a std::sync::atomic::AtomicBool);
+            impl Drop for Guard<'_> {
+                fn drop(&mut self) {
+                    self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+                }
+            }
+            if id == 1 {
+                let _guard = Guard(&self.dropped);
+                self.old_started.notify_one();
+                if self.hold {
+                    std::future::pending::<()>().await;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            Ok(vec![JobInfo {
+                name: format!("job-{id}"),
+                status: BuildStatus::Succeeded,
+                completed_at: None,
+            }])
+        }
+        async fn fetch_workflow_files(&self) -> Result<Vec<WorkflowFile>> {
+            Ok(vec![])
+        }
+        async fn fetch_pr_state(&self, _: u64) -> Result<crate::model::WatchedPrState> {
+            Ok(crate::model::WatchedPrState::Unknown)
+        }
+    }
+
+    #[tokio::test]
+    async fn progressive_old_job_result_cannot_overwrite_new_run() {
+        let app = Arc::new(Mutex::new(App::new()));
+        poll_actions_tick(&app, &SupersededJobsClient::default()).await;
+        let a = app.lock().unwrap();
+        assert_eq!(a.workflow_groups[0].run_id, Some(2));
+        assert_eq!(a.workflow_groups[0].jobs[0].name, "job-2");
+        assert_eq!(a.workflow_groups[0].jobs.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn progressive_cancelled_tick_drops_unfinished_job_future() {
+        let app = Arc::new(Mutex::new(App::new()));
+        let client = SupersededJobsClient {
+            hold: true,
+            ..Default::default()
+        };
+        let mut tick = Box::pin(poll_actions_tick(&app, &client));
+        tokio::select! { _ = &mut tick => panic!("old job held"), _ = tokio::time::sleep(Duration::from_millis(30)) => {} }
+        drop(tick);
+        assert!(client.dropped.load(std::sync::atomic::Ordering::SeqCst));
+    }
 
     struct MockPipelineClient {
         pipelines: Vec<PipelineState>,
@@ -658,6 +1018,22 @@ mod tests {
 
     #[async_trait]
     impl ActionsClient for MockActionsClient {
+        async fn stream_latest_runs(
+            &self,
+            updates: tokio::sync::mpsc::UnboundedSender<ActionsUpdate>,
+        ) -> Result<()> {
+            updates.send(ActionsUpdate::Inventory(
+                self.runs
+                    .iter()
+                    .map(|r| WorkflowInventoryEntry {
+                        id: r.run_id,
+                        name: r.workflow_name.clone(),
+                    })
+                    .collect(),
+            ))?;
+            updates.send(ActionsUpdate::Runs(self.list_latest_runs().await?))?;
+            Ok(())
+        }
         async fn list_latest_runs(&self) -> Result<RunsPage> {
             Ok(RunsPage {
                 summaries: self

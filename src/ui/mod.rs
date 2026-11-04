@@ -213,6 +213,23 @@ fn compute_layout_constraints(actions_height: u16, pipelines_height: u16) -> Vec
     ]
 }
 
+fn workflow_header(group: &WorkflowGroup) -> Line<'static> {
+    let label = match group.run_id {
+        Some(id) => format!("{} · latest run #{id}", group.name),
+        None => format!("{} · no run observed", group.name),
+    };
+    Line::from(Span::styled(
+        label,
+        Style::default().fg(
+            if group.gone || group.category == WorkflowCategory::Review {
+                theme::FG_DIM
+            } else {
+                group.summary_status.color()
+            },
+        ),
+    ))
+}
+
 /// Render collapsed actions: status dots + count inside the block inner area.
 fn render_collapsed_actions(
     groups: &[&WorkflowGroup],
@@ -230,6 +247,10 @@ fn render_collapsed_actions(
                 group.summary_status.color()
             };
             spans.push(Span::styled("\u{25CF}", Style::default().fg(color)));
+            spans.push(Span::styled(
+                format!(" {} ", group.name),
+                Style::default().fg(color),
+            ));
             count += 1;
         } else {
             for job in &visible_jobs {
@@ -315,7 +336,15 @@ fn build_pipeline_centric_sections(
             });
         }
         sections.push(PipelineCentricSection {
-            title: format!(" {wf_name} "),
+            title: format!(
+                " {wf_name} · latest GH run{} ",
+                app.workflow_groups
+                    .iter()
+                    .find(|g| g.name == *wf_name)
+                    .and_then(|g| g.run_id)
+                    .map(|id| format!(" #{id}"))
+                    .unwrap_or_default()
+            ),
             border_color: theme::BORDER_ACTIONS,
             rows,
         });
@@ -371,10 +400,58 @@ fn build_pipeline_centric_sections(
         }
 
         sections.push(PipelineCentricSection {
-            title: format!(" {pipeline_name} "),
+            title: format!(
+                " {pipeline_name} · latest GH run{} ",
+                app.workflow_groups
+                    .iter()
+                    .find(|g| g.name == assignment.pipeline_jobs[pipeline_name].0)
+                    .and_then(|g| g.run_id)
+                    .map(|id| format!(" #{id}"))
+                    .unwrap_or_default()
+            ),
             border_color: theme::BORDER_PIPELINES,
             rows,
         });
+    }
+
+    // Cached assignments may lag inventory and newly discovered jobs.
+    for group in &app.workflow_groups {
+        if group.gone {
+            continue;
+        }
+        let mut rows = Vec::new();
+        if !group.jobs.iter().any(|job| !job.gone) {
+            rows.push(PipelineCentricRow::JobBar {
+                job_name: group.name.clone(),
+                dim: true,
+            });
+        } else if group.category == WorkflowCategory::CI {
+            for job in group.jobs.iter().filter(|job| !job.gone) {
+                let assigned =
+                    assignment.shared_jobs.iter().any(|(workflow, jobs)| {
+                        workflow == &group.name && jobs.contains(&job.name)
+                    }) || assignment.pipeline_jobs.values().any(|(workflow, jobs)| {
+                        workflow == &group.name && jobs.contains(&job.name)
+                    });
+                if !assigned {
+                    rows.push(PipelineCentricRow::JobBar {
+                        job_name: job.name.clone(),
+                        dim: false,
+                    });
+                }
+            }
+        }
+        if !rows.is_empty() {
+            sections.push(PipelineCentricSection {
+                title: format!(
+                    " {} · latest GH run{} ",
+                    group.name,
+                    group.run_id.map(|id| format!(" #{id}")).unwrap_or_default()
+                ),
+                border_color: theme::BORDER_ACTIONS,
+                rows,
+            });
+        }
     }
 
     // 3. Reviews section
@@ -646,15 +723,14 @@ pub fn run_ui(
                         } else {
                             0
                         };
-                        job_count + pipeline_rows
+                        1 + job_count + pipeline_rows
                     })
                     .sum();
                 let review_jobs: usize = sorted_wf_groups
                     .iter()
                     .filter(|g| g.category == WorkflowCategory::Review)
-                    .flat_map(|g| g.jobs.iter())
-                    .filter(|j| !j.gone)
-                    .count();
+                    .map(|g| 1 + g.jobs.iter().filter(|j| !j.gone).count())
+                    .sum();
                 let separator = if review_jobs > 0 { 1 } else { 0 };
                 ci_jobs + separator + review_jobs
             } else {
@@ -717,7 +793,7 @@ pub fn run_ui(
                 .border_type(BorderType::Rounded)
                 .border_style(Style::default().fg(theme::BORDER_ACTIONS))
                 .title(Span::styled(
-                    " GitHub Actions ",
+                    " GitHub Actions · latest runs ",
                     Style::default().fg(theme::BORDER_ACTIONS),
                 ));
             let actions_inner = actions_block.inner(areas[1]);
@@ -749,6 +825,10 @@ pub fn run_ui(
                     .iter()
                     .filter(|g| g.category == WorkflowCategory::CI)
                 {
+                    if row < inner_areas.len() {
+                        frame.render_widget(workflow_header(group), inner_areas[row]);
+                        row += 1;
+                    }
                     for bar in group.jobs.iter().filter(|j| !j.gone) {
                         if row >= inner_areas.len() {
                             break;
@@ -820,7 +900,7 @@ pub fn run_ui(
                 let has_review_jobs = sorted_wf_groups
                     .iter()
                     .filter(|g| g.category == WorkflowCategory::Review)
-                    .any(|g| g.jobs.iter().any(|j| !j.gone));
+                    .any(|_| true);
 
                 if has_review_jobs && row < inner_areas.len() {
                     let sep_width = inner_areas[row].width as usize;
@@ -839,6 +919,10 @@ pub fn run_ui(
                         .iter()
                         .filter(|g| g.category == WorkflowCategory::Review)
                     {
+                        if row < inner_areas.len() {
+                            frame.render_widget(workflow_header(group), inner_areas[row]);
+                            row += 1;
+                        }
                         for bar in group.jobs.iter().filter(|j| !j.gone) {
                             if row >= inner_areas.len() {
                                 break;
@@ -1866,6 +1950,71 @@ mod tests {
     }
 
     #[test]
+    fn inventory_only_workflow_name_renders_neutral_in_pipeline_view() {
+        let mut app = App::new();
+        app.workflow_groups.push(WorkflowGroup {
+            name: "Never run".into(),
+            jobs: vec![],
+            gone: false,
+            summary_status: BuildStatus::Idle,
+            run_id: None,
+            category: WorkflowCategory::CI,
+            linked_pipeline: None,
+        });
+        let assignment = JobAssignment {
+            pipeline_jobs: HashMap::new(),
+            shared_jobs: vec![],
+        };
+        let sections = build_pipeline_centric_sections(&assignment, &app);
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 24)).unwrap();
+        terminal
+            .draw(|frame| render_pipeline_centric(frame, &app, &sections, None, None, None, false))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let text: String = buffer.content().iter().map(|cell| cell.symbol()).collect();
+        assert!(text.contains("Never run"));
+        for cell in buffer.content() {
+            assert_ne!(cell.fg, theme::STATUS_SUCCESS);
+            assert_ne!(cell.fg, theme::STATUS_FAILED);
+        }
+    }
+
+    #[test]
+    fn cached_assignment_keeps_new_unassigned_jobs_visible() {
+        let mut app = App::new();
+        app.workflow_groups.push(WorkflowGroup {
+            name: "New workflow".into(),
+            jobs: vec![Bar::new("New job".into())],
+            gone: false,
+            summary_status: BuildStatus::Idle,
+            run_id: None,
+            category: WorkflowCategory::CI,
+            linked_pipeline: None,
+        });
+        let assignment = JobAssignment {
+            pipeline_jobs: HashMap::new(),
+            shared_jobs: vec![("CI".into(), vec!["Old job".into()])],
+        };
+        let sections = build_pipeline_centric_sections(&assignment, &app);
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 24)).unwrap();
+        terminal
+            .draw(|frame| render_pipeline_centric(frame, &app, &sections, None, None, None, false))
+            .unwrap();
+        let text: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        assert!(text.contains("New workflow"));
+        assert!(text.contains("New job"));
+        assert!(text.contains("Old job"));
+    }
+
+    #[test]
     fn cached_assignment_renders_missing_jobs_with_neutral_status() {
         let assignment = JobAssignment {
             pipeline_jobs: HashMap::from([("deploy".into(), ("CI".into(), vec!["Build".into()]))]),
@@ -1882,6 +2031,10 @@ mod tests {
         let text: String = buffer.content().iter().map(|cell| cell.symbol()).collect();
         assert!(text.contains("Tests"), "cached shared label must appear");
         assert!(text.contains("Build"), "cached pipeline job must appear");
+        assert!(
+            text.contains("latest GH run"),
+            "pipeline view must identify historical GH results"
+        );
         for cell in buffer.content() {
             assert_ne!(cell.fg, theme::STATUS_SUCCESS);
             assert_ne!(cell.fg, theme::STATUS_FAILED);
@@ -1897,7 +2050,7 @@ mod tests {
         let app = App::new();
         let sections = build_pipeline_centric_sections(&assignment, &app);
         assert_eq!(sections.len(), 1);
-        assert_eq!(sections[0].title, " CI ");
+        assert_eq!(sections[0].title, " CI · latest GH run ");
         assert_eq!(sections[0].rows.len(), 2);
     }
 
@@ -1937,7 +2090,7 @@ mod tests {
 
         let sections = build_pipeline_centric_sections(&assignment, &app);
         assert_eq!(sections.len(), 1);
-        assert_eq!(sections[0].title, " deploy ");
+        assert_eq!(sections[0].title, " deploy · latest GH run ");
         // Should have: 1 job bar + 1 pipeline header + 1 stage bar = 3 rows
         assert_eq!(sections[0].rows.len(), 3);
     }

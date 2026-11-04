@@ -1,8 +1,12 @@
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 
-use super::{ActionsClient, JobInfo, RunsPage, S3Upload, WorkflowFile, WorkflowRunSummary};
+use super::{
+    ActionsClient, ActionsUpdate, JobInfo, RunsPage, S3Upload, WorkflowFile,
+    WorkflowInventoryEntry, WorkflowRunSummary,
+};
 use crate::model::{BuildStatus, WatchedPrState};
+use futures::{stream, StreamExt};
 
 pub struct GitHubActionsClient {
     octocrab: octocrab::Octocrab,
@@ -20,6 +24,7 @@ type LatestRuns = std::collections::HashMap<String, (u64, BuildStatus)>;
 struct RunsCache {
     latest: LatestRuns,
     calls: u32,
+    inventory: Option<Vec<WorkflowInventoryEntry>>,
 }
 
 /// Runs per page. Listing time scales with payload: 100/page ≈ 3.2 s,
@@ -31,8 +36,8 @@ const MAX_PAGES: u32 = 60;
 const FULL_SCAN_EVERY: u32 = 20;
 
 /// Full workflow discovery vs page 1 merged into the cache.
-fn needs_full_scan(known: &LatestRuns, call: u32) -> bool {
-    known.is_empty() || call.is_multiple_of(FULL_SCAN_EVERY)
+fn needs_full_scan<T>(known: &Option<T>, call: u32) -> bool {
+    known.is_none() || call.is_multiple_of(FULL_SCAN_EVERY)
 }
 
 /// A cached Running workflow absent from the fresh page would freeze as
@@ -53,12 +58,12 @@ fn more_pages(page: u32, fetched: u64, total_count: u64, full_scan: bool) -> boo
 
 /// Incremental poll: fresh runs win, workflows not on page 1 keep their last run.
 fn merge_latest(known: &mut LatestRuns, fresh: LatestRuns) {
-    known.extend(fresh);
-}
-
-/// Full scan is authoritative: replaces the cache.
-fn replace_latest(known: &mut LatestRuns, fresh: LatestRuns) {
-    *known = fresh;
+    // Run IDs increase, so delayed responses cannot replace a newer execution.
+    for (name, run) in fresh {
+        if known.get(&name).is_none_or(|(id, _)| *id <= run.0) {
+            known.insert(name, run);
+        }
+    }
 }
 
 impl GitHubActionsClient {
@@ -76,43 +81,255 @@ impl GitHubActionsClient {
         })
     }
 
-    async fn fetch_workflow_ids(&self) -> Result<std::collections::HashSet<u64>> {
-        let mut ids = std::collections::HashSet::new();
+    async fn get_json(&self, route: &str, branch: bool) -> Result<serde_json::Value> {
+        let parameters = self
+            .branch
+            .as_ref()
+            .filter(|_| branch)
+            .map(|b| [("branch", b)]);
+        tokio::time::timeout(
+            std::time::Duration::from_secs(15),
+            self.octocrab.get(route, parameters.as_ref()),
+        )
+        .await
+        .with_context(|| format!("GitHub request timed out after 15s: {route}"))?
+        .with_context(|| format!("GitHub request failed: {route}"))
+    }
+
+    async fn fetch_workflow_inventory(&self) -> Result<Vec<WorkflowInventoryEntry>> {
+        let mut inventory = Vec::new();
         for page in 1..=MAX_PAGES {
             let route = format!(
                 "/repos/{}/{}/actions/workflows?per_page=100&page={page}",
                 self.owner, self.repo,
             );
-            let resp: serde_json::Value = self
-                .octocrab
-                .get(&route, None::<&()>)
+            let resp = self
+                .get_json(&route, false)
                 .await
                 .context("failed to list workflows")?;
             let workflows = resp["workflows"]
                 .as_array()
                 .context("workflow listing has no workflows array")?;
             for workflow in workflows {
-                ids.insert(workflow["id"].as_u64().context("workflow has no id")?);
+                inventory.push(WorkflowInventoryEntry {
+                    id: workflow["id"].as_u64().context("workflow has no id")?,
+                    name: workflow["name"]
+                        .as_str()
+                        .context("workflow has no name")?
+                        .to_string(),
+                });
             }
             if workflows.len() < 100
                 || u64::from(page) * 100 >= resp["total_count"].as_u64().unwrap_or(0)
             {
-                return Ok(ids);
+                return Ok(inventory);
             }
         }
         anyhow::bail!("workflow inventory exceeded {MAX_PAGES} pages")
     }
+
+    fn publish_runs(
+        &self,
+        updates: &tokio::sync::mpsc::UnboundedSender<ActionsUpdate>,
+        fresh: LatestRuns,
+        pr_numbers: std::collections::HashSet<u64>,
+    ) -> Result<()> {
+        let summaries = fresh
+            .iter()
+            .map(|(name, (run_id, status))| WorkflowRunSummary {
+                workflow_name: name.clone(),
+                run_id: *run_id,
+                status: *status,
+            })
+            .collect();
+        {
+            let mut cache = self
+                .runs_cache
+                .lock()
+                .map_err(|_| anyhow::anyhow!("runs cache mutex poisoned"))?;
+            merge_latest(&mut cache.latest, fresh);
+        }
+        updates.send(ActionsUpdate::Runs(RunsPage {
+            summaries,
+            pr_numbers,
+        }))?;
+        Ok(())
+    }
+
+    async fn scan_workflow(
+        &self,
+        workflow: &WorkflowInventoryEntry,
+    ) -> Result<(LatestRuns, std::collections::HashSet<u64>)> {
+        let mut latest = LatestRuns::new();
+        let mut prs = std::collections::HashSet::new();
+        for page in 1..=MAX_PAGES {
+            let route = format!(
+                "/repos/{}/{}/actions/workflows/{}/runs?per_page={RUNS_PER_PAGE}&page={page}",
+                self.owner, self.repo, workflow.id
+            );
+            let resp = self.get_json(&route, true).await?;
+            parse_workflow_runs(&resp, &mut latest, &mut prs, self.branch.as_deref());
+            let runs = resp["workflow_runs"]
+                .as_array()
+                .context("workflow run listing has no workflow_runs array")?;
+            if latest.is_empty()
+                && page == MAX_PAGES
+                && runs.len() >= RUNS_PER_PAGE as usize
+                && u64::from(page * RUNS_PER_PAGE) < resp["total_count"].as_u64().unwrap_or(0)
+            {
+                anyhow::bail!(
+                    "workflow {} run lookup exceeded {MAX_PAGES} pages",
+                    workflow.name
+                );
+            }
+            if !latest.is_empty()
+                || !more_pages(
+                    page,
+                    runs.len() as u64,
+                    resp["total_count"].as_u64().unwrap_or(0),
+                    true,
+                )
+            {
+                return Ok((latest, prs));
+            }
+        }
+        anyhow::bail!(
+            "workflow {} run lookup exceeded {MAX_PAGES} pages",
+            workflow.name
+        )
+    }
+
+    async fn discover_runs(
+        &self,
+        updates: tokio::sync::mpsc::UnboundedSender<ActionsUpdate>,
+    ) -> Result<()> {
+        let (refresh, known, mut inventory) = {
+            let mut cache = self
+                .runs_cache
+                .lock()
+                .map_err(|_| anyhow::anyhow!("runs cache mutex poisoned"))?;
+            cache.calls = cache.calls.wrapping_add(1);
+            (
+                needs_full_scan(&cache.inventory, cache.calls),
+                cache.latest.clone(),
+                cache.inventory.clone(),
+            )
+        };
+        // Recent runs and inventory start together. Neither waits for the other.
+        let recent = async {
+            let route = build_runs_route(&self.owner, &self.repo, 1);
+            let resp = self.get_json(&route, true).await?;
+            resp["workflow_runs"]
+                .as_array()
+                .context("workflow run listing has no workflow_runs array")?;
+            let mut fresh = LatestRuns::new();
+            let mut prs = std::collections::HashSet::new();
+            parse_workflow_runs(&resp, &mut fresh, &mut prs, self.branch.as_deref());
+            self.publish_runs(&updates, fresh.clone(), prs)?;
+            Ok::<_, anyhow::Error>((resp, fresh))
+        };
+        let refresh_inventory = async {
+            if refresh {
+                match self.fetch_workflow_inventory().await {
+                    Ok(entries) => {
+                        {
+                            let mut cache = self
+                                .runs_cache
+                                .lock()
+                                .map_err(|_| anyhow::anyhow!("runs cache mutex poisoned"))?;
+                            cache
+                                .latest
+                                .retain(|name, _| entries.iter().any(|e| &e.name == name));
+                            cache.inventory = Some(entries.clone());
+                        }
+                        updates.send(ActionsUpdate::Inventory(entries.clone()))?;
+                        Ok(Some(entries))
+                    }
+                    Err(error) => {
+                        Err(error.context("workflow inventory unavailable; using bounded scan"))
+                    }
+                }
+            } else {
+                Ok(None)
+            }
+        };
+        let (recent, refreshed) = tokio::join!(recent, refresh_inventory);
+        let inventory_error = match refreshed {
+            Ok(Some(entries)) => {
+                inventory = Some(entries);
+                None
+            }
+            Ok(None) => None,
+            Err(error) => Some(error),
+        };
+        let (mut resp, fresh) = recent?;
+        let mut errors = Vec::new();
+        if let Some(error) = inventory_error {
+            errors.push(format!("{error:#}"));
+        }
+        if let Some(entries) = inventory {
+            // Inventory can complete before recent runs. Reconcile again after both
+            // responses so delayed runs cannot resurrect a deleted workflow in cache.
+            self.runs_cache
+                .lock()
+                .map_err(|_| anyhow::anyhow!("runs cache mutex poisoned"))?
+                .latest
+                .retain(|name, _| entries.iter().any(|entry| &entry.name == name));
+            let targets: Vec<_> = entries
+                .into_iter()
+                .filter(|entry| {
+                    !fresh.contains_key(&entry.name)
+                        && (refresh
+                            || !known.contains_key(&entry.name)
+                            || known
+                                .get(&entry.name)
+                                .is_some_and(|(_, status)| *status == BuildStatus::Running))
+                })
+                .collect();
+            let mut scans = stream::iter(
+                targets
+                    .into_iter()
+                    .map(|entry| async move { self.scan_workflow(&entry).await }),
+            )
+            .buffer_unordered(4);
+            while let Some(result) = scans.next().await {
+                match result {
+                    Ok((fresh, prs)) => self.publish_runs(&updates, fresh, prs)?,
+                    Err(error) => errors.push(format!("{error:#}")),
+                }
+            }
+        } else if refresh || has_stale_running(&known, &fresh) {
+            let mut discovered = fresh;
+            let mut page = 1;
+            while more_pages(
+                page,
+                resp["workflow_runs"]
+                    .as_array()
+                    .context("workflow run listing has no workflow_runs array")?
+                    .len() as u64,
+                resp["total_count"].as_u64().unwrap_or(0),
+                true,
+            ) {
+                page += 1;
+                resp = self
+                    .get_json(&build_runs_route(&self.owner, &self.repo, page), true)
+                    .await?;
+                let mut prs = std::collections::HashSet::new();
+                parse_workflow_runs(&resp, &mut discovered, &mut prs, self.branch.as_deref());
+                self.publish_runs(&updates, discovered.clone(), prs)?;
+            }
+        }
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            anyhow::bail!("{}", errors.join("; "))
+        }
+    }
 }
 
-/// Build the API route for listing workflow runs, optionally filtered by branch.
-fn build_runs_route(owner: &str, repo: &str, page: u32, branch: Option<&str>) -> String {
-    let mut route =
-        format!("/repos/{owner}/{repo}/actions/runs?per_page={RUNS_PER_PAGE}&page={page}");
-    if let Some(b) = branch {
-        route.push_str("&branch=");
-        route.push_str(b);
-    }
-    route
+/// Branch is supplied as Octocrab query parameters, which handles URL escaping.
+fn build_runs_route(owner: &str, repo: &str, page: u32) -> String {
+    format!("/repos/{owner}/{repo}/actions/runs?per_page={RUNS_PER_PAGE}&page={page}")
 }
 
 /// Map GitHub pull request `state` + `merged` boolean to WatchedPrState.
@@ -144,102 +361,43 @@ pub fn map_run_status(status: &str, conclusion: Option<&str>) -> BuildStatus {
 #[async_trait]
 impl ActionsClient for GitHubActionsClient {
     async fn list_latest_runs(&self) -> Result<RunsPage> {
-        let mut latest_per_workflow: std::collections::HashMap<String, (u64, BuildStatus)> =
-            std::collections::HashMap::new();
-        let mut pr_numbers: std::collections::HashSet<u64> = std::collections::HashSet::new();
-
-        let (mut full_scan, known) = {
-            let mut cache = self
-                .runs_cache
-                .lock()
-                .map_err(|_| anyhow::anyhow!("runs cache mutex poisoned"))?;
-            cache.calls = cache.calls.wrapping_add(1);
-            (
-                needs_full_scan(&cache.latest, cache.calls),
-                cache.latest.clone(),
-            )
-        };
-        let mut page: u32 = 1;
-        let mut unseen_workflows = None;
-
-        loop {
-            let route = build_runs_route(&self.owner, &self.repo, page, self.branch.as_deref());
-            let resp: serde_json::Value = self
-                .octocrab
-                .get(&route, None::<&()>)
-                .await
-                .context("failed to list workflow runs")?;
-
-            let seen_workflows = parse_workflow_runs(
-                &resp,
-                &mut latest_per_workflow,
-                &mut pr_numbers,
-                self.branch.as_deref(),
-            );
-
-            let total_count = resp["total_count"].as_u64().unwrap_or(0);
-            let fetched = resp["workflow_runs"]
-                .as_array()
-                .map_or(0, |a| a.len() as u64);
-
-            if !full_scan && has_stale_running(&known, &latest_per_workflow) {
-                full_scan = true;
-            }
-            if !more_pages(page, fetched, total_count, full_scan) {
-                break;
-            }
-            if page == 1 {
-                unseen_workflows = match self.fetch_workflow_ids().await {
-                    Ok(ids) => Some(ids),
-                    Err(error) => {
-                        tracing::warn!(%error, "workflow inventory unavailable; using bounded scan");
-                        None
-                    }
-                };
-            }
-            if let Some(unseen) = &mut unseen_workflows {
-                // Only eligible runs prove a workflow is covered. Bot/skipped
-                // runs may hide an older human-triggered run on a later page.
-                unseen.retain(|id| !seen_workflows.contains(id));
-                if unseen.is_empty() {
-                    break;
+        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let discovery = self.discover_runs(sender);
+        let collect = async {
+            let mut prs = std::collections::HashSet::new();
+            while let Some(update) = receiver.recv().await {
+                if let ActionsUpdate::Runs(page) = update {
+                    prs.extend(page.pr_numbers);
                 }
             }
-            page += 1;
-        }
-
-        let latest_per_workflow = {
-            let mut cache = self
-                .runs_cache
-                .lock()
-                .map_err(|_| anyhow::anyhow!("runs cache mutex poisoned"))?;
-            if full_scan {
-                replace_latest(&mut cache.latest, latest_per_workflow);
-            } else {
-                merge_latest(&mut cache.latest, latest_per_workflow);
-            }
-            cache.latest.clone()
+            prs
         };
-
-        tracing::debug!(
-            workflows = latest_per_workflow.len(),
-            pages = page,
-            full_scan,
-            "deduped workflow runs"
-        );
-
-        let summaries = latest_per_workflow
-            .into_iter()
-            .map(|(workflow_name, (run_id, status))| WorkflowRunSummary {
-                workflow_name,
-                run_id,
-                status,
+        let (result, pr_numbers) = tokio::join!(discovery, collect);
+        result?;
+        let cache = self
+            .runs_cache
+            .lock()
+            .map_err(|_| anyhow::anyhow!("runs cache mutex poisoned"))?;
+        let summaries = cache
+            .latest
+            .iter()
+            .map(|(name, (run_id, status))| WorkflowRunSummary {
+                workflow_name: name.clone(),
+                run_id: *run_id,
+                status: *status,
             })
             .collect();
         Ok(RunsPage {
             summaries,
             pr_numbers,
         })
+    }
+
+    async fn stream_latest_runs(
+        &self,
+        updates: tokio::sync::mpsc::UnboundedSender<ActionsUpdate>,
+    ) -> Result<()> {
+        self.discover_runs(updates).await
     }
 
     async fn fetch_run_jobs(&self, run_id: u64) -> Result<Vec<JobInfo>> {
@@ -250,9 +408,8 @@ impl ActionsClient for GitHubActionsClient {
                 "/repos/{}/{}/actions/runs/{run_id}/jobs?per_page=100&page={page}",
                 self.owner, self.repo,
             );
-            let resp: serde_json::Value = self
-                .octocrab
-                .get(&route, None::<&()>)
+            let resp = self
+                .get_json(&route, false)
                 .await
                 .context("failed to list jobs")?;
 
@@ -281,9 +438,8 @@ impl ActionsClient for GitHubActionsClient {
 
     async fn fetch_pr_state(&self, pr_number: u64) -> Result<WatchedPrState> {
         let route = format!("/repos/{}/{}/pulls/{pr_number}", self.owner, self.repo,);
-        let resp: serde_json::Value = self
-            .octocrab
-            .get(&route, None::<&()>)
+        let resp = self
+            .get_json(&route, false)
             .await
             .context("failed to fetch pull request state")?;
         let state = resp["state"].as_str().unwrap_or("");
@@ -296,9 +452,8 @@ impl ActionsClient for GitHubActionsClient {
             "/repos/{}/{}/contents/.github/workflows",
             self.owner, self.repo,
         );
-        let listing: serde_json::Value = self
-            .octocrab
-            .get(&route, None::<&()>)
+        let listing = self
+            .get_json(&route, false)
             .await
             .context("failed to list workflow files")?;
 
@@ -323,10 +478,7 @@ impl ActionsClient for GitHubActionsClient {
         let futs = yaml_paths.iter().map(|path| {
             let file_route = format!("/repos/{}/{}/contents/{path}", self.owner, self.repo);
             async move {
-                let result = self
-                    .octocrab
-                    .get::<serde_json::Value, _, _>(&file_route, None::<&()>)
-                    .await;
+                let result = self.get_json(&file_route, false).await;
                 (path.as_str(), result)
             }
         });
@@ -564,33 +716,49 @@ mod tests {
     use std::collections::HashMap;
 
     async fn client_with_pages(pages: Vec<(String, serde_json::Value)>) -> GitHubActionsClient {
+        client_with_gated_pages(pages, None).await
+    }
+
+    async fn client_with_gated_pages(
+        pages: Vec<(String, serde_json::Value)>,
+        gate: Option<(String, std::sync::Arc<tokio::sync::Notify>)>,
+    ) -> GitHubActionsClient {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
-        let pages: HashMap<_, _> = pages.into_iter().collect();
+        let pages: std::sync::Arc<HashMap<_, _>> = std::sync::Arc::new(pages.into_iter().collect());
         tokio::spawn(async move {
             loop {
                 let (mut socket, _) = listener.accept().await.unwrap();
-                let mut request = Vec::new();
-                while !request.ends_with(b"\r\n\r\n") {
-                    request.push(socket.read_u8().await.unwrap());
-                }
-                let request = String::from_utf8(request).unwrap();
-                let mut route = request.split_whitespace().nth(1).unwrap().to_string();
-                // GitHub defaults to page 1 when the query omits it.
-                if !route.contains("&page=") {
-                    route.push_str("&page=1");
-                }
-                let body = pages
-                    .get(&route)
-                    .expect("unexpected API request")
-                    .to_string();
-                let response = format!(
+                let pages = pages.clone();
+                let gate = gate.clone();
+                tokio::spawn(async move {
+                    let mut request = Vec::new();
+                    while !request.ends_with(b"\r\n\r\n") {
+                        request.push(socket.read_u8().await.unwrap());
+                    }
+                    let request = String::from_utf8(request).unwrap();
+                    let mut route = request.split_whitespace().nth(1).unwrap().to_string();
+                    // GitHub defaults to page 1 when the query omits it.
+                    if !route.contains("&page=") {
+                        route.push_str("&page=1");
+                    }
+                    if let Some((gated_route, release)) = gate {
+                        if route == gated_route {
+                            release.notified().await;
+                        }
+                    }
+                    let body = pages
+                        .get(&route)
+                        .expect("unexpected API request")
+                        .to_string();
+                    let response = format!(
                     "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
                     body.len()
                 );
-                socket.write_all(response.as_bytes()).await.unwrap();
+                    let _ = socket.write_all(response.as_bytes()).await;
+                });
             }
         });
 
@@ -605,6 +773,130 @@ mod tests {
             branch: None,
             runs_cache: std::sync::Mutex::new(RunsCache::default()),
         }
+    }
+
+    #[tokio::test]
+    async fn progressive_empty_inventory_cannot_be_undone_by_late_recent_runs() {
+        let route = "/repos/owner/repo/actions/runs?per_page=30&page=1";
+        let gate = std::sync::Arc::new(tokio::sync::Notify::new());
+        let client = client_with_gated_pages(
+            vec![
+                (
+                    route.into(),
+                    serde_json::json!({"total_count":1,"workflow_runs":[run_fixture(1,"CI")]}),
+                ),
+                (
+                    "/repos/owner/repo/actions/workflows?per_page=100&page=1".into(),
+                    serde_json::json!({"total_count":0,"workflows":[]}),
+                ),
+            ],
+            Some((route.into(), gate.clone())),
+        )
+        .await;
+        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let discovery = client.stream_latest_runs(sender);
+        tokio::pin!(discovery);
+        tokio::select! {
+            _ = &mut discovery => panic!("recent response held"),
+            update = receiver.recv() => assert!(matches!(update, Some(ActionsUpdate::Inventory(entries)) if entries.is_empty())),
+        }
+        gate.notify_one();
+        discovery.await.unwrap();
+        assert!(
+            client.runs_cache.lock().unwrap().latest.is_empty(),
+            "authoritative empty inventory must remain empty"
+        );
+    }
+
+    #[tokio::test]
+    async fn progressive_recent_jobs_survive_late_targeted_error() {
+        let target = "/repos/owner/repo/actions/workflows/2/runs?per_page=30&page=1";
+        let gate = std::sync::Arc::new(tokio::sync::Notify::new());
+        let client = client_with_gated_pages(vec![
+            ("/repos/owner/repo/actions/runs?per_page=30&page=1".into(), serde_json::json!({"total_count":1,"workflow_runs":[run_fixture(1,"CI")]})),
+            ("/repos/owner/repo/actions/workflows?per_page=100&page=1".into(), serde_json::json!({"total_count":2,"workflows":[{"id":1,"name":"CI"},{"id":2,"name":"Nightly"}]})),
+            ("/repos/owner/repo/actions/runs/1/jobs?per_page=100&page=1".into(), serde_json::json!({"total_count":1,"jobs":[{"name":"build","status":"completed","conclusion":"success"}]})),
+            (target.into(), serde_json::json!({"message":"late error"})),
+        ], Some((target.into(), gate.clone()))).await;
+        let app = std::sync::Arc::new(std::sync::Mutex::new(crate::app::App::new()));
+        let tick = super::super::poll_actions_tick(&app, &client);
+        tokio::pin!(tick);
+        let jobs_ready = async {
+            loop {
+                if app
+                    .lock()
+                    .unwrap()
+                    .workflow_groups
+                    .iter()
+                    .any(|g| g.name == "CI" && !g.jobs.is_empty())
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        };
+        tokio::select! {
+            _ = &mut tick => panic!("history held"),
+            ready = tokio::time::timeout(std::time::Duration::from_secs(3), jobs_ready) => ready.unwrap(),
+        }
+        assert_eq!(
+            app.lock()
+                .unwrap()
+                .workflow_groups
+                .iter()
+                .find(|g| g.name == "CI")
+                .unwrap()
+                .jobs
+                .len(),
+            1
+        );
+        gate.notify_one();
+        tick.await;
+        assert_eq!(client.runs_cache.lock().unwrap().latest["CI"].0, 1);
+        assert!(app
+            .lock()
+            .unwrap()
+            .warnings
+            .iter()
+            .any(|w| w.contains("no workflow_runs array")));
+    }
+
+    #[tokio::test]
+    async fn progressive_http_request_timeout_is_descriptive() {
+        let route = "/repos/owner/repo/actions/runs?per_page=30&page=1";
+        let client = client_with_gated_pages(
+            vec![(route.into(), serde_json::json!({}))],
+            Some((
+                route.into(),
+                std::sync::Arc::new(tokio::sync::Notify::new()),
+            )),
+        )
+        .await;
+        let error = client.get_json(route, false).await.err().unwrap();
+        assert!(error.to_string().contains("timed out after 15s"));
+        assert!(error.to_string().contains(route));
+    }
+
+    #[tokio::test]
+    async fn progressive_targeted_filtered_page_keeps_prs_and_finds_eligible_run() {
+        let mut bot = run_fixture(60, "Nightly");
+        bot["actor"]["login"] = serde_json::json!("renovate[bot]");
+        bot["event"] = serde_json::json!("pull_request_target");
+        bot["pull_requests"] = serde_json::json!([{"number":42}]);
+        let client = client_with_pages(vec![
+            ("/repos/owner/repo/actions/runs?per_page=30&page=1".into(), serde_json::json!({"total_count":1,"workflow_runs":[run_fixture(90,"CI")]})),
+            ("/repos/owner/repo/actions/workflows?per_page=100&page=1".into(), serde_json::json!({"total_count":3,"workflows":[{"id":1,"name":"CI"},{"id":2,"name":"Nightly"},{"id":3,"name":"Never"}]})),
+            ("/repos/owner/repo/actions/workflows/2/runs?per_page=30&page=1".into(), serde_json::json!({"total_count":31,"workflow_runs":vec![bot;30]})),
+            ("/repos/owner/repo/actions/workflows/2/runs?per_page=30&page=2".into(), serde_json::json!({"total_count":31,"workflow_runs":[run_fixture(30,"Nightly")]})),
+            ("/repos/owner/repo/actions/workflows/3/runs?per_page=30&page=1".into(), serde_json::json!({"total_count":0,"workflow_runs":[]})),
+        ]).await;
+        let page = client.list_latest_runs().await.unwrap();
+        assert!(page.pr_numbers.contains(&42));
+        assert!(page
+            .summaries
+            .iter()
+            .any(|s| s.workflow_name == "Nightly" && s.run_id == 30));
+        assert_eq!(page.summaries.len(), 2);
     }
 
     fn run_fixture(id: u64, name: &str) -> serde_json::Value {
@@ -639,6 +931,14 @@ mod tests {
                 {"id": 2, "name": "Nightly", "state": "active"},
             ]}),
         ));
+        pages.push((
+            "/repos/owner/repo/actions/workflows/1/runs?per_page=30&page=1".into(),
+            serde_json::json!({"total_count": 1, "workflow_runs": [run_fixture(60, "CI")]}),
+        ));
+        pages.push((
+            "/repos/owner/repo/actions/workflows/2/runs?per_page=30&page=1".into(),
+            serde_json::json!({"total_count": 1, "workflow_runs": [run_fixture(30, "Nightly")]}),
+        ));
         pages
     }
 
@@ -670,6 +970,7 @@ mod tests {
                 ("Removed", 1, BuildStatus::Succeeded),
             ]),
             calls: FULL_SCAN_EVERY - 1,
+            inventory: None,
         };
         assert_sparse_workflow_found(&client).await;
     }
@@ -690,7 +991,7 @@ mod tests {
         for run in pages[0].1["workflow_runs"].as_array_mut().unwrap() {
             run["actor"]["login"] = serde_json::json!("renovate[bot]");
         }
-        pages.last_mut().unwrap().1 = serde_json::json!({"total_count": 1, "workflows": [
+        pages[3].1 = serde_json::json!({"total_count": 1, "workflows": [
             {"id": 1, "name": "CI", "state": "active"},
         ]});
         let client = client_with_pages(pages).await;
@@ -711,21 +1012,43 @@ mod tests {
             ("CI", 89, BuildStatus::Succeeded),
             ("Nightly", 30, BuildStatus::Succeeded),
         ]);
+        client.runs_cache.lock().unwrap().inventory = Some(vec![
+            WorkflowInventoryEntry {
+                id: 1,
+                name: "CI".into(),
+            },
+            WorkflowInventoryEntry {
+                id: 2,
+                name: "Nightly".into(),
+            },
+        ]);
         assert_sparse_workflow_found(&client).await;
     }
 
     #[tokio::test]
     async fn pagination_unavailable_inventory_falls_back_to_bounded_scan() {
         let mut pages = sparse_run_pages();
-        pages.last_mut().unwrap().1 = serde_json::json!({"message": "unavailable"});
+        pages[3].1 = serde_json::json!({"message": "unavailable"});
         let client = client_with_pages(pages).await;
-        assert_sparse_workflow_found(&client).await;
+        assert!(client
+            .list_latest_runs()
+            .await
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("inventory unavailable"));
+        let cache = client.runs_cache.lock().unwrap();
+        assert_eq!(
+            cache.latest.get("Nightly"),
+            Some(&(30, BuildStatus::Succeeded))
+        );
+        assert_eq!(cache.latest.get("CI"), Some(&(90, BuildStatus::Succeeded)));
     }
 
     #[tokio::test]
     async fn pagination_unseen_workflows_cannot_exceed_run_page_cap() {
         let mut pages = sparse_run_pages();
-        let inventory = pages.pop().unwrap();
+        let inventory = pages.remove(3);
         let mut pages: Vec<_> = (1..=MAX_PAGES)
             .map(|page| {
                 let runs: Vec<_> = (0..30)
@@ -738,12 +1061,22 @@ mod tests {
             })
             .collect();
         pages.push(inventory);
+        for page in 1..=MAX_PAGES {
+            let mut bot_run = run_fixture(9000 - u64::from(page), "Nightly");
+            bot_run["actor"]["login"] = serde_json::json!("renovate[bot]");
+            pages.push((
+                format!("/repos/owner/repo/actions/workflows/2/runs?per_page=30&page={page}"),
+                serde_json::json!({"total_count":9000,"workflow_runs":vec![bot_run;30]}),
+            ));
+        }
         let client = client_with_pages(pages).await;
 
         // Nightly has no eligible run in the retained 1800-run lookback.
-        let result = client.list_latest_runs().await.unwrap();
-        assert_eq!(result.summaries.len(), 1);
-        assert_eq!(result.summaries[0].run_id, 8970);
+        let error = client.list_latest_runs().await.err().unwrap();
+        assert!(error.to_string().contains("exceeded 60 pages"));
+        let cache = client.runs_cache.lock().unwrap();
+        assert_eq!(cache.latest.len(), 1);
+        assert_eq!(cache.latest["CI"].0, 8970);
     }
 
     #[tokio::test]
@@ -808,6 +1141,15 @@ mod tests {
             pages.push((
                 format!("/repos/owner/repo/actions/workflows?per_page=100&page={page}"),
                 serde_json::json!({"total_count": 101, "workflows": workflows}),
+            ));
+        }
+        for id in 31..=101 {
+            let mut run = run_fixture(1000 - id, "CI");
+            run["name"] = serde_json::json!(format!("workflow-{id}"));
+            run["workflow_id"] = serde_json::json!(id);
+            pages.push((
+                format!("/repos/owner/repo/actions/workflows/{id}/runs?per_page=30&page=1"),
+                serde_json::json!({"total_count":1,"workflow_runs":[run]}),
             ));
         }
         pages.push((
@@ -878,26 +1220,35 @@ mod tests {
 
     #[test]
     fn full_scan_on_first_call() {
-        assert!(needs_full_scan(&HashMap::new(), 1));
+        assert!(needs_full_scan::<Vec<WorkflowInventoryEntry>>(&None, 1));
     }
 
     #[test]
     fn page_one_only_when_cache_warm() {
         let k = known(&[("CI", 1, BuildStatus::Succeeded)]);
-        assert!(!needs_full_scan(&k, 1));
+        assert!(!needs_full_scan(&Some(k), 1));
+    }
+
+    #[test]
+    fn known_empty_inventory_keeps_twentieth_call_refresh_cadence() {
+        let inventory: Option<Vec<WorkflowInventoryEntry>> = Some(vec![]);
+        for call in 1..FULL_SCAN_EVERY {
+            assert!(!needs_full_scan(&inventory, call));
+        }
+        assert!(needs_full_scan(&inventory, FULL_SCAN_EVERY));
     }
 
     #[test]
     fn periodic_full_rescan() {
         let k = known(&[("CI", 1, BuildStatus::Succeeded)]);
-        assert!(needs_full_scan(&k, FULL_SCAN_EVERY));
-        assert!(needs_full_scan(&k, 2 * FULL_SCAN_EVERY));
+        assert!(needs_full_scan(&Some(&k), FULL_SCAN_EVERY));
+        assert!(needs_full_scan(&Some(&k), 2 * FULL_SCAN_EVERY));
     }
 
     #[test]
     fn running_cached_run_does_not_force_full_scan() {
         let k = known(&[("CI", 1, BuildStatus::Running)]);
-        assert!(!needs_full_scan(&k, 1));
+        assert!(!needs_full_scan(&Some(k), 1));
     }
 
     #[test]
@@ -969,37 +1320,40 @@ mod tests {
     }
 
     #[test]
-    fn full_scan_result_replaces_cache() {
-        // full scan is authoritative: workflows gone from GitHub drop out
+    fn progressive_merge_rejects_delayed_older_run() {
+        let mut cache = known(&[("CI", 20, BuildStatus::Succeeded)]);
+        merge_latest(&mut cache, known(&[("CI", 10, BuildStatus::Running)]));
+        assert_eq!(cache["CI"], (20, BuildStatus::Succeeded));
+    }
+
+    #[test]
+    fn partial_scan_keeps_cache() {
         let mut k = known(&[("Old", 1, BuildStatus::Succeeded)]);
-        let fresh = known(&[("CI", 2, BuildStatus::Succeeded)]);
-        replace_latest(&mut k, fresh);
-        assert!(!k.contains_key("Old"));
+        merge_latest(&mut k, known(&[("CI", 2, BuildStatus::Succeeded)]));
+        assert!(k.contains_key("Old"));
         assert!(k.contains_key("CI"));
     }
 
     #[test]
     fn build_runs_route_no_branch() {
-        let route = build_runs_route("owner", "repo", 1, None);
+        let route = build_runs_route("owner", "repo", 1);
         assert_eq!(route, "/repos/owner/repo/actions/runs?per_page=30&page=1");
     }
 
-    #[test]
-    fn build_runs_route_with_branch() {
-        let route = build_runs_route("owner", "repo", 1, Some("master"));
-        assert_eq!(
-            route,
-            "/repos/owner/repo/actions/runs?per_page=30&page=1&branch=master"
-        );
+    #[tokio::test]
+    async fn progressive_branch_query_escapes_reserved_characters() {
+        let mut client = client_with_pages(vec![("/repos/owner/repo/actions/runs?per_page=30&page=1&branch=feature%2Fa%26status%3Dcompleted+%23%3F".into(), serde_json::json!({"total_count":0, "workflow_runs":[]}))]).await;
+        client.branch = Some("feature/a&status=completed #?".into());
+        client
+            .get_json(&build_runs_route("owner", "repo", 1), true)
+            .await
+            .unwrap();
     }
 
     #[test]
     fn build_runs_route_page_2() {
-        let route = build_runs_route("o", "r", 2, Some("main"));
-        assert_eq!(
-            route,
-            "/repos/o/r/actions/runs?per_page=30&page=2&branch=main"
-        );
+        let route = build_runs_route("o", "r", 2);
+        assert_eq!(route, "/repos/o/r/actions/runs?per_page=30&page=2");
     }
 
     #[test]
